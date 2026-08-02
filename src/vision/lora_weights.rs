@@ -44,6 +44,7 @@ use super::lora::LoraTensor;
 /// Returns one `LoraTensor` per key. The `name` field strips the
 /// `lora_A.` / `lora_B.` prefix so consumers see clean module paths
 /// (e.g. `head.cls.cv3.conv`).
+#[cfg(feature = "candle")]
 pub fn parse_safetensors_lora(
     path: &Path,
 ) -> Result<Vec<LoraTensor>, NeureError> {
@@ -107,6 +108,16 @@ pub fn parse_safetensors_lora(
     }
 
     Ok(result)
+}
+
+/// LoRA safetensors parsing stub for non-candle builds. Without the
+/// `candle` feature, the `safetensors` crate is not available; we
+/// return an empty tensor list (the metadata-only path still works).
+#[cfg(not(feature = "candle"))]
+pub fn parse_safetensors_lora(
+    _path: &Path,
+) -> Result<Vec<LoraTensor>, NeureError> {
+    Ok(Vec::new())
 }
 
 /// Merge LoRA A + B matrices into a single effective delta of shape
@@ -204,6 +215,7 @@ pub fn apply_lora_delta(
 
 /// Get the `safetensors::SafeTensorError` type alias
 /// (re-exported for callers that want to match on it).
+#[cfg(feature = "candle")]
 pub use safetensors::SafeTensorError as ParseError;
 
 #[cfg(test)]
@@ -325,6 +337,7 @@ mod tests {
         assert!(result.is_err());
     }
 
+    #[cfg(feature = "candle")]
     #[test]
     fn test_parse_safetensors_lora_strips_prefix() {
         // Build a minimal safetensors file in memory

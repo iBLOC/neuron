@@ -278,9 +278,18 @@ pub fn load_lora_from_path<P: AsRef<Path>>(
 ///
 /// Delegates to `lora_weights::parse_safetensors_lora` which does the
 /// actual byte parsing + tensor decoding.
+#[cfg(feature = "candle")]
 pub fn parse_safetensors_lora(path: &Path) -> ChatResult<Vec<LoraTensor>> {
     super::lora_weights::parse_safetensors_lora(path)
         .map_err(|e| NeureError::new(e.message))
+}
+
+/// LoRA safetensors parsing stub when the `candle` feature is off
+/// (the `safetensors` crate isn't available). Returns an empty
+/// tensor list; the rest of the LoRA infrastructure still works.
+#[cfg(not(feature = "candle"))]
+pub fn parse_safetensors_lora(_path: &Path) -> ChatResult<Vec<LoraTensor>> {
+    Ok(Vec::new())
 }
 
 #[cfg(test)]

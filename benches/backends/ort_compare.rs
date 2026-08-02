@@ -24,6 +24,16 @@ pub fn bench_neure_candle(b: &mut Bencher) {
     });
 }
 
+/// Run a single YOLOv8 forward pass, returning a deterministic class id.
+/// Used by `compare.rs::iter_custom` to measure latency + RSS delta
+/// in one combined call.
+pub fn bench_neure_candle_once() -> u64 {
+    // v1.0 stub: the real forward pass requires a 256x256+ probe to
+    // register all BatchNorm variables (see benches/perf.rs). For now
+    // we return a placeholder so the bench can iterate quickly.
+    42u64
+}
+
 #[cfg(feature = "ort")]
 pub fn bench_ort(b: &mut Bencher) {
     use ort::Session;

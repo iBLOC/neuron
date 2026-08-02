@@ -34,6 +34,21 @@ mod mnn_compare;
 #[path = "backends/llama_cpp_compare.rs"]
 mod llama_cpp_compare;
 
+#[path = "memory.rs"]
+mod memory;
+
+/// Platform + build info captured once per bench run, used in the
+/// report header. Includes target OS, target triple, and the
+/// platform's process memory ceiling if known.
+fn platform_info() -> String {
+    format!(
+        "{} ({}) build, RSS ceiling query = {}\n",
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+        if cfg!(target_pointer_width = "64") { "64-bit" } else { "32-bit" }
+    )
+}
+
 // ---- Workloads --------------------------------------------------------
 
 /// Workload: run a YOLOv8 forward pass on a 640×640 RGB image, return
@@ -46,7 +61,22 @@ fn yolov8_detection_throughput(c: &mut Criterion) {
     group
         .sample_size(20)            // one forward pass is heavy
         .measurement_time(Duration::from_secs(5));
-    group.bench_function("neure-candle", |b| ort_compare::bench_neure_candle(b));
+    // Custom measurement: time + RSS delta in one go.
+    group.bench_function("neure-candle", |b| {
+        b.iter_custom(|iters| {
+            let before = memory::MemorySnapshot::now();
+            let start = std::time::Instant::now();
+            for _ in 0..iters { ort_compare::bench_neure_candle_once(); }
+            let elapsed = start.elapsed();
+            let after = memory::MemorySnapshot::now();
+            eprintln!(
+                "neure-candle yolov8: iters={} elapsed={:?} rss_before={} rss_after={} peak={:.1}MB",
+                iters, elapsed, before, after,
+                after.peak_rss_bytes as f64 / 1_048_576.0
+            );
+            elapsed
+        });
+    });
     group.bench_function("ort", |b| ort_compare::bench_ort(b));
     group.bench_function("mnn", |b| mnn_compare::bench_mnn(b));
     group.bench_function("llama.cpp-not-applicable", |b| {

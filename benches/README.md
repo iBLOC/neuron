@@ -48,6 +48,24 @@ cargo bench --bench perf -- --quick
 
 This runs each benchmark with 1 sample and 1 iteration, completing in ~30 seconds.
 
+## Memory benchmarks (cross-platform)
+
+`benches/memory.rs` + `benches/memory_bench.rs` measure process-level memory (RSS, peak RSS, virtual, heap) across various operations. Platform support:
+
+| Platform | Mechanism | Function used |
+|---|---|---|
+| Linux | `/proc/self/status` (VmRSS, VmHWM, VmSize) | `MemorySnapshot::now()` |
+| macOS | `task_info` mach syscall | `MemorySnapshot::now()` |
+| Windows | `GetProcessMemoryInfo` (via `windows-sys`) | `MemorySnapshot::now()` |
+| Other | noop (returns 0) | — |
+
+```bash
+cargo bench --bench memory_bench
+# → target/criterion/memory_bench/{memory_rss_read_1mb,alloc_1mb,alloc_100mb,after_free}/report/
+```
+
+The `MemoryTrace` helper records RSS + peak RSS for a single benchmark iteration, useful for the comparative bench's report generator.
+
 ## Comparative benchmarks (vs MNN, llama.cpp, ONNX Runtime)
 
 The `compare.rs` benchmark + `backends/*.rs` stubs compare neure's inference latency against the mainstream frameworks:

@@ -23,6 +23,7 @@ pub mod coco_classes;
 pub mod letterbox;
 pub mod nms;
 pub mod lora;
+#[cfg(feature = "candle")]
 pub mod lora_weights;
 
 pub mod registry;
