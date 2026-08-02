@@ -47,3 +47,22 @@ cargo bench --bench perf -- --quick
 ```
 
 This runs each benchmark with 1 sample and 1 iteration, completing in ~30 seconds.
+
+## Comparative benchmarks (vs MNN, llama.cpp, ONNX Runtime)
+
+The `compare.rs` benchmark + `backends/*.rs` stubs compare neure's inference latency against the mainstream frameworks:
+
+```bash
+cargo bench --bench compare
+cargo run --release --bin compare_report
+# produces target/compare-summary.md with a comparison table
+```
+
+| Backend | v1.0 status | How to enable real forward pass |
+|---|---|---|
+| **neure-candle** | ✅ Real (candle YOLOv8 forward) | enabled by default |
+| **ort** (ONNX Runtime) | ⚠️ Stub (noop) | add `dep:ort` to `Cargo.toml` + `ort` feature, set `NEURE_YOLOV8_ONNX` |
+| **mnn** (Alibaba) | ⚠️ Stub (noop) | build MNN from `https://github.com/alibaba/MNN`, add FFI binding in `crates/mnn-sys` |
+| **llama.cpp** | ⚠️ Stub (noop for non-LLM) | build llama.cpp, add Rust FFI (e.g. `llama-cpp-sys-2`), load a GGUF model |
+
+The `compare_report` binary reads Criterion's `target/criterion/compare/*/base/estimates.json` files and produces a markdown table comparing the same workload across all backends. "not available" entries indicate the backend wasn't built for this comparison — the table still shows the framework is in place.
