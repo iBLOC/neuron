@@ -339,22 +339,20 @@ fn apply_port_env(cfg: &mut NeureConfig, env: &HashMap<String, String>) {
     // NEURE_PORT: parses as u16, invalid values fall back to the
     // default rather than panicking — env var typos shouldn't
     // crash startup.
-    if let Some(v) = env.get("NEURE_PORT") {
-        if let Ok(port) = v.parse::<u16>() {
+    if let Some(v) = env.get("NEURE_PORT")
+        && let Ok(port) = v.parse::<u16>() {
             cfg.port = port;
         }
-    }
 }
 
 fn apply_host_env(cfg: &mut NeureConfig, env: &HashMap<String, String>) {
     // NEURE_HOST: any non-empty string wins. Empty values fall
     // through to the default (0.0.0.0) so a stray `NEURE_HOST=`
     // shell export doesn't break bind.
-    if let Some(v) = env.get("NEURE_HOST") {
-        if !v.is_empty() {
+    if let Some(v) = env.get("NEURE_HOST")
+        && !v.is_empty() {
             cfg.host = v.clone();
         }
-    }
 }
 
 fn apply_model_dirs_env(cfg: &mut NeureConfig, env: &HashMap<String, String>) {
@@ -422,12 +420,11 @@ fn apply_per_model_sources_env(cfg: &mut NeureConfig, env: &HashMap<String, Stri
 fn apply_source_endpoints_env(cfg: &mut NeureConfig, env: &HashMap<String, String>) {
     // Source endpoints: NEURE_SOURCE_<ID>_ENDPOINT.
     for (k, v) in env {
-        if let Some(rest) = k.strip_prefix("NEURE_SOURCE_") {
-            if let Some(source_id) = rest.strip_suffix("_ENDPOINT") {
+        if let Some(rest) = k.strip_prefix("NEURE_SOURCE_")
+            && let Some(source_id) = rest.strip_suffix("_ENDPOINT") {
                 let id_lower = source_id.to_lowercase();
                 cfg.source_endpoints.insert(id_lower, v.clone());
             }
-        }
     }
 }
 

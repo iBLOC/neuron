@@ -45,7 +45,9 @@ use crate::llm::{ChatResult, ModelInfo};
 /// v1.0 only implements `Detect`. Other variants are reserved for v1.1+.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum VisionTask {
+    #[default]
     Detect,
     Classify,
     Segment,
@@ -73,9 +75,6 @@ impl VisionTask {
     }
 }
 
-impl Default for VisionTask {
-    fn default() -> Self { Self::Detect }
-}
 
 /// Vision engine backend + model-family selector.
 ///

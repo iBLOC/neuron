@@ -70,9 +70,9 @@ impl HuggingFaceSource {
         }
         // A bare command name — search PATH manually. This mirrors
         // the `which` semantics the model-scope source already uses.
-        if let Some(file_name) = self.cli_path.file_name() {
-            if file_name == self.cli_path.as_os_str() {
-                if let Ok(path) = std::env::var("PATH") {
+        if let Some(file_name) = self.cli_path.file_name()
+            && file_name == self.cli_path.as_os_str()
+                && let Ok(path) = std::env::var("PATH") {
                     for dir in path.split(':') {
                         let candidate = PathBuf::from(dir).join(file_name);
                         if candidate.is_file() {
@@ -80,8 +80,6 @@ impl HuggingFaceSource {
                         }
                     }
                 }
-            }
-        }
         false
     }
 }
@@ -204,13 +202,11 @@ impl HuggingFaceSource {
         let mut builder = reqwest::Client::builder()
             .user_agent("curl/7.88.1");
         for var in ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"] {
-            if let Ok(url) = std::env::var(var) {
-                if !url.is_empty() {
-                    if let Ok(p) = reqwest::Proxy::all(&url) {
+            if let Ok(url) = std::env::var(var)
+                && !url.is_empty()
+                    && let Ok(p) = reqwest::Proxy::all(&url) {
                         builder = builder.proxy(p);
                     }
-                }
-            }
         }
         // Attach an HF auth token if the user has configured one
         // (via the `HF_TOKEN` env var). The same token also
@@ -272,12 +268,11 @@ impl HuggingFaceSource {
 
             let parent = dest_dir.join(path).parent()
                 .map(|p| p.to_path_buf());
-            if let Some(p) = parent {
-                if !p.as_os_str().is_empty() {
+            if let Some(p) = parent
+                && !p.as_os_str().is_empty() {
                     tokio::fs::create_dir_all(&p).await
                         .map_err(|e| format!("failed to create parent dir: {e}"))?;
                 }
-            }
             let dest_path = dest_dir.join(path);
 
             // Build the resolve URL — works for both LFS (redirects to the
@@ -409,11 +404,10 @@ fn split_file_and_body(line: &str) -> Option<(String, &str)> {
         return Some((head.trim().to_string(), body));
     }
     // Bare `<file>: <bar>` (no "Downloading " prefix).
-    if let Some((file, body)) = line.split_once(':') {
-        if body.contains('|') && body.contains('[') {
+    if let Some((file, body)) = line.split_once(':')
+        && body.contains('|') && body.contains('[') {
             return Some((file.trim().to_string(), body));
         }
-    }
     None
 }
 

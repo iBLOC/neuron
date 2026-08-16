@@ -49,7 +49,7 @@ impl Chronos2Registry {
             )));
         }
         res.allocate(required_memory_bytes, &device)
-            .map_err(|e| NeureError::new(e))?;
+            .map_err(NeureError::new)?;
         self.registered.push(RegisteredChronos2 {
             model_id,
             device,

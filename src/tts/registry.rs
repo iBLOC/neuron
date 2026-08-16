@@ -41,7 +41,7 @@ impl TtsRuntimeRegistry {
             )));
         }
         res.allocate(required_memory_bytes, &device)
-            .map_err(|e| NeureError::new(e))?;
+            .map_err(NeureError::new)?;
 
         self.registered.push(RegisteredTts {
             model_id,
@@ -87,9 +87,7 @@ impl TtsRuntimeRegistry {
             }
             #[allow(unreachable_patterns)]
             _ => {
-                return Err(NeureError::new(format!(
-                    "TTS implementation 'burn' requires building neure with --features voxcpm"
-                )));
+                Err(NeureError::new("TTS implementation 'burn' requires building neure with --features voxcpm".to_string()))
             }
         }
     }

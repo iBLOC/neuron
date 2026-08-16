@@ -51,7 +51,7 @@ impl ServerState {
     /// Build a new server state by probing environment variables.
     pub fn new(config: NeureConfig) -> Self {
         let config_arc = Arc::new(config.clone());
-        let device = config.device.clone();
+        let device = config.device;
 
         // ---- LLM registry -------------------------------------------------
         let mut llm_registry = LlmRuntimeRegistry::new(config_arc.clone());
@@ -63,7 +63,7 @@ impl ServerState {
                     let model_id = std::env::var("NEURE_LLM_DEFAULT_MODEL")
                         .unwrap_or_else(|_| "qwen3-0.6b".to_string());
                     if let Err(e) = llm_registry.register(
-                        model_id.clone(), LlmImpl::Candle, device.clone(), 2_000_000_000,
+                        model_id.clone(), LlmImpl::Candle, device, 2_000_000_000,
                     ) {
                         eprintln!("[neure] Candle LLM register failed: {e}");
                     }
@@ -122,7 +122,7 @@ impl ServerState {
                     let _ = llm_registry.register(
                         reg.model_id.clone(),
                         impl_id,
-                        reg.device.clone(),
+                        reg.device,
                         reg.required_memory_bytes,
                     );
                 } else {
@@ -161,7 +161,7 @@ impl ServerState {
                     let _ = tts_registry.register(
                         reg.model_id.clone(),
                         impl_id,
-                        reg.device.clone(),
+                        reg.device,
                         reg.required_memory_bytes,
                     );
                 } else {
@@ -182,7 +182,7 @@ impl ServerState {
                 #[cfg(feature = "candle")]
                 {
                     let _ = asr_registry.register(
-                        "whisper-model".into(), crate::asr::AsrImpl::Candle, device.clone(), 1_500_000_000,
+                        "whisper-model".into(), crate::asr::AsrImpl::Candle, device, 1_500_000_000,
                     );
                 }
                 #[cfg(not(feature = "candle"))]
@@ -199,7 +199,7 @@ impl ServerState {
                     let _ = asr_registry.register(
                         reg.model_id.clone(),
                         impl_id,
-                        reg.device.clone(),
+                        reg.device,
                         reg.required_memory_bytes,
                     );
                 } else {
@@ -220,7 +220,7 @@ impl ServerState {
                 #[cfg(feature = "candle")]
                 {
                     let _ = rerank_registry.register(
-                        "bge-reranker-base".into(), crate::rerank::RerankImpl::Bge, device.clone(), 500_000_000,
+                        "bge-reranker-base".into(), crate::rerank::RerankImpl::Bge, device, 500_000_000,
                     );
                 }
                 #[cfg(not(feature = "candle"))]
@@ -232,7 +232,7 @@ impl ServerState {
                 #[cfg(feature = "candle")]
                 {
                     let _ = rerank_registry.register(
-                        "mxbai-rerank-base-v2".into(), crate::rerank::RerankImpl::Mxbai, device.clone(), 1_500_000_000,
+                        "mxbai-rerank-base-v2".into(), crate::rerank::RerankImpl::Mxbai, device, 1_500_000_000,
                     );
                 }
             }
@@ -240,7 +240,7 @@ impl ServerState {
                 #[cfg(feature = "candle")]
                 {
                     let _ = rerank_registry.register(
-                        "jina-reranker-base-v2".into(), crate::rerank::RerankImpl::Jina, device.clone(), 1_500_000_000,
+                        "jina-reranker-base-v2".into(), crate::rerank::RerankImpl::Jina, device, 1_500_000_000,
                     );
                 }
             }
@@ -263,7 +263,7 @@ impl ServerState {
                     let _ = rerank_registry.register(
                         reg.model_id.clone(),
                         impl_id,
-                        reg.device.clone(),
+                        reg.device,
                         reg.required_memory_bytes,
                     );
                 } else {
@@ -279,20 +279,17 @@ impl ServerState {
         // ---- Embedding registry -------------------------------------------
         let mut embedding_registry = crate::embedding::EmbeddingRuntimeRegistry::new(config_arc.clone());
         let embedding_runtime_env = std::env::var("NEURE_EMBEDDING_RUNTIME").ok();
-        match embedding_runtime_env.as_deref() {
-            Some("candle") => {
-                #[cfg(feature = "candle")]
-                {
-                    let _ = embedding_registry.register(
-                        "all-minilm-l6-v2".into(), crate::embedding::EmbeddingImpl::Candle, device.clone(), 200_000_000,
-                    );
-                }
-                #[cfg(not(feature = "candle"))]
-                {
-                    eprintln!("[neure] NEURE_EMBEDDING_RUNTIME=candle but candle feature not enabled");
-                }
+        if let Some("candle") = embedding_runtime_env.as_deref() {
+            #[cfg(feature = "candle")]
+            {
+                let _ = embedding_registry.register(
+                    "all-minilm-l6-v2".into(), crate::embedding::EmbeddingImpl::Candle, device, 200_000_000,
+                );
             }
-            _ => {}
+            #[cfg(not(feature = "candle"))]
+            {
+                eprintln!("[neure] NEURE_EMBEDDING_RUNTIME=candle but candle feature not enabled");
+            }
         }
 
         for reg in &config.registrations {
@@ -301,7 +298,7 @@ impl ServerState {
                     let _ = embedding_registry.register(
                         reg.model_id.clone(),
                         impl_id,
-                        reg.device.clone(),
+                        reg.device,
                         reg.required_memory_bytes,
                     );
                 } else {
@@ -324,7 +321,7 @@ impl ServerState {
                     let _ = vision_registry.register(
                         reg.model_id.clone(),
                         impl_id,
-                        reg.device.clone(),
+                        reg.device,
                         reg.required_memory_bytes,
                     );
                 } else {

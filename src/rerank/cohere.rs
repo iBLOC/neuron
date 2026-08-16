@@ -48,7 +48,7 @@ impl CohereConfig {
         let model = std::env::var("NEURE_COHERE_MODEL")
             .unwrap_or_else(|_| req_model.to_string());
         if model.is_empty() {
-            return Err(format!("CohereRerankRuntime: model name is empty"));
+            return Err("CohereRerankRuntime: model name is empty".to_string());
         }
         Ok(Self { api_key, endpoint, model })
     }

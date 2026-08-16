@@ -35,7 +35,10 @@ use thiserror::Error;
 
 use crate::config::{DeviceSelection, ResourceTracker};
 
+pub mod mask;
+pub mod metrics;
 pub mod registry;
+pub mod tokenizer;
 pub use registry::Chronos2Registry;
 
 #[cfg(feature = "chronos2")]
@@ -47,7 +50,7 @@ pub mod vendor;
 #[cfg(feature = "chronos2")]
 pub use candle_runtime::{CandleChronos2Error, CandleChronos2Runtime, Chronos2Config};
 #[cfg(feature = "chronos2")]
-pub use output::Chronos2OutputHead;
+pub use output::{Chronos2OutputHead, InterpolationMethod, OutputHeadConfig};
 #[cfg(feature = "chronos2")]
 pub use vendor::{T5Block, T5BlockConfig, T5BlockOutput, T5Embeddings, T5EmbeddingsConfig};
 

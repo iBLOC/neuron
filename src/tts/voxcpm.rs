@@ -201,7 +201,7 @@ impl TtsRuntime for VoxCpmTtsRuntime {
         // even without the voxcpm feature compiled in. The resolved
         // path is unused by the stub but checked for presence.
         let _path = Self::resolve_model_path(model)
-            .map_err(|e| NeureError::not_implemented(e))?;
+            .map_err(NeureError::not_implemented)?;
 
         let sample_rate = 24_000u32;
 

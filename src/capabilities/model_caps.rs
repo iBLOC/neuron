@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use super::{ApiStyle, Modality};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Default)]
 pub struct ModelCapabilities {
     pub engine_impl: String,
     pub model_id: String,
@@ -18,23 +19,6 @@ pub struct ModelCapabilities {
     pub max_output_tokens: Option<u32>,
 }
 
-impl Default for ModelCapabilities {
-    fn default() -> Self {
-        Self {
-            engine_impl: String::new(),
-            model_id: String::new(),
-            input_modalities: BTreeSet::new(),
-            output_modalities: BTreeSet::new(),
-            api_styles: BTreeSet::new(),
-            supports_streaming: false,
-            supports_tools: false,
-            supports_prompt_caching: false,
-            supports_extended_thinking: false,
-            context_window: None,
-            max_output_tokens: None,
-        }
-    }
-}
 
 #[cfg(test)]
 mod tests {

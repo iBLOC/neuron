@@ -48,11 +48,10 @@ pub async fn list_models(
     let filtered: Vec<_> = catalog_entries
         .into_iter()
         .filter(|e| {
-            if let Some(ref engine) = query.engine {
-                if e.engine != *engine {
+            if let Some(ref engine) = query.engine
+                && e.engine != *engine {
                     return false;
                 }
-            }
             if let Some(ref source) = query.source {
                 // An entry passes if any of its sources matches.
                 if !e.sources.iter().any(|s| &s.id == source) {

@@ -126,13 +126,11 @@ impl ModelScopeSource {
             // without one (returns 401 just like HuggingFace).
             .user_agent("curl/7.88.1");
         for var in ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"] {
-            if let Ok(url) = std::env::var(var) {
-                if !url.is_empty() {
-                    if let Ok(p) = reqwest::Proxy::all(&url) {
+            if let Ok(url) = std::env::var(var)
+                && !url.is_empty()
+                    && let Ok(p) = reqwest::Proxy::all(&url) {
                         builder = builder.proxy(p);
                     }
-                }
-            }
         }
 
         // Attach the ModelScope access token if the user has

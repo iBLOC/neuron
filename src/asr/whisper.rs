@@ -9,7 +9,7 @@
 //! Also requires `mel_filters.npz` or `mel_filters.safetensors` in the model directory
 //! (download from https://huggingface.co/spaces/lmz/candle-whisper/resolve/main/mel_filters.safetensors).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use async_trait::async_trait;
@@ -179,7 +179,7 @@ impl WhisperAsrRuntime {
         }
     }
 
-    fn load_mel_filters(path: &PathBuf, num_mel_bins: usize) -> Result<Vec<f32>, String> {
+    fn load_mel_filters(path: &Path, num_mel_bins: usize) -> Result<Vec<f32>, String> {
         let safetensors_path = path.join("mel_filters.safetensors");
         if safetensors_path.exists() {
             return Self::load_mel_safetensors(&safetensors_path, num_mel_bins);
@@ -191,7 +191,7 @@ impl WhisperAsrRuntime {
         Err("mel_filters file not found".to_string())
     }
 
-    fn load_mel_safetensors(path: &PathBuf, num_mel_bins: usize) -> Result<Vec<f32>, String> {
+    fn load_mel_safetensors(path: &Path, num_mel_bins: usize) -> Result<Vec<f32>, String> {
         use std::fs::File;
         use std::io::Read;
         let mut file = File::open(path).map_err(|e| format!("open mel_filters: {}", e))?;
@@ -213,9 +213,9 @@ impl WhisperAsrRuntime {
             ));
         }
         let mut filters = vec![0f32; num_mel_bins * N_MELS];
-        for i in 0..filters.len() {
+        for (i, filter) in filters.iter_mut().enumerate() {
             let offset = 8 + i * 4;
-            filters[i] = f32::from_le_bytes([bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3]]);
+            *filter = f32::from_le_bytes([bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3]]);
         }
         Ok(filters)
     }
@@ -235,7 +235,7 @@ impl WhisperAsrRuntime {
             let name_len = u16::from_le_bytes([bytes[pos + 28], bytes[pos + 29]]) as usize;
             let data_len = u32::from_le_bytes([bytes[pos + 32], bytes[pos + 33], bytes[pos + 34], bytes[pos + 35]]) as usize;
             let header_pos = pos + 30 + name_len;
-            let data_pos = (header_pos + (header_pos % 2)) as usize;
+            let data_pos = header_pos + (header_pos % 2);
             if data_pos + data_len > bytes.len() {
                 break;
             }
@@ -249,9 +249,9 @@ impl WhisperAsrRuntime {
                     ));
                 }
                 let mut filters = vec![0f32; num_mel_bins * N_MELS];
-                for i in 0..filters.len() {
+                for (i, filter) in filters.iter_mut().enumerate() {
                     let offset = data_pos + i * 4;
-                    filters[i] = f32::from_le_bytes([bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3]]);
+                    *filter = f32::from_le_bytes([bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3]]);
                 }
                 return Ok(filters);
             }

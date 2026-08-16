@@ -186,14 +186,13 @@ impl CandleYoloRuntime {
     /// Output is a 1-D tensor of length `num_classes`. Softmax is applied
     /// by the caller; this returns raw logits.
     fn forward_classify(&self, _letterboxed: &[u8]) -> Result<Vec<f32>, NeureError> {
-        if let Some(path) = &self.model_path {
-            if !Path::new(path).exists() {
+        if let Some(path) = &self.model_path
+            && !Path::new(path).exists() {
                 return Err(NeureError::not_initialized(format!(
                     "vision classify model not found at NEURE_VISION_MODEL_PATH={}",
                     path.display()
                 )));
             }
-        }
         Err(NeureError::not_implemented(
             "YOLOv8 classify head not yet implemented; pipeline is in place"
                 .to_string(),
@@ -337,7 +336,7 @@ impl CandleYoloRuntime {
         let mut candidates: Vec<Candidate> = raw
             .into_iter()
             .filter(|d| d.score >= conf_thresh)
-            .filter(|d| class_filter.map_or(true, |f| f.contains(&d.class_id)))
+            .filter(|d| class_filter.is_none_or(|f| f.contains(&d.class_id)))
             .map(|d| {
                 // YOLOv8 outputs (cx, cy, w, h). Convert to top-left (x, y, w, h).
                 let x_tl = d.x - d.w / 2.0;
@@ -440,7 +439,7 @@ impl CandleYoloRuntime {
 
         let candidates: Vec<Candidate> = raw.into_iter()
             .filter(|d| d.score >= conf_thresh)
-            .filter(|d| class_filter.map_or(true, |f| f.contains(&d.class_id)))
+            .filter(|d| class_filter.is_none_or(|f| f.contains(&d.class_id)))
             .map(|d| Candidate {
                 score: d.score,
                 class_id: d.class_id,

@@ -39,7 +39,7 @@ pub fn letterbox_rgb(src: &[u8], src_w: u32, src_h: u32, target: u32) -> Letterb
     let mut out = vec![114u8; (target as usize) * (target as usize) * 3];
 
     // Nearest-neighbor resize into the padded output
-    let _ = resize_into(src, src_w, src_h, &mut out, target, new_w, new_h, pad_x as u32, pad_y as u32);
+    resize_into(src, src_w, src_h, &mut out, target, new_w, new_h, pad_x as u32, pad_y as u32);
 
     Letterbox { image: out, out_w: target, out_h: target, scale, pad_x, pad_y }
 }

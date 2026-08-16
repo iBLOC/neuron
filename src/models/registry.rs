@@ -123,11 +123,10 @@ impl Registry {
     pub fn get(&self, engine: EngineType, id: &str) -> Option<DownloadedModel> {
         for root in &self.roots {
             let path = root.join(engine.as_str()).join(id);
-            if path.is_dir() {
-                if let Some(m) = self.scan_model_dir(engine, &path) {
+            if path.is_dir()
+                && let Some(m) = self.scan_model_dir(engine, &path) {
                     return Some(m);
                 }
-            }
         }
         None
     }
@@ -156,14 +155,13 @@ impl Registry {
             let metadata = entry.metadata().ok()?;
             if metadata.is_file() {
                 size_bytes += metadata.len();
-                if let Some(rel) = entry_path.strip_prefix(path).ok() {
+                if let Ok(rel) = entry_path.strip_prefix(path) {
                     files.push(rel.to_string_lossy().to_string());
                 }
-                if let Ok(mtime) = metadata.modified() {
-                    if mtime > latest_mtime {
+                if let Ok(mtime) = metadata.modified()
+                    && mtime > latest_mtime {
                         latest_mtime = mtime;
                     }
-                }
             }
         }
 

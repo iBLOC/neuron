@@ -166,7 +166,23 @@ impl CandleLlmRuntime {
                     Err("Metal not enabled. Rebuild with --features metal".to_string())
                 }
             }
-            DeviceSelection::Auto | DeviceSelection::Vulkan => Ok(Device::Cpu),
+            DeviceSelection::Auto => {
+                // Try CUDA first, then Metal, then fall back to CPU
+                #[cfg(feature = "cuda")]
+                {
+                    if let Ok(dev) = Device::new_cuda(0) {
+                        return Ok(dev);
+                    }
+                }
+                #[cfg(feature = "metal")]
+                {
+                    if let Ok(dev) = Device::new_metal(0) {
+                        return Ok(dev);
+                    }
+                }
+                Ok(Device::Cpu)
+            }
+            DeviceSelection::Vulkan => Ok(Device::Cpu),
         }
     }
 
@@ -868,7 +884,7 @@ impl crate::engine::LlmRuntime for CandleLlmRuntime {
         -> crate::llm::ChatResult<crate::canonical::CanonicalLlmResponse>
     {
         let chat_req = crate::llm::translators::canonical_to_chat_request(&req)
-            .map_err(|e| NeureError::new(e))?;
+            .map_err(NeureError::new)?;
         let chat_resp = self.chat(chat_req).await?;
         Ok(crate::llm::translators::chat_response_to_canonical(&req.model, chat_resp))
     }
@@ -877,7 +893,7 @@ impl crate::engine::LlmRuntime for CandleLlmRuntime {
         -> crate::llm::ChatResult<BoxStream<'static, crate::canonical::CanonicalLlmStreamEvent>>
     {
         let chat_req = crate::llm::translators::canonical_to_chat_request(&req)
-            .map_err(|e| NeureError::new(e))?;
+            .map_err(NeureError::new)?;
         let stream = self.chat_stream(chat_req).await?;
         use futures_util::StreamExt;
         Ok(Box::pin(stream.filter_map(|chunk| async move {

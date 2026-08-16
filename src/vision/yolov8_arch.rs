@@ -367,7 +367,8 @@ impl Yolov8Forward {
         //   model.3 = stage2
         //   ...
         // Map to: backbone.{stem|stageN|downN|sppf}
-        let mapped = if let Some(rest) = key.strip_prefix("model.") {
+        let mapped = {
+            let rest = key.strip_prefix("model.")?;
             let parts: Vec<&str> = rest.split('.').collect();
             if parts.is_empty() {
                 return None;
@@ -391,8 +392,6 @@ impl Yolov8Forward {
             } else {
                 format!("backbone.{stage}.{rest_of_path}{suffix}")
             }
-        } else {
-            return None;
         };
         Some(mapped)
     }

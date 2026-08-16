@@ -1,16 +1,12 @@
 name: rust
 
 # Run the Rust test suite, clippy lint, and full-feature build on every
-# push to main and on PRs that touch Rust source. Three jobs:
+# push to main and on PRs that touch Rust source. Five jobs:
 #   1. fmt+clippy:    fast static analysis (rustfmt + clippy deny warnings)
 #   2. test:          cargo test --lib with default features (matches local dev)
 #   3. all-features:  cargo build --all-features + cargo check --all-features --tests
-#                     (catches feature-flag interactions that default-feature
-#                     builds miss; runs in parallel with the above)
-#
-# The all-features job is the most expensive (~12-15 min cold) so it runs
-# in parallel with the cheaper fmt+clippy and test jobs. CI total wall time
-# is bounded by the slowest of the three.
+#   4. security:      cargo audit for security vulnerabilities
+#   5. coverage:      code coverage with cargo-tarpaulin
 
 on:
   push:
@@ -132,3 +128,45 @@ jobs:
 
       - name: Run unit tests (all features)
         run: cargo test --lib --all-features
+
+  security:
+    name: Security audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit
+
+      - name: Run security audit
+        run: cargo audit
+
+  coverage:
+    name: Code coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry + build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
+
+      - name: Install cargo-tarpaulin
+        run: cargo install cargo-tarpaulin
+
+      - name: Run code coverage
+        run: cargo tarpaulin --lib --out xml --output-dir coverage
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          files: coverage/cobertura.xml
+          fail_ci_if_error: false

@@ -67,10 +67,12 @@ const INPUT_SIZE: u32 = 640;
 /// which decoder to invoke.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum OrtOutputLayout {
     /// YOLOv8 / YOLOv11 anchor-based: output shape `[1, 4+num_classes, num_anchors]`.
     /// Each row is `[cx, cy, w, h, class_score_0, ..., class_score_{nc-1}]`.
     /// Per-class NMS required.
+    #[default]
     Yolov8,
     /// DETR / RF-DETR / RT-DETR query-based: output shape `[1, num_queries, 4+num_classes]`.
     /// Each row is `[cx, cy, w, h, class_score_0, ..., class_score_{nc-1}]` after sigmoid.
@@ -80,9 +82,6 @@ pub enum OrtOutputLayout {
     Florence2,
 }
 
-impl Default for OrtOutputLayout {
-    fn default() -> Self { Self::Yolov8 }
-}
 
 impl OrtOutputLayout {
     pub fn as_str(&self) -> &'static str {
@@ -205,9 +204,9 @@ impl OrtVisionRuntime {
 
         // Build the ONNX session. The ort API varies by version; we
         // use the most stable form available in 2.0-rc.
-        let session = build_session(&onnx_path)?;
+        build_session(&onnx_path)?;
 
-        *self.session.lock().unwrap() = Some(session);
+        *self.session.lock().unwrap() = Some(());
         *self.config.lock().unwrap() = Some(config);
         Ok(())
     }
@@ -295,8 +294,8 @@ impl OrtVisionRuntime {
             if best_score < conf_thresh {
                 continue;
             }
-            let cx = output[0 * num_anchors + anchor];
-            let cy = output[1 * num_anchors + anchor];
+            let cx = output[anchor];
+            let cy = output[num_anchors + anchor];
             let w = output[2 * num_anchors + anchor];
             let h = output[3 * num_anchors + anchor];
             candidates.push(Candidate {
@@ -372,7 +371,7 @@ impl OrtVisionRuntime {
 
         for q in 0..num_queries {
             let base = q * row_size;
-            let cx = output[base + 0];
+            let cx = output[base];
             let cy = output[base + 1];
             let w = output[base + 2];
             let h = output[base + 3];

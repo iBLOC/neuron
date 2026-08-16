@@ -18,6 +18,12 @@ pub struct CapabilityCatalog {
     by_model: RwLock<HashMap<String, ModelCapabilities>>,
 }
 
+impl Default for CapabilityCatalog {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CapabilityCatalog {
     pub fn new() -> Self {
         Self { by_model: RwLock::new(HashMap::new()) }

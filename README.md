@@ -743,6 +743,73 @@ src/
 
 neure supports three LLM engines: **candle** (default, Qwen2/3 + Llama2/3 + Phi-3 + Mistral + ChatGLM via `candle-transformers`), **litert** (opt-in, on-device .tflite via `litert_lm` bindings), and **mistralrs** (opt-in, 40+ model families with PagedAttention + ISQ via the mistral.rs engine). The split reflects different deployment targets: candle for development, litert for edge/mobile, mistralrs for unified multi-family coverage.
 
+## Chronos2 Time Series Forecasting
+
+neure includes a Chronos2 time series forecasting module that provides:
+
+- **Quantile tokenization** - Converts continuous time series to discrete tokens
+- **Multi-quantile output** - Produces probability distributions over forecast horizons
+- **Multiple interpolation methods** - Linear, nearest neighbor, cubic spline
+- **Confidence intervals** - Extract any confidence level (e.g., 90% CI)
+- **Evaluation metrics** - MAE, RMSE, MAPE, SMAPE, MASE
+- **Batch inference** - Process multiple time series in parallel
+
+### Forecast API
+
+```bash
+curl -X POST http://localhost:8083/v1/forecast \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "chronos-bolt-small",
+    "series": [1.0, 2.0, 3.0, 4.0, 5.0],
+    "horizon": 5,
+    "method": "mean"
+  }'
+```
+
+### Rust API
+
+```rust
+use neure::chronos2::{
+    CandleChronos2Runtime, ForecastRequest, ForecastMethod,
+    best_device,
+};
+
+// Load model
+let device = best_device();
+let rt = CandleChronos2Runtime::load("path/to/model", device)?;
+
+// Single forecast
+let request = ForecastRequest {
+    model: "chronos-bolt-small".into(),
+    series: vec![1.0, 2.0, 3.0, 4.0, 5.0],
+    horizon: 5,
+    method: ForecastMethod::Mean,
+};
+let response = rt.forecast(request).await?;
+
+// Batch forecast
+let series_list = vec![
+    vec![1.0, 2.0, 3.0],
+    vec![4.0, 5.0, 6.0],
+];
+let forecasts = rt.forecast_batch(&series_list, 3, ForecastMethod::Median).await?;
+```
+
+### Evaluation Metrics
+
+```rust
+use neure::chronos2::metrics::calculate_metrics;
+
+let actual = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+let predicted = vec![1.1, 2.2, 2.8, 4.1, 4.9];
+let metrics = calculate_metrics(&actual, &predicted, None);
+
+println!("MAE: {}", metrics.mae);
+println!("RMSE: {}", metrics.rmse);
+println!("MAPE: {}%", metrics.mape);
+```
+
 ## Three ML frameworks
 
 neure uses three ML frameworks: **candle** (for LLM, Rerank, ASR, Embedding), **burn** (for VoxCpm TTS), and **litert_lm** (for on-device LLM via Google LiteRT-LM). The candle/burn split is because VoxCpm is not in candle-transformers; vendoring the burn-based voxcpm_rs was the lowest-effort path to real TTS. litert_lm is a thin subprocess wrapper around Google's `lit` binary and is the only third-party framework without a Rust source fork — neure validates the model name against the `lit` registry's Gemma 3 set before calling `lit pull`.

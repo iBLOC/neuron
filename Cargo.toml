@@ -52,6 +52,8 @@ rubato = { version = "3", optional = true }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"], optional = true }
 base64 = { version = "0.22", optional = true }
 safetensors = { version = "0.4", optional = true }
+wide = { version = "0.7", optional = true }
+rayon = { version = "1.10", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = "0.2"
@@ -91,5 +93,7 @@ voxcpm = ["dep:burn", "dep:burn-store", "dep:hound"]
 litert = ["dep:litert-lm"]
 asr-audio = ["dep:symphonia", "dep:rubato"]
 mistralrs = ["dep:mistralrs", "candle"]
+simd = ["dep:wide"]
+parallel = ["dep:rayon"]
 
 

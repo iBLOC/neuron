@@ -8,7 +8,6 @@ use axum::{
     extract::{Request, State},
     response::Response,
 };
-use bytes::Bytes;
 use futures_util::StreamExt;
 use std::sync::Arc;
 
@@ -38,11 +37,9 @@ pub async fn adapter_dispatch_at(
     let headers = req.headers().clone();
 
     // Read the body into bytes (limited to 64 MiB for safety).
-    let body = Bytes::from(
-        axum::body::to_bytes(req.into_body(), 64 * 1024 * 1024)
+    let body = axum::body::to_bytes(req.into_body(), 64 * 1024 * 1024)
             .await
-            .map_err(|e| ApiError::Internal(format!("body read: {e}")))?
-    );
+            .map_err(|e| ApiError::Internal(format!("body read: {e}")))?;
 
     // 1. Find adapter
     let adapter = state.adapters.lookup_by_path(path)

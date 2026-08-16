@@ -6015,8 +6015,10 @@ dependencies = [
  "http-body-util",
  "hyper",
  "image",
+ "libc",
  "litert-lm",
  "mistralrs",
+ "rayon",
  "reqwest 0.12.28",
  "rubato 3.0.0",
  "safetensors 0.4.5",
@@ -6033,6 +6035,8 @@ dependencies = [
  "tower-http 0.6.11",
  "tracing",
  "uuid 1.23.3",
+ "wide",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

@@ -135,7 +135,7 @@ impl Puller {
     pub fn list_all(&self) -> Vec<DownloadJob> {
         let mut out: Vec<DownloadJob> =
             self.jobs.lock().unwrap().values().cloned().collect();
-        out.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+        out.sort_by_key(|b| std::cmp::Reverse(b.started_at));
         out
     }
 
@@ -148,8 +148,8 @@ impl Puller {
     /// cancelled; `false` if no such job or it already finished.
     pub fn cancel(&self, id: JobId) -> bool {
         let mut jobs = self.jobs.lock().unwrap();
-        if let Some(job) = jobs.get_mut(&id) {
-            if matches!(
+        if let Some(job) = jobs.get_mut(&id)
+            && matches!(
                 job.status,
                 JobStatus::Pending | JobStatus::InProgress
             ) {
@@ -164,7 +164,6 @@ impl Puller {
                 }
                 return true;
             }
-        }
         false
     }
 }

@@ -299,7 +299,7 @@ fn convert_content_block(b: AnthropicContentBlock) -> Result<ContentBlock, Strin
             Ok(ContentBlock::Image(ImageBlock { source: src, detail: None }))
         }
         AnthropicContentBlock::ToolUse { id, name, input, .. } =>
-            Ok(ContentBlock::ToolUse(ToolUseBlock { id, name, input: input })),
+            Ok(ContentBlock::ToolUse(ToolUseBlock { id, name, input })),
         AnthropicContentBlock::ToolResult { tool_use_id, content, is_error, .. } => {
             let inner: Vec<ContentBlock> = match content {
                 AnthropicToolResultContent::String(s) => vec![ContentBlock::Text(TextBlock { text: s })],

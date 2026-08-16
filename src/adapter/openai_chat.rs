@@ -272,7 +272,7 @@ impl ApiAdapter for OpenAiChatAdapter {
 
     fn serialize_response(&self, resp: &CanonicalResponse) -> ApiResult<Bytes> {
         let CanonicalResponse::Llm(llm) = resp else {
-            return Err(ApiError::Serialize(format!("OpenAI chat got non-LLM response")));
+            return Err(ApiError::Serialize("OpenAI chat got non-LLM response".to_string()));
         };
         let wire = canonical_to_openai(llm);
         serde_json::to_vec(&wire)

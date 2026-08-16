@@ -176,4 +176,230 @@ mod tests {
             other => panic!("expected BadRequest, got: {other:?}"),
         }
     }
+
+    // -- Router creation tests ---------------------------------------------
+
+    #[test]
+    fn test_create_router_returns_router() {
+        let config = crate::config::NeureConfig::default();
+        let _router = create_router(config);
+        // Router creation should not panic.
+    }
+
+    // -- Health endpoint tests ---------------------------------------------
+
+    #[tokio::test]
+    async fn test_health_handler_returns_200() {
+        let resp = handlers::health_handler().await.into_response();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = to_bytes(resp.into_body(), 1024).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["status"], "healthy");
+        assert_eq!(json["service"], "neure");
+    }
+
+    // -- Info endpoint tests -----------------------------------------------
+
+    #[tokio::test]
+    async fn test_info_handler_returns_version() {
+        let config = crate::config::NeureConfig::default();
+        let state = ServerState::new(config);
+        let resp = handlers::info_handler(axum::extract::State(state)).await.into_response();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = to_bytes(resp.into_body(), 1024).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["object"], "info");
+        assert!(json["version"].is_string());
+        assert!(json["capabilities"]["llm"].as_bool().unwrap());
+        assert!(json["capabilities"]["tts"].as_bool().unwrap());
+        assert!(json["capabilities"]["asr"].as_bool().unwrap());
+        assert!(json["capabilities"]["rerank"].as_bool().unwrap());
+        assert!(json["capabilities"]["vision"].as_bool().unwrap());
+    }
+
+    // -- Model list endpoint tests -----------------------------------------
+
+    #[tokio::test]
+    async fn test_list_models_returns_empty_list() {
+        let config = crate::config::NeureConfig::default();
+        let state = ServerState::new(config);
+        let resp = handlers::list_models(axum::extract::State(state)).await.into_response();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = to_bytes(resp.into_body(), 1024).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["object"], "list");
+        assert!(json["data"].is_array());
+    }
+
+    // -- Chat completions validation tests ---------------------------------
+
+    #[tokio::test]
+    async fn test_chat_completions_empty_messages_returns_400() {
+        let config = crate::config::NeureConfig::default();
+        let state = ServerState::new(config);
+        let req = handlers::ChatCompletionsRequest {
+            model: "test".into(),
+            messages: vec![],
+            temperature: 0.0,
+            max_tokens: None,
+            stream: false,
+            stop: None,
+            top_k: None,
+        };
+        let resp = handlers::chat_completions(
+            axum::extract::State(state),
+            axum::Json(req),
+        ).await;
+        assert!(resp.is_err());
+        let err = resp.unwrap_err();
+        match err {
+            ServerError::BadRequest(msg) => assert!(msg.contains("messages")),
+            other => panic!("expected BadRequest, got: {other:?}"),
+        }
+    }
+
+    // -- Speech validation tests -------------------------------------------
+
+    #[tokio::test]
+    async fn test_audio_speech_empty_input_returns_400() {
+        let config = crate::config::NeureConfig::default();
+        let state = ServerState::new(config);
+        let req = handlers::SpeechRequest {
+            model: None,
+            input: "".into(),
+            voice: None,
+            speed: 1.0,
+            response_format: "mp3".into(),
+            stream: false,
+        };
+        let resp = handlers::audio_speech(
+            axum::extract::State(state),
+            axum::Json(req),
+        ).await;
+        assert!(resp.is_err());
+        let err = resp.unwrap_err();
+        match err {
+            ServerError::BadRequest(msg) => assert!(msg.contains("input")),
+            other => panic!("expected BadRequest, got: {other:?}"),
+        }
+    }
+
+    // -- Forecast validation tests -----------------------------------------
+
+    #[tokio::test]
+    async fn test_forecast_empty_series_returns_400() {
+        let config = crate::config::NeureConfig::default();
+        let state = ServerState::new(config);
+        let req = crate::chronos2::ForecastRequest {
+            model: "test".into(),
+            series: vec![],
+            horizon: 5,
+            method: crate::chronos2::ForecastMethod::Mean,
+        };
+        let resp = handlers::forecast(
+            axum::extract::State(state),
+            axum::Json(req),
+        ).await;
+        assert!(resp.is_err());
+        let err = resp.unwrap_err();
+        match err {
+            ServerError::BadRequestWithParam(msg, param) => {
+                assert!(msg.contains("series"));
+                assert_eq!(param, "series");
+            }
+            other => panic!("expected BadRequestWithParam, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_forecast_zero_horizon_returns_400() {
+        let config = crate::config::NeureConfig::default();
+        let state = ServerState::new(config);
+        let req = crate::chronos2::ForecastRequest {
+            model: "test".into(),
+            series: vec![1.0, 2.0, 3.0],
+            horizon: 0,
+            method: crate::chronos2::ForecastMethod::Mean,
+        };
+        let resp = handlers::forecast(
+            axum::extract::State(state),
+            axum::Json(req),
+        ).await;
+        assert!(resp.is_err());
+        let err = resp.unwrap_err();
+        match err {
+            ServerError::BadRequestWithParam(msg, param) => {
+                assert!(msg.contains("horizon"));
+                assert_eq!(param, "horizon");
+            }
+            other => panic!("expected BadRequestWithParam, got: {other:?}"),
+        }
+    }
+
+    // -- Embedding validation tests ----------------------------------------
+
+    #[tokio::test]
+    async fn test_embedding_empty_texts_returns_400() {
+        let config = crate::config::NeureConfig::default();
+        let state = ServerState::new(config);
+        let req = handlers::EmbeddingHttpRequest {
+            model: "test".into(),
+            input: crate::embedding::EmbeddingInput::Single("".into()),
+            user: None,
+            encoding_format: None,
+        };
+        let resp = handlers::embedding_handler(
+            axum::extract::State(state),
+            axum::Json(req),
+        ).await;
+        assert!(resp.is_err());
+    }
+
+    // -- Rerank validation tests -------------------------------------------
+
+    #[tokio::test]
+    async fn test_rerank_empty_query_returns_400() {
+        let config = crate::config::NeureConfig::default();
+        let state = ServerState::new(config);
+        let req = handlers::RerankHttpRequest {
+            model: "test".into(),
+            query: "".into(),
+            documents: vec!["doc1".into()],
+            top_n: None,
+            return_documents: None,
+        };
+        let resp = handlers::rerank(
+            axum::extract::State(state),
+            axum::Json(req),
+        ).await;
+        assert!(resp.is_err());
+    }
+
+    // -- Vision validation tests -------------------------------------------
+
+    #[tokio::test]
+    async fn test_vision_detect_missing_model_returns_400() {
+        let config = crate::config::NeureConfig::default();
+        let state = ServerState::new(config);
+        let req = crate::vision::VisionRequest {
+            model: "".into(),
+            image: crate::vision::VisionImageSource::ImageUrl {
+                image_url: crate::vision::VisionImageUrl {
+                    url: "test".into(),
+                    detail: None,
+                },
+            },
+            task: crate::vision::VisionTask::Detect,
+            confidence_threshold: None,
+            iou_threshold: None,
+            max_detections: None,
+            classes: None,
+            lora_adapters: None,
+        };
+        let resp = handlers::vision_detect(
+            axum::extract::State(state),
+            axum::Json(req),
+        ).await;
+        assert!(resp.is_err());
+    }
 }
