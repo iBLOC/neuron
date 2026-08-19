@@ -35,14 +35,18 @@ use axum::{
 };
 use crate::config::NeureConfig;
 
-/// Build the full axum [`Router`] with all endpoints registered.
+/// Build the axum route table for the OpenAI-compatible surface.
+/// Hosts that already own a [`ServerState`] (built from
+/// [`ServerState::new`] or a custom constructor) call this to
+/// obtain the routes without `create_router`'s implicit state
+/// construction. The returned router carries `ServerState` as its
+/// state type; combine it into a host tree with
+/// `routes().with_state(state)` (axum 0.8 erases the state type
+/// when the host wraps it in a `Router<()>` via merge/nest).
 ///
-/// Called from [`embedded.rs`](crate::run_embedded) and also usable
-/// by external host processes that want to embed the router in their
-/// own axum application.
-pub fn create_router(config: NeureConfig) -> Router {
-    let state = ServerState::new(config);
-
+/// Most callers want [`create_router`] instead — that wires state
+/// up automatically from `NeureConfig`.
+pub fn routes() -> Router<ServerState> {
     Router::new()
         .route("/health", get(health_handler))
         .route("/v1/info", get(info_handler))
@@ -76,7 +80,18 @@ pub fn create_router(config: NeureConfig) -> Router {
         )
         .route("/v1/messages", post(crate::server::dispatch::adapter_dispatch))
         .route("/v1/forecast", post(forecast))
-        .with_state(state)
+}
+
+/// Build the full axum [`Router`] with all endpoints registered.
+///
+/// Called from [`embedded.rs`](crate::run_embedded) and also usable
+/// by external host processes that want to embed the router in their
+/// own axum application. The returned router is `Router<()>`
+/// (state-erased) so it can be merged into a host's larger router
+/// tree without state-type gymnastics.
+pub fn create_router(config: NeureConfig) -> Router {
+    let state = ServerState::new(config);
+    routes().with_state(state)
 }
 
 #[cfg(test)]
