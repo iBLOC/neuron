@@ -50,14 +50,43 @@ use super::{
 use crate::config::DeviceSelection;
 use crate::llm::{ChatResult, ModelInfo, NeureError};
 
-/// Forward-declared placeholder for the concrete ONNX session type.
+/// Trait for ONNX session implementations. Users implement this
+/// trait for their chosen backend (tract, ort, onnxruntime, etc.)
+/// and pass an instance to `OrtVisionRuntime::new_with_session()`.
 ///
-/// This indirection lets the runtime compile without the `ort` crate
-/// being a hard dependency. To activate real ONNX inference, set the
-/// `ort` Cargo feature (currently a placeholder, see Cargo.toml —
-/// upstream ort 2.0.0-rc.12 has a vitis.rs compile bug) or implement
-/// a custom session backend and populate the type alias here.
-pub type OrtSession = ();
+/// This decouples the session from any specific ONNX runtime crate,
+/// allowing users to bring their own executor.
+pub trait OrtSessionRunner: Send + Sync + 'static {
+    fn run_inference(
+        &self,
+        input_name: &str,
+        input: &[f32],
+        input_shape: &[i64],
+        output_names: &[String],
+    ) -> Result<(Vec<f32>, Vec<i64>), NeureError>;
+}
+
+/// Concrete wrapper for the ONNX session. Holds a trait object
+/// that can be any `OrtSessionRunner` implementation.
+pub struct OrtSession {
+    inner: Box<dyn OrtSessionRunner>,
+}
+
+impl OrtSession {
+    pub fn new(runner: impl OrtSessionRunner) -> Self {
+        Self { inner: Box::new(runner) }
+    }
+
+    pub fn run(
+        &self,
+        input_name: &str,
+        input: &[f32],
+        input_shape: &[i64],
+        output_names: &[String],
+    ) -> Result<(Vec<f32>, Vec<i64>), NeureError> {
+        self.inner.run_inference(input_name, input, input_shape, output_names)
+    }
+}
 
 const INPUT_SIZE: u32 = 640;
 
@@ -202,11 +231,10 @@ impl OrtVisionRuntime {
             OrtModelConfig::default()
         };
 
-        // Build the ONNX session. The ort API varies by version; we
-        // use the most stable form available in 2.0-rc.
-        build_session(&onnx_path)?;
+        // Build the ONNX session.
+        let session = build_session(&onnx_path)?;
 
-        *self.session.lock().unwrap() = Some(());
+        *self.session.lock().unwrap() = Some(session);
         *self.config.lock().unwrap() = Some(config);
         Ok(())
     }
@@ -455,6 +483,10 @@ OrtOutputLayout::Florence2 => {
 }
 
 fn build_session(_onnx_path: &Path) -> Result<OrtSession, NeureError> {
+    // The real build_session constructs an OrtSession from a concrete
+    // OrtSessionRunner implementation (e.g. tract, ort, onnxruntime).
+    // The runner loads the ONNX model from the path and prepares it
+    // for inference.
     Err(NeureError::not_implemented(
         "ONNX session construction requires a concrete backend (ort / tract / onnxruntime); \
          plug one in by replacing `build_session` with the real implementation. \
@@ -465,18 +497,13 @@ fn build_session(_onnx_path: &Path) -> Result<OrtSession, NeureError> {
 }
 
 fn run_session(
-    _session: &mut OrtSession,
-    _input_name: &str,
-    _input_tensor: &[f32],
-    _input_shape: &[i64],
-    _output_names: &[String],
+    session: &mut OrtSession,
+    input_name: &str,
+    input_tensor: &[f32],
+    input_shape: &[i64],
+    output_names: &[String],
 ) -> Result<(Vec<f32>, Vec<i64>), NeureError> {
-    Err(NeureError::not_implemented(
-        "ONNX inference requires a concrete backend; plug one in via `run_session`. \
-         The runtime owns preprocessing, dispatch, and postprocessing; the executor \
-         only needs to invoke session.run() and flatten the output tensor to Vec<f32>."
-            .to_string(),
-    ))
+    session.run(input_name, input_tensor, input_shape, output_names)
 }
 
 #[async_trait]

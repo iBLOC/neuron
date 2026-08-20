@@ -17,3 +17,4 @@
 //! wire `build_session` + `run_session` to it.
 
 pub mod tract_backend;
+pub use tract_backend::TractSession;

@@ -54,6 +54,8 @@ base64 = { version = "0.22", optional = true }
 safetensors = { version = "0.4", optional = true }
 wide = { version = "0.7", optional = true }
 rayon = { version = "1.10", optional = true }
+ndarray = { version = "0.16", optional = true }
+tract-onnx = { version = "0.21", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = "0.2"
@@ -95,5 +97,7 @@ asr-audio = ["dep:symphonia", "dep:rubato"]
 mistralrs = ["dep:mistralrs", "candle"]
 simd = ["dep:wide"]
 parallel = ["dep:rayon"]
+ndarray = ["dep:ndarray"]
+tract = ["dep:tract-onnx", "dep:ndarray"]
 
 
