@@ -621,4 +621,79 @@ mod tests {
         assert_eq!(rgb[1], 0);
         assert_eq!(rgb[2], 0);
     }
+
+    #[test]
+    fn test_vision_task_parse_classify() {
+        assert_eq!(VisionTask::parse("classify").unwrap(), VisionTask::Classify);
+    }
+
+    #[test]
+    fn test_vision_task_parse_segment() {
+        assert_eq!(VisionTask::parse("segment").unwrap(), VisionTask::Segment);
+    }
+
+    #[test]
+    fn test_vision_task_parse_pose() {
+        assert_eq!(VisionTask::parse("pose").unwrap(), VisionTask::Pose);
+    }
+
+    #[test]
+    fn test_vision_task_parse_case_insensitive() {
+        assert_eq!(VisionTask::parse("CLASSIFY").unwrap(), VisionTask::Classify);
+        assert_eq!(VisionTask::parse("Segment").unwrap(), VisionTask::Segment);
+    }
+
+    #[test]
+    fn test_vision_task_parse_unknown_errors() {
+        assert!(VisionTask::parse("unknown").is_err());
+        assert!(VisionTask::parse("").is_err());
+    }
+
+    #[test]
+    fn test_vision_impl_parse_unknown_errors() {
+        use super::super::VisionImpl;
+        assert!(VisionImpl::parse("unknown").is_err());
+        assert!(VisionImpl::parse("candle").is_err());
+    }
+
+    #[test]
+    fn test_bbox_serde_roundtrip() {
+        let bbox = BBox { x: 10.0, y: 20.0, w: 30.0, h: 40.0 };
+        let json = serde_json::to_string(&bbox).unwrap();
+        let back: BBox = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.x, 10.0);
+        assert_eq!(back.w, 30.0);
+    }
+
+    #[test]
+    fn test_detection_serde_roundtrip() {
+        let det = Detection {
+            class_id: 0,
+            class_name: "person".into(),
+            confidence: 0.95,
+            bbox: BBox { x: 100.0, y: 200.0, w: 50.0, h: 150.0 },
+            lora_id: Some("warehouse-v1".into()),
+        };
+        let json = serde_json::to_string(&det).unwrap();
+        assert!(json.contains("warehouse-v1"));
+        assert!(json.contains("0.95"));
+    }
+
+    #[test]
+    fn test_coco_class_id_to_name_roundtrip() {
+        for i in 0..80 {
+            let name = coco_classes::class_name(i);
+            assert!(!name.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_supported_tasks_includes_all_four() {
+        let rt = CandleYoloRuntime::new("yolov8n", &DeviceSelection::Cpu);
+        let tasks = rt.supported_tasks();
+        assert!(tasks.contains(&VisionTask::Detect));
+        assert!(tasks.contains(&VisionTask::Classify));
+        assert!(tasks.contains(&VisionTask::Segment));
+        assert!(tasks.contains(&VisionTask::Pose));
+    }
 }
