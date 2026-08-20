@@ -17,6 +17,8 @@ pub mod yolov8_arch;
 pub mod rtdetr_arch;
 #[cfg(feature = "candle")]
 pub use candle_yolo::CandleYoloRuntime;
+#[cfg(feature = "candle")]
+pub use rtdetr_arch::{RtDetrRuntime, DetrRuntime};
 
 pub mod ort_runtime;
 pub use ort_runtime::{OrtModelConfig, OrtSession, OrtVisionRuntime};
