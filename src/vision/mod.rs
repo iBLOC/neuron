@@ -14,6 +14,8 @@ pub mod candle_yolo;
 pub mod yolov8_arch;
 
 #[cfg(feature = "candle")]
+pub mod rtdetr_arch;
+#[cfg(feature = "candle")]
 pub use candle_yolo::CandleYoloRuntime;
 
 pub mod ort_runtime;
