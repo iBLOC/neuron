@@ -128,6 +128,11 @@ pub fn default_capabilities() -> Vec<ModelCapabilities> {
         // Florence-2 (vision-language, text-prompted)
         cap("ort", "florence-2-base", &[ImageInput], &[BoundingBox],
             &[ApiStyle::openai_vision()], false, false, false, false),
+        // Mage-VL (codec-native streaming VLM, image+video understanding)
+        // Apache-2.0 license. Uses mistralrs backend for inference.
+        cap("mistralrs", "microsoft/Mage-VL", &[ImageInput, TextInput], &[TextOutput],
+            &[ApiStyle::openai_chat(), ApiStyle::anthropic_messages()],
+            true, true, false, false),
 
         cap("litert", "gemma-3n-e2b-it", &[TextInput], &[TextOutput],
             &[ApiStyle::openai_chat(), ApiStyle::anthropic_messages()], true, false, false, false),
