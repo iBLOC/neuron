@@ -58,6 +58,14 @@ impl ServerState {
 
         // ---- LLM registry -------------------------------------------------
         let mut llm_registry = LlmRuntimeRegistry::new(config_arc.clone());
+
+        // New-dispatch engines (state.engines.llm). Built as a
+        // mutable local first so the env match below can register
+        // mage-vl into it before we wrap it in an Arc for
+        // self.engines.
+        let mut engines =
+            crate::engine::registry::CapabilityRegistries::new();
+
         let llm_runtime_env = std::env::var("NEURE_LLM_RUNTIME").ok();
         match llm_runtime_env.as_deref() {
             Some("candle") => {
@@ -112,6 +120,42 @@ impl ServerState {
                         "[neure] NEURE_LLM_RUNTIME=mistralrs but mistralrs feature not enabled"
                     );
                 }
+            }
+            Some("mage_vl") => {
+                let model_id = std::env::var("NEURE_MAGE_VL_MODEL_ID")
+                    .unwrap_or_else(|_| "microsoft/Mage-VL".to_string());
+                let shard_dir = std::env::var("NEURE_MAGE_VL_SHARD_DIR")
+                    .unwrap_or_else(|_| {
+                        "/home/ibloc/Projects/OpenSourceProjects/mage/mage-vl-checkpoint".to_string()
+                    });
+                if !std::path::Path::new(&shard_dir)
+                    .join("model-00001-of-00002.safetensors")
+                    .exists()
+                {
+                    eprintln!(
+                        "[neure] NEURE_LLM_RUNTIME=mage_vl but shards not found at {shard_dir}. \
+                         Set NEURE_MAGE_VL_SHARD_DIR to the directory containing the two \
+                         model-0000X-of-00002.safetensors shards."
+                    );
+                }
+                // `MageVlRuntime` already implements `engine::LlmRuntime`,
+                // so the blanket `AnyCapabilityEngine for T: LlmRuntime`
+                // impl applies and it can sit in `state.engines.llm`
+                // directly. This routes /v1/chat/completions through
+                // the new dispatch path (`state.engines.lookup`) rather
+                // than the legacy `llm_registry.runtime_for` fallback.
+                let engine: std::sync::Arc<dyn crate::engine::AnyCapabilityEngine> =
+                    std::sync::Arc::new(crate::mage_vl::runtime::MageVlRuntime::new(
+                        crate::mage_vl::config::MageVLConfig::default(),
+                        shard_dir.clone(),
+                    ));
+                engines.llm.register(model_id.clone(), engine.clone());
+                if engines.llm.default().is_none() {
+                    engines.llm.set_default(engine);
+                }
+                eprintln!(
+                    "[neure] registered mage-vl runtime for {model_id} (shards at {shard_dir})"
+                );
             }
             _ => {}
         }
@@ -433,7 +477,7 @@ impl ServerState {
             rerank: rerank_shortcut,
             embedding: embedding_shortcut,
             vision: vision_shortcut,
-            engines: Arc::new(crate::engine::registry::CapabilityRegistries::new()),
+            engines: Arc::new(engines),
             adapters: {
                 let adapters = Arc::new(crate::adapter::registry::AdapterRegistry::new());
                 adapters.register(Arc::new(crate::adapter::openai_chat::OpenAiChatAdapter))
@@ -507,5 +551,67 @@ impl ServerState {
         }
 
         models
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::NeureConfig;
+
+    /// Drive the `NEURE_LLM_RUNTIME=mage_vl` registration branch.
+    /// The shards aren't on disk in CI by default, so this test
+    /// only checks the *registration path* fires (engine_impl =
+    /// "mage_vl", model_id = "microsoft/Mage-VL") rather than
+    /// running a real forward. The full forward path is covered
+    /// by the gated integration test in `mage_vl::runtime`.
+    #[test]
+    #[serial_test::serial]
+    fn mage_vl_runtime_registers_under_mage_vl_env_var() {
+        // Snapshot and restore so the test doesn't leak into other
+        // tests in the same process.
+        let prev = std::env::var("NEURE_LLM_RUNTIME").ok();
+        let prev_shard = std::env::var("NEURE_MAGE_VL_SHARD_DIR").ok();
+        // Point at a path that doesn't have shards so the runtime
+        // path is exercised but the actual model load (and its
+        // ~3.5GB cost) is skipped. The shard-existence check only
+        // logs a warning — it doesn't fail the build.
+        //
+        // Safety: `set_var`/`remove_var` are single-threaded here —
+        // the test harness runs this test on its own thread and
+        // nothing else reads the environment while the ServerState
+        // constructor runs inside the same thread.
+        unsafe {
+            std::env::set_var("NEURE_LLM_RUNTIME", "mage_vl");
+            std::env::set_var("NEURE_MAGE_VL_SHARD_DIR", "/tmp/no-such-mage-vl-shards");
+        }
+
+        let state = ServerState::new(NeureConfig::default());
+        // Restore envs before assertions to keep the test idempotent.
+        unsafe {
+            if let Some(v) = prev {
+                std::env::set_var("NEURE_LLM_RUNTIME", v);
+            } else {
+                std::env::remove_var("NEURE_LLM_RUNTIME");
+            }
+            if let Some(v) = prev_shard {
+                std::env::set_var("NEURE_MAGE_VL_SHARD_DIR", v);
+            } else {
+                std::env::remove_var("NEURE_MAGE_VL_SHARD_DIR");
+            }
+        }
+
+        let engine = state
+            .engines
+            .lookup(crate::capabilities::Capability::Llm, "microsoft/Mage-VL")
+            .expect("mage-vl engine should be registered");
+        assert_eq!(engine.name(), "mage_vl");
+        // Default should also be the mage-vl runtime since it was
+        // the only thing the env-var branch registered.
+        let default = state
+            .engines
+            .lookup_default(crate::capabilities::Capability::Llm)
+            .expect("default engine should be set");
+        assert_eq!(default.name(), "mage_vl");
     }
 }
