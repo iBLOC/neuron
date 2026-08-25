@@ -10,6 +10,8 @@ use serde::{Deserialize, Serialize};
 /// Visual-encoder hyperparameters (`vision_config` in config.json).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MageVlVisionConfig {
+    #[serde(default = "default_num_channels")]
+    pub num_channels: usize,
     #[serde(default = "default_hidden_size")]
     pub hidden_size: usize,
     #[serde(default = "default_num_layers")]
@@ -33,6 +35,9 @@ pub struct MageVlVisionConfig {
     pub frame_windows_size: usize,
 }
 
+fn default_num_channels() -> usize {
+    3
+}
 fn default_hidden_size() -> usize {
     1024
 }
@@ -64,6 +69,7 @@ fn default_rope_theta() -> f32 {
 impl Default for MageVlVisionConfig {
     fn default() -> Self {
         Self {
+            num_channels: default_num_channels(),
             hidden_size: default_hidden_size(),
             num_hidden_layers: default_num_layers(),
             num_attention_heads: default_num_heads(),

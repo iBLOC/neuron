@@ -1,28 +1,494 @@
-//! Mage-ViT visual-encoder scaffold.
+//! Mage-ViT visual encoder (Rust/candle port of `microsoft/Mage-VL`).
 //!
-//! The StreamMind gate consumes *encoded* vision tokens `[T, P, D]`
-//! (D = 2560, P = patches per codec window). The full Mage-ViT
-//! encoder that produces them lands in a follow-up commit; this file
-//! currently ships only the patch-embedding stem so the integration
-//! pipeline can be exercised against random weights while the encoder
-//! layers and 3D RoPE are implemented next.
+//! 24-layer ViT with a from-scratch codec-ViT design: `16×16` patch
+//! grid, 3D RoPE (T/H/W with a 4:6:6 dimension split),
+//! variable-resolution input via Conv3d patch embedding, and a `2×2`
+//! spatial merger that pools four adjacent patch tokens before
+//! handing them to the LLM projector. Attention is
+//! **variable-length**: each `grid_thw` row is an independent
+//! attention window — no cross-sample mixing.
 //!
-//! Contract notes (from `modeling_mage_vl._streammind_vision_tokens`):
-//! - One entry per time step after the spatial merge: a window with
-//!   grid `(t, h, w)` yields `t` steps of `(h/2)*(w/2)` merged tokens.
-//! - `patch_positions` marks which I/P-frame patches survived codec
-//!   sparsity; dense inputs simply enumerate every position.
+//! Reference: `modeling_mage_vl.py` (`MageVLVisionPretrainedModel` +
+//! `MageVLVisionEncoder`) in `OpenSourceProjects/mage/hf-model-code/`.
+//! Structural twin: candle's `qwen3_vl/vision.rs`. The only Mage-ViT-
+//! specific delta is the 3D rotary table (4:6:6 split on
+//! `head_dim//2`).
 
-use candle_core::{Result, Tensor};
+use candle_core::{DType, Device, IndexOp, Module, Result, Tensor, D};
+use candle_nn::{Conv2d, Conv2dConfig, VarBuilder};
+
+use super::config::MageVlVisionConfig;
+
+pub struct VisionRotaryEmbedding {
+    head_dim: usize,
+    half: usize,
+    inv_freq_t: Tensor,
+    inv_freq_h: Tensor,
+    inv_freq_w: Tensor,
+    t_size: usize,
+    h_size: usize,
+    w_size: usize,
+}
+
+impl VisionRotaryEmbedding {
+    pub fn new(cfg: &MageVlVisionConfig, device: &Device) -> Result<Self> {
+        let head_dim = cfg.hidden_size / cfg.num_attention_heads;
+        assert_eq!(
+            head_dim % 16,
+            0,
+            "head_dim must be divisible by 16 for 4:6:6 split"
+        );
+        let half = head_dim / 2;
+        let unit = half / 16;
+        let t_size = 4 * unit;
+        let h_size = 6 * unit;
+        let w_size = 6 * unit;
+
+        let inv_freq_t = Self::build_inv_freq(t_size, cfg.rope_theta, device)?;
+        let inv_freq_h = Self::build_inv_freq(h_size, cfg.rope_theta, device)?;
+        let inv_freq_w = Self::build_inv_freq(w_size, cfg.rope_theta, device)?;
+
+        Ok(Self {
+            head_dim,
+            half,
+            inv_freq_t,
+            inv_freq_h,
+            inv_freq_w,
+            t_size,
+            h_size,
+            w_size,
+        })
+    }
+
+    fn build_inv_freq(dim: usize, theta: f32, device: &Device) -> Result<Tensor> {
+        let arange = Tensor::arange(0u32, dim as u32, device)?.to_dtype(DType::F32)?;
+        let exp = (arange * (1.0 / dim as f64))?;
+        let base = Tensor::new(vec![theta as f32], device)?;
+        let neg_exp = exp.affine(-1.0, 0.0)?;
+        base.broadcast_mul(&neg_exp)?.recip()
+    }
+
+    pub fn head_dim(&self) -> usize {
+        self.head_dim
+    }
+
+    pub fn half(&self) -> usize {
+        self.half
+    }
+
+    pub fn forward(&self, grid_thw: &Tensor) -> Result<Tensor> {
+        let device = grid_thw.device();
+        let rows = grid_thw.dim(0)?;
+        let mut pieces = Vec::with_capacity(rows);
+        for i in 0..rows {
+            let row = grid_thw.i(i)?.to_dtype(DType::F32)?;
+            let t = row.i(0)?.to_scalar::<f32>()? as usize;
+            let h = row.i(1)?.to_scalar::<f32>()? as usize;
+            let w = row.i(2)?.to_scalar::<f32>()? as usize;
+            pieces.push(self.freqs_for_thw(t, h, w, device)?);
+        }
+        Tensor::cat(&pieces, 0)
+    }
+
+    pub fn freqs_for_thw(&self, t: usize, h: usize, w: usize, device: &Device) -> Result<Tensor> {
+        let inv_t = self.inv_freq_t.to_device(device)?;
+        let inv_h = self.inv_freq_h.to_device(device)?;
+        let inv_w = self.inv_freq_w.to_device(device)?;
+
+        let arange_t = Tensor::arange(0u32, t as u32, device)?.to_dtype(DType::F32)?;
+        let arange_h = Tensor::arange(0u32, h as u32, device)?.to_dtype(DType::F32)?;
+        let arange_w = Tensor::arange(0u32, w as u32, device)?.to_dtype(DType::F32)?;
+
+        let ft = arange_t.unsqueeze(D::Minus1)?.matmul(&inv_t.unsqueeze(0)?)?;
+        let fh = arange_h.unsqueeze(D::Minus1)?.matmul(&inv_h.unsqueeze(0)?)?;
+        let fw = arange_w.unsqueeze(D::Minus1)?.matmul(&inv_w.unsqueeze(0)?)?;
+
+        let n = t * h * w;
+        let mut t_ids_storage = Vec::with_capacity(n);
+        let mut h_ids_storage = Vec::with_capacity(n);
+        let mut w_ids_storage = Vec::with_capacity(n);
+        for ti in 0..t {
+            for hi in 0..h {
+                for wi in 0..w {
+                    t_ids_storage.push(ti as u32);
+                    h_ids_storage.push(hi as u32);
+                    w_ids_storage.push(wi as u32);
+                }
+            }
+        }
+        let t_ids = Tensor::from_slice(&t_ids_storage, n, device)?;
+        let h_ids = Tensor::from_slice(&h_ids_storage, n, device)?;
+        let w_ids = Tensor::from_slice(&w_ids_storage, n, device)?;
+
+        let ft_t = ft.index_select(&t_ids, 0)?;
+        let fh_t = fh.index_select(&h_ids, 0)?;
+        let fw_t = fw.index_select(&w_ids, 0)?;
+        Tensor::cat(&[&ft_t, &fh_t, &fw_t], D::Minus1)
+    }
+}
+
+pub fn rotate_half(x: &Tensor) -> Result<Tensor> {
+    let last = x.dim(D::Minus1)?;
+    let half = last / 2;
+    let x1 = x.narrow(D::Minus1, 0, half)?;
+    let x2 = x.narrow(D::Minus1, half, half)?;
+    Tensor::cat(&[&x2.neg()?, &x1], D::Minus1)
+}
+
+pub fn apply_rotary_pos_emb_vision(
+    q: &Tensor,
+    k: &Tensor,
+    cos: &Tensor,
+    sin: &Tensor,
+) -> Result<(Tensor, Tensor)> {
+    let cos = cos.unsqueeze(D::Minus2)?;
+    let sin = sin.unsqueeze(D::Minus2)?;
+    let q_embed = (q.broadcast_mul(&cos)? + rotate_half(q)?.broadcast_mul(&sin)?)?;
+    let k_embed = (k.broadcast_mul(&cos)? + rotate_half(k)?.broadcast_mul(&sin)?)?;
+    Ok((q_embed, k_embed))
+}
+
+pub struct PatchEmbed {
+    proj: Conv2d,
+    bias: Tensor,
+    in_channels: usize,
+    patch_size: usize,
+    temporal_patch_size: usize,
+    hidden_size: usize,
+}
+
+impl PatchEmbed {
+    pub fn new(cfg: &MageVlVisionConfig, vb: VarBuilder) -> Result<Self> {
+        let proj_vb = vb.pp("patch_embed").pp("proj");
+        // Mage-ViT uses temporal_patch_size=1; the checkpoint ships the
+        // Conv3d weight as a 5D tensor with shape (out, in, 1, p, p),
+        // which we collapse to 4D for Conv2d (out, in, p, p).
+        let w_raw = proj_vb.get(
+            (
+                cfg.hidden_size,
+                cfg.num_channels,
+                cfg.temporal_patch_size,
+                cfg.patch_size,
+                cfg.patch_size,
+            ),
+            "weight",
+        )?;
+        let w = w_raw.squeeze(2)?.contiguous()?;
+        let proj = Conv2d::new(w, None, Conv2dConfig {
+            stride: cfg.patch_size,
+            ..Default::default()
+        });
+        let bias = proj_vb.get(cfg.hidden_size, "bias")?;
+        Ok(Self {
+            proj,
+            bias,
+            in_channels: cfg.num_channels,
+            patch_size: cfg.patch_size,
+            temporal_patch_size: cfg.temporal_patch_size,
+            hidden_size: cfg.hidden_size,
+        })
+    }
+
+    pub fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+        // xs: [N, C, T, H, W]; with T=1 in Mage-ViT, collapse T to
+        // batch and apply Conv2d on [N*T, C, H, W].
+        let (n, c, t, h, w) = xs.dims5()?;
+        let xs = xs.reshape((n * t, c, h, w))?;
+        let xs = self.proj.forward(&xs)?; // [N*T, hidden, H/p, W/p]
+        let (_nt, _h, hp, wp) = (xs.dim(0)?, xs.dim(1)?, xs.dim(2)?, xs.dim(3)?);
+        let _ = (_nt, _h, hp, wp);
+        let xs = xs.reshape((n * t, self.hidden_size, xs.dim(2)?, xs.dim(3)?))?;
+        let xs = xs
+            .permute((0, 2, 3, 1))?
+            .reshape((n * t * xs.dim(2)? * xs.dim(3)?, self.hidden_size))?;
+        let bias = self.bias.unsqueeze(0)?;
+        xs.broadcast_add(&bias)
+    }
+}
+
+pub struct VisionAttention {
+    qkv: candle_nn::Linear,
+    proj: candle_nn::Linear,
+    pub num_heads: usize,
+    pub head_dim: usize,
+}
+
+impl VisionAttention {
+    pub fn new(dim: usize, num_heads: usize, vb: VarBuilder) -> Result<Self> {
+        Ok(Self {
+            qkv: candle_nn::linear(dim, dim * 3, vb.pp("qkv"))?,
+            proj: candle_nn::linear(dim, dim, vb.pp("proj"))?,
+            num_heads,
+            head_dim: dim / num_heads,
+        })
+    }
+}
+
+pub struct VisionMlp {
+    fc1: candle_nn::Linear,
+    fc2: candle_nn::Linear,
+}
+
+impl VisionMlp {
+    pub fn new(dim: usize, hidden_dim: usize, vb: VarBuilder) -> Result<Self> {
+        Ok(Self {
+            fc1: candle_nn::linear(dim, hidden_dim, vb.pp("linear_fc1"))?,
+            fc2: candle_nn::linear(hidden_dim, dim, vb.pp("linear_fc2"))?,
+        })
+    }
+
+    pub fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+        xs.apply(&self.fc1)?.gelu_erf()?.apply(&self.fc2)
+    }
+}
+
+pub struct VisionEncoderLayer {
+    attn: VisionAttention,
+    mlp: VisionMlp,
+    norm1: candle_nn::LayerNorm,
+    norm2: candle_nn::LayerNorm,
+}
+
+impl VisionEncoderLayer {
+    pub fn new(cfg: &MageVlVisionConfig, vb: VarBuilder) -> Result<Self> {
+        Ok(Self {
+            attn: VisionAttention::new(
+                cfg.hidden_size,
+                cfg.num_attention_heads,
+                vb.pp("self_attn"),
+            )?,
+            mlp: VisionMlp::new(cfg.hidden_size, cfg.intermediate_size, vb.pp("mlp"))?,
+            norm1: candle_nn::layer_norm(cfg.hidden_size, 1e-6, vb.pp("norm1"))?,
+            norm2: candle_nn::layer_norm(cfg.hidden_size, 1e-6, vb.pp("norm2"))?,
+        })
+    }
+
+    pub fn forward(
+        &self,
+        xs: &Tensor,
+        cu_seqlens: &[u32],
+        cos: &Tensor,
+        sin: &Tensor,
+    ) -> Result<Tensor> {
+        let residual = xs;
+        let normed = xs.apply(&self.norm1)?;
+        let head_dim = self.attn.head_dim;
+        let n_heads = self.attn.num_heads;
+        let seq = normed.dim(0)?;
+        let qkv = self.attn.qkv.forward(&normed)?; // [seq, 3*hidden]
+        let qkv = qkv
+            .reshape((seq, 3, n_heads, head_dim))?
+            .permute((1, 0, 2, 3))?; // [3, seq, n_heads, head_dim]
+        let q = qkv.i(0)?.contiguous()?.to_dtype(DType::F32)?;
+        let k = qkv.i(1)?.contiguous()?.to_dtype(DType::F32)?;
+        let v = qkv.i(2)?.contiguous()?.to_dtype(DType::F32)?;
+
+        let mut outs = Vec::new();
+        for win in cu_seqlens.windows(2) {
+            let start = win[0] as usize;
+            let end = win[1] as usize;
+            if end <= start {
+                continue;
+            }
+            let qs = q.i(start..end)?.contiguous()?; // [seq_i, n_heads, head_dim]
+            let ks = k.i(start..end)?.contiguous()?;
+            let vs = v.i(start..end)?.contiguous()?;
+            let (qa, ka) = apply_rotary_pos_emb_vision(&qs, &ks, cos, sin)?;
+            // Group heads into batch dim so a single matmul computes
+            // every head simultaneously: [n_heads, seq, head_dim] for
+            // q/k/v, attention scores [n_heads, seq, seq].
+            let n_h = qa.dim(1)?;
+            let s = qa.dim(0)?;
+            let qa = qa.permute((1, 0, 2))?.contiguous()?; // [n_h, seq, head]
+            let ka = ka.permute((1, 0, 2))?.contiguous()?;
+            let va = vs.permute((1, 0, 2))?.contiguous()?; // [n_h, seq, head]
+            let kt = ka.transpose(1, 2)?.contiguous()?; // [n_h, head, seq]
+            let scale = 1.0 / (head_dim as f64).sqrt();
+            let att = (qa.matmul(&kt)? * scale)?;
+            let att = candle_nn::ops::softmax_last_dim(&att)?;
+            let out = att.matmul(&va)?; // [n_h, seq, head]
+            let out = out.permute((1, 0, 2))?.contiguous()?; // [seq, n_h, head]
+            outs.push(out.reshape((s, n_h * head_dim))?);
+        }
+        let cat = Tensor::cat(&outs, 0)?;
+        let cat = cat.to_dtype(self.attn.qkv.weight().dtype())?;
+        let attn_out = cat.apply(&self.attn.proj)?;
+
+        let xs = (residual + attn_out)?;
+        let residual2 = &xs;
+        let xs = xs
+            .apply(&self.norm2)?
+            .apply(&self.mlp.fc1)?
+            .gelu_erf()?
+            .apply(&self.mlp.fc2)?;
+        residual2 + xs
+    }
+}
+
+pub struct VisionEncoder {
+    layers: Vec<VisionEncoderLayer>,
+}
+
+impl VisionEncoder {
+    pub fn new(cfg: &MageVlVisionConfig, vb: VarBuilder) -> Result<Self> {
+        let mut layers = Vec::with_capacity(cfg.num_hidden_layers);
+        let lvb = vb.pp("encoder").pp("layers");
+        for i in 0..cfg.num_hidden_layers {
+            layers.push(VisionEncoderLayer::new(cfg, lvb.pp(i))?);
+        }
+        Ok(Self { layers })
+    }
+
+    pub fn forward(
+        &self,
+        xs: &Tensor,
+        cu_seqlens: &[u32],
+        cos: &Tensor,
+        sin: &Tensor,
+    ) -> Result<Tensor> {
+        let mut x = xs.clone();
+        for layer in &self.layers {
+            x = layer.forward(&x, cu_seqlens, cos, sin)?;
+        }
+        Ok(x)
+    }
+}
+
+pub struct VisionPatchMerger {
+    ln_q: candle_nn::LayerNorm,
+    fc1a: candle_nn::Linear,
+    fc1b: candle_nn::Linear,
+    fc2a: candle_nn::Linear,
+    fc2b: candle_nn::Linear,
+    merge: usize,
+}
+
+impl VisionPatchMerger {
+    pub fn new(cfg: &MageVlVisionConfig, vb: VarBuilder) -> Result<Self> {
+        let merge = cfg.spatial_merge_size.pow(2);
+        let merged_dim = cfg.hidden_size * merge;
+        let mlp_hidden = merged_dim;
+        let mlp_out = cfg.out_hidden_size;
+        let mlp0 = vb.pp("mlp0");
+        let mlp1 = vb.pp("mlp1");
+        Ok(Self {
+            ln_q: candle_nn::layer_norm(merged_dim, 1e-6, vb.pp("ln_q"))?,
+            fc1a: candle_nn::linear(merged_dim, mlp_hidden, mlp0.pp("linear_fc1"))?,
+            fc1b: candle_nn::linear(mlp_hidden, merged_dim, mlp0.pp("linear_fc2"))?,
+            fc2a: candle_nn::linear(merged_dim, mlp_out, mlp1.pp("linear_fc1"))?,
+            fc2b: candle_nn::linear(mlp_out, mlp_out, mlp1.pp("linear_fc2"))?,
+            merge,
+        })
+    }
+
+    pub fn forward(&self, xs: &Tensor, grid_thw: &Tensor) -> Result<Tensor> {
+        let n_samples = grid_thw.dim(0)?;
+        let mut pieces = Vec::with_capacity(n_samples);
+        let mut cursor = 0usize;
+        for i in 0..n_samples {
+            let row = grid_thw.i(i)?.to_dtype(DType::F32)?;
+            let t = row.i(0)?.to_scalar::<f32>()? as usize;
+            let h = row.i(1)?.to_scalar::<f32>()? as usize;
+            let w = row.i(2)?.to_scalar::<f32>()? as usize;
+            let n = t * h * w;
+            let h0 = h / 2;
+            let w0 = w / 2;
+            let seg = xs.i(cursor..cursor + n)?;
+            let last_dim = seg.dim(1)?;
+            let seg = seg.reshape((t, h, w, last_dim))?;
+            let seg = seg.reshape((t, h0, 2, w0, 2, last_dim))?;
+            let seg = seg.permute((0, 1, 3, 2, 4, 5))?;
+            let seg = seg.reshape((t * h0 * w0, 4 * last_dim))?;
+            pieces.push(seg);
+            cursor += n;
+            let _ = (h0, w0);
+        }
+        let merged = Tensor::cat(&pieces, 0)?;
+        let merged = merged.apply(&self.ln_q)?;
+        let merged = merged.apply(&self.fc1a)?.gelu_erf()?.apply(&self.fc1b)?;
+        merged.apply(&self.fc2a)?.gelu_erf()?.apply(&self.fc2b)
+    }
+}
+
+pub struct MageViT {
+    patch_embed: PatchEmbed,
+    pos_embed: Tensor,
+    rotary: VisionRotaryEmbedding,
+    encoder: VisionEncoder,
+    merger: VisionPatchMerger,
+    cfg: MageVlVisionConfig,
+}
+
+impl MageViT {
+    pub fn new(cfg: MageVlVisionConfig, vb: VarBuilder, device: &Device) -> Result<Self> {
+        let patch_embed = PatchEmbed::new(&cfg, vb.pp("visual"))?;
+        let pos_embed = vb
+            .pp("visual")
+            .pp("pos_embed")
+            .get(
+                (cfg.num_hidden_layers + 1, cfg.hidden_size),
+                "pos_embed",
+            )?;
+        let rotary = VisionRotaryEmbedding::new(&cfg, device)?;
+        let encoder = VisionEncoder::new(&cfg, vb.pp("visual"))?;
+        let merger = VisionPatchMerger::new(&cfg, vb.pp("visual").pp("merger"))?;
+        Ok(Self {
+            patch_embed,
+            pos_embed,
+            rotary,
+            encoder,
+            merger,
+            cfg,
+        })
+    }
+
+    pub fn config(&self) -> &MageVlVisionConfig {
+        &self.cfg
+    }
+
+    /// Encode one or more `(t, h, w)` patch grids from raw pixels.
+    /// `pixels` shape: `[N, C, T, H, W]` (the Conv3d patch embed
+    /// flattens the N axis into batch). `grid_thw`: `[N, 3]`.
+    /// Returns merged tokens `[Σ(t·h/2·w/2), out_hidden]`.
+    pub fn forward_pixels(&self, pixels: &Tensor, grid_thw: &Tensor) -> Result<Tensor> {
+        let tokens = self.patch_embed.forward(pixels)?;
+        let cu_seqlens = self.build_cu_seqlens(grid_thw)?;
+        let freqs = self.rotary.forward(grid_thw)?;
+        let (cos, sin) = self.cos_sin_from_freqs(&freqs)?;
+        let pos = self.pos_embed.i(0)?;
+        let x = tokens.broadcast_add(&pos)?;
+        let x = self.encoder.forward(&x, &cu_seqlens, &cos, &sin)?;
+        self.merger.forward(&x, grid_thw)
+    }
+
+    fn build_cu_seqlens(&self, grid_thw: &Tensor) -> Result<Vec<u32>> {
+        let n = grid_thw.dim(0)?;
+        let mut cu = Vec::with_capacity(n + 1);
+        cu.push(0u32);
+        let mut total = 0u32;
+        for i in 0..n {
+            let row = grid_thw.i(i)?.to_dtype(DType::F32)?;
+            let t = row.i(0)?.to_scalar::<f32>()? as u32;
+            let h = row.i(1)?.to_scalar::<f32>()? as u32;
+            let w = row.i(2)?.to_scalar::<f32>()? as u32;
+            total = total.saturating_add(t * h * w);
+            cu.push(total);
+        }
+        Ok(cu)
+    }
+
+    fn cos_sin_from_freqs(&self, freqs: &Tensor) -> Result<(Tensor, Tensor)> {
+        let cos = freqs.cos()?;
+        let sin = freqs.sin()?;
+        let cos = Tensor::cat(&[&cos, &cos], D::Minus1)?;
+        let sin = Tensor::cat(&[&sin, &sin], D::Minus1)?;
+        Ok((cos, sin))
+    }
+}
 
 pub type VisionTokenWindow = Tensor;
 
-/// Provider of gate-ready Mage-ViT token windows.
-///
-/// Implementations: the upcoming candle Mage-ViT encoder, and test
-/// fixtures synthesizing random streams.
 pub trait VisionTokenSource {
-    /// Encode one contiguous segment into `[T, P, D]` tokens.
     fn encode_window(&self, pixels: &Tensor, grid_thw: [u32; 3]) -> Result<VisionTokenWindow>;
 }
 
@@ -31,16 +497,97 @@ mod tests {
     use super::*;
     use crate::mage_vl::config::MageVlVisionConfig;
 
-    /// The full Mage-ViT encoder isn't built yet — this is the smallest
-    /// sanity test that the contract type compiles and shapes line up
-    /// with the downstream gate. Future commits will exercise the patch
-    /// embed forward pass on random pixels here.
+    fn small_cfg() -> MageVlVisionConfig {
+        // 4:6:6 RoPE split needs `head_dim//2` to be a multiple of 16;
+        // pick num_heads so head_dim = hidden_size / num_heads = 32.
+        MageVlVisionConfig {
+            hidden_size: 64,
+            num_hidden_layers: 2,
+            num_attention_heads: 2,
+            intermediate_size: 256,
+            patch_size: 4,
+            spatial_merge_size: 2,
+            num_channels: 3,
+            out_hidden_size: 128,
+            ..MageVlVisionConfig::default()
+        }
+    }
+
+    #[test]
+    fn rotary_builds_with_default_mage_vl_dims() {
+        let cfg = MageVlVisionConfig::default();
+        let device = Device::Cpu;
+        let rope = VisionRotaryEmbedding::new(&cfg, &device).unwrap();
+        assert_eq!(rope.head_dim, 1024 / 16);
+        assert_eq!(rope.half, 32);
+        assert_eq!(rope.t_size, 8);
+        assert_eq!(rope.h_size, 12);
+        assert_eq!(rope.w_size, 12);
+    }
+
     #[test]
     fn grid_thw_shape_contract_round_trip() {
         let cfg = MageVlVisionConfig::default();
         let merge = cfg.spatial_merge_size;
         let (t, h, w) = (4usize, 28usize, 28usize);
         let merged = ((h / merge) * (w / merge)) * t;
-        assert!(merged > 0, "merged token count must be positive");
+        assert!(merged > 0);
+    }
+
+    #[test]
+    fn patch_embed_produces_hidden_dim_tokens() {
+        let cfg = small_cfg();
+        let vb = candle_nn::VarBuilder::zeros(DType::F32, &Device::Cpu);
+        let pe = PatchEmbed::new(&cfg, vb.pp("patch_embed")).unwrap();
+        let pixels = Tensor::zeros((1, 3, 1, 4, 4), DType::F32, &Device::Cpu).unwrap();
+        let out = pe.forward(&pixels).unwrap();
+        assert_eq!(out.dim(0).unwrap(), 1);
+        assert_eq!(out.dim(1).unwrap(), cfg.hidden_size);
+    }
+
+    #[test]
+    fn merger_groups_four_neighbors_into_out_hidden() {
+        let cfg = small_cfg();
+        let vb = candle_nn::VarBuilder::zeros(DType::F32, &Device::Cpu);
+        let merger = VisionPatchMerger::new(&cfg, vb.pp("merger")).unwrap();
+        let h = 4;
+        let w = 4;
+        let t = 1;
+        let tokens = Tensor::zeros((t * h * w, cfg.hidden_size), DType::F32, &Device::Cpu).unwrap();
+        let grid =
+            Tensor::from_slice(&[t as u32, h as u32, w as u32], (1usize, 3usize), &Device::Cpu)
+                .unwrap();
+        let merged = merger.forward(&tokens, &grid).unwrap();
+        let h0 = h / cfg.spatial_merge_size;
+        let w0 = w / cfg.spatial_merge_size;
+        assert_eq!(merged.dim(0).unwrap(), t * h0 * w0);
+        assert_eq!(merged.dim(1).unwrap(), cfg.out_hidden_size);
+    }
+
+    #[test]
+    fn mage_vit_end_to_end_with_zero_weights_produces_merged_tokens() {
+        let cfg = small_cfg();
+        let vb = candle_nn::VarBuilder::zeros(DType::F32, &Device::Cpu);
+        let vit = MageViT::new(cfg.clone(), vb, &Device::Cpu).unwrap();
+        let t = 1usize;
+        let h = 4usize;
+        let w = 4usize;
+        let pixels = Tensor::zeros(
+            (1usize, cfg.num_channels, t, cfg.patch_size * h, cfg.patch_size * w),
+            DType::F32,
+            &Device::Cpu,
+        )
+        .unwrap();
+        let grid = Tensor::from_slice(
+            &[t as u32, h as u32, w as u32],
+            (1usize, 3usize),
+            &Device::Cpu,
+        )
+        .unwrap();
+        let merged = vit.forward_pixels(&pixels, &grid).unwrap();
+        let h0 = h / cfg.spatial_merge_size;
+        let w0 = w / cfg.spatial_merge_size;
+        assert_eq!(merged.dim(0).unwrap(), t * h0 * w0);
+        assert_eq!(merged.dim(1).unwrap(), cfg.out_hidden_size);
     }
 }
