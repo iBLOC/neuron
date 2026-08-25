@@ -93,22 +93,29 @@ impl MageVLModel {
 
     /// End-to-end multimodal forward. Available only when the
     /// text decoder was loaded (i.e. via `load_safetensors`).
-    ///
-    /// `merged` is fed via `pixel_values` to candle's vision tower
-    /// and the actual logits at the last position are returned.
-    /// A `None` merged indicates `vision_only` was used and the
-    /// call will fail.
+    /// Routes through the underlying candle `Qwen3VLModel::forward`
+    /// so the placeholder scattering, vision tower, and text tower
+    /// are all the official Mage-VL implementation.
     pub fn forward(
         &self,
         input_ids: &Tensor,
         pixel_values: &Tensor,
         image_grid_thw: &Tensor,
     ) -> Result<Tensor> {
-        let _text = self.text.as_ref().ok_or_else(|| {
+        let text = self.text.as_ref().ok_or_else(|| {
             candle_core::Error::msg("MageVLModel was built vision_only; no text decoder")
         })?;
-        let merged = self.vision.forward_pixels(pixel_values, image_grid_thw)?;
-        Ok(merged)
+        text.forward(
+            input_ids,
+            Some(pixel_values.clone()),
+            None,
+            Some(image_grid_thw.clone()),
+            None,
+            vec![],
+            vec![],
+            vec![],
+            &[0],
+        )
     }
 
     /// Run the vision encoder alone (no text branch).
