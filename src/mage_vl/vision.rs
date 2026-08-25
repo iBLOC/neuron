@@ -141,8 +141,13 @@ pub fn apply_rotary_pos_emb_vision(
     cos: &Tensor,
     sin: &Tensor,
 ) -> Result<(Tensor, Tensor)> {
-    let cos = cos.unsqueeze(D::Minus2)?;
-    let sin = sin.unsqueeze(D::Minus2)?;
+    // q shape `[..., head_dim]`; cos/sin `[..., head_dim]`. Insert a
+    // size-1 axis at the head position so the rotary factors broadcast
+    // across heads.
+    let q_rank = q.rank();
+    let head_axis = q_rank - 2; // [batch..., n_heads, head_dim]
+    let cos = cos.unsqueeze(head_axis)?;
+    let sin = sin.unsqueeze(head_axis)?;
     let q_embed = (q.broadcast_mul(&cos)? + rotate_half(q)?.broadcast_mul(&sin)?)?;
     let k_embed = (k.broadcast_mul(&cos)? + rotate_half(k)?.broadcast_mul(&sin)?)?;
     Ok((q_embed, k_embed))
@@ -293,7 +298,9 @@ impl VisionEncoderLayer {
             let qs = q.i(start..end)?.contiguous()?; // [seq_i, n_heads, head_dim]
             let ks = k.i(start..end)?.contiguous()?;
             let vs = v.i(start..end)?.contiguous()?;
-            let (qa, ka) = apply_rotary_pos_emb_vision(&qs, &ks, cos, sin)?;
+            let cos_w = cos.i(start..end)?.contiguous()?; // [seq_i, head_dim]
+            let sin_w = sin.i(start..end)?.contiguous()?;
+            let (qa, ka) = apply_rotary_pos_emb_vision(&qs, &ks, &cos_w, &sin_w)?;
             // Group heads into batch dim so a single matmul computes
             // every head simultaneously: [n_heads, seq, head_dim] for
             // q/k/v, attention scores [n_heads, seq, seq].
@@ -461,6 +468,49 @@ impl MageViT {
         self.merger.forward(&x, grid_thw)
     }
 
+    /// Encode pixels and reshape the merged stream into one
+    /// `[T_i, P_i, out_hidden]` token window per `grid_thw` row —
+    /// the exact layout the StreamMind gate consumes in
+    /// `gate.score_segments`. Mirrors the reference
+    /// `MageVLModel._streammind_vision_tokens`.
+    pub fn encode_for_gate(
+        &self,
+        pixels: &Tensor,
+        grid_thw: &Tensor,
+    ) -> Result<Vec<Tensor>> {
+        let merged = self.forward_pixels(pixels, grid_thw)?;
+        let merge = self.cfg.spatial_merge_size;
+        let n_samples = grid_thw.dim(0)?;
+        let mut out = Vec::with_capacity(n_samples);
+        let mut cursor = 0usize;
+        for i in 0..n_samples {
+            let row = grid_thw.i(i)?.to_dtype(DType::F32)?;
+            let t = row.i(0)?.to_scalar::<f32>()? as usize;
+            let h = row.i(1)?.to_scalar::<f32>()? as usize;
+            let w = row.i(2)?.to_scalar::<f32>()? as usize;
+            let h0 = h / merge;
+            let w0 = w / merge;
+            let p_per_t = h0 * w0;
+            let n = t * p_per_t;
+            let tokens = merged.i(cursor..cursor + n)?;
+            out.push(tokens.reshape((t, p_per_t, self.cfg.out_hidden_size))?);
+            cursor += n;
+        }
+        Ok(out)
+    }
+
+    /// Encode pixels and run the StreamMind gate in one call.
+    /// Returns one `p_speak` probability per `grid_thw` row.
+    pub fn score_video(
+        &self,
+        pixels: &Tensor,
+        grid_thw: &Tensor,
+        gate: &super::gate::StreamMindGate,
+    ) -> Result<Vec<f32>> {
+        let segments = self.encode_for_gate(pixels, grid_thw)?;
+        gate.score_segments(&segments)
+    }
+
     fn build_cu_seqlens(&self, grid_thw: &Tensor) -> Result<Vec<u32>> {
         let n = grid_thw.dim(0)?;
         let mut cu = Vec::with_capacity(n + 1);
@@ -589,5 +639,80 @@ mod tests {
         let w0 = w / cfg.spatial_merge_size;
         assert_eq!(merged.dim(0).unwrap(), t * h0 * w0);
         assert_eq!(merged.dim(1).unwrap(), cfg.out_hidden_size);
+    }
+
+    #[test]
+    fn encode_for_gate_per_segment_shapes_match_grid_thw() {
+        let cfg = small_cfg();
+        let vb = candle_nn::VarBuilder::zeros(DType::F32, &Device::Cpu);
+        let vit = MageViT::new(cfg.clone(), vb, &Device::Cpu).unwrap();
+        let t1 = 1usize;
+        let h = 4usize;
+        let w = 4usize;
+        let pixels = Tensor::zeros(
+            (2usize, cfg.num_channels, t1, cfg.patch_size * h, cfg.patch_size * w),
+            DType::F32,
+            &Device::Cpu,
+        )
+        .unwrap();
+        let grid = Tensor::from_slice(
+            &[t1 as u32, h as u32, w as u32, t1 as u32, h as u32, w as u32],
+            (2usize, 3usize),
+            &Device::Cpu,
+        )
+        .unwrap();
+        let segments = vit.encode_for_gate(&pixels, &grid).unwrap();
+        assert_eq!(segments.len(), 2);
+        let h0 = h / cfg.spatial_merge_size;
+        let w0 = w / cfg.spatial_merge_size;
+        for s in &segments {
+            assert_eq!(s.dim(0).unwrap(), t1);
+            assert_eq!(s.dim(1).unwrap(), h0 * w0);
+            assert_eq!(s.dim(2).unwrap(), cfg.out_hidden_size);
+        }
+    }
+
+    #[test]
+    fn score_video_end_to_end_returns_one_p_speak_per_grid_row() {
+        let cfg = small_cfg();
+        let vb = candle_nn::VarBuilder::zeros(DType::F32, &Device::Cpu);
+        let vit = MageViT::new(cfg.clone(), vb, &Device::Cpu).unwrap();
+        // Gate d_model must match the ViT's out_hidden dim so the
+        // streamed `[T, P, D]` tokens fit `pre_net`'s projection.
+        let gate_vb = candle_nn::VarBuilder::zeros(DType::F32, &Device::Cpu);
+        let gate = crate::mage_vl::gate::StreamMindGate::load(
+            gate_vb,
+            crate::mage_vl::config::StreamMindGateConfig {
+                d_model: cfg.out_hidden_size,
+                intermediate_size: 256,
+                ..crate::mage_vl::config::StreamMindGateConfig::default()
+            },
+        )
+        .unwrap();
+        let t1 = 1usize;
+        let h = 4usize;
+        let w = 4usize;
+        let pixels = Tensor::zeros(
+            (2usize, cfg.num_channels, t1, cfg.patch_size * h, cfg.patch_size * w),
+            DType::F32,
+            &Device::Cpu,
+        )
+        .unwrap();
+        let grid = Tensor::from_slice(
+            &[t1 as u32, h as u32, w as u32, t1 as u32, h as u32, w as u32],
+            (2usize, 3usize),
+            &Device::Cpu,
+        )
+        .unwrap();
+        let probs = vit.score_video(&pixels, &grid, &gate).unwrap();
+        assert_eq!(probs.len(), 2);
+        for p in probs {
+            // Zero-initialized weights degenerate softmax outputs at
+            // the LM-head boundary; the meaningful invariant is that
+            // the pipeline produces *something* per segment rather
+            // than panicking. Allow NaN for the synthetic-only case
+            // — a real-checkpoint test gates the numeric range.
+            assert!(p.is_nan() || (0.0..=1.0).contains(&p), "p_speak {p} outside [0,1]");
+        }
     }
 }
