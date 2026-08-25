@@ -61,11 +61,13 @@ impl VisionRotaryEmbedding {
     }
 
     fn build_inv_freq(dim: usize, theta: f32, device: &Device) -> Result<Tensor> {
+        // inv_freq[k] = 1 / theta ** (k / dim). Matches the reference
+        // `1.0 / (base ** (torch.arange(...) / dim))`. Compute via
+        // `exp(-k/dim * log(theta))` so we only need element-wise
+        // ops on the tensor axis.
         let arange = Tensor::arange(0u32, dim as u32, device)?.to_dtype(DType::F32)?;
-        let exp = (arange * (1.0 / dim as f64))?;
-        let base = Tensor::new(vec![theta as f32], device)?;
-        let neg_exp = exp.affine(-1.0, 0.0)?;
-        base.broadcast_mul(&neg_exp)?.recip()
+        let neg_exp = (arange * (-(theta.ln() as f64) / dim as f64))?;
+        neg_exp.exp()?.recip()
     }
 
     pub fn head_dim(&self) -> usize {
@@ -185,7 +187,6 @@ pub fn apply_rotary_pos_emb_vision(
 
 pub struct PatchEmbed {
     proj: Conv2d,
-    bias: Tensor,
     in_channels: usize,
     patch_size: usize,
     temporal_patch_size: usize,
@@ -194,29 +195,23 @@ pub struct PatchEmbed {
 
 impl PatchEmbed {
     pub fn new(cfg: &MageVlVisionConfig, vb: VarBuilder) -> Result<Self> {
-        let proj_vb = vb.pp("patch_embed").pp("proj");
-        // Mage-ViT uses temporal_patch_size=1; the checkpoint ships the
-        // Conv3d weight as a 5D tensor with shape (out, in, 1, p, p),
-        // which we collapse to 4D for Conv2d (out, in, p, p).
-        let w_raw = proj_vb.get(
-            (
-                cfg.hidden_size,
-                cfg.num_channels,
-                cfg.temporal_patch_size,
-                cfg.patch_size,
-                cfg.patch_size,
-            ),
+        // The official Mage-VL checkpoint stores a 4D Conv2d weight
+        // at `embeddings.patch_embedding.weight` of shape
+        // (out=hidden, in=num_channels, patch, patch). No temporal
+        // dim — Mage-VL collapses the temporal axis outside the
+        // encoder (codec processor handles it). The checkpoint
+        // ships a bias-less Conv2d.
+        let proj_vb = vb.pp("embeddings").pp("patch_embedding");
+        let w = proj_vb.get(
+            (cfg.hidden_size, cfg.num_channels, cfg.patch_size, cfg.patch_size),
             "weight",
         )?;
-        let w = w_raw.squeeze(2)?.contiguous()?;
         let proj = Conv2d::new(w, None, Conv2dConfig {
             stride: cfg.patch_size,
             ..Default::default()
         });
-        let bias = proj_vb.get(cfg.hidden_size, "bias")?;
         Ok(Self {
             proj,
-            bias,
             in_channels: cfg.num_channels,
             patch_size: cfg.patch_size,
             temporal_patch_size: cfg.temporal_patch_size,
@@ -225,19 +220,13 @@ impl PatchEmbed {
     }
 
     pub fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        // xs: [N, C, T, H, W]; with T=1 in Mage-ViT, collapse T to
-        // batch and apply Conv2d on [N*T, C, H, W].
         let (n, c, t, h, w) = xs.dims5()?;
         let xs = xs.reshape((n * t, c, h, w))?;
-        let xs = self.proj.forward(&xs)?; // [N*T, hidden, H/p, W/p]
-        let (_nt, _h, hp, wp) = (xs.dim(0)?, xs.dim(1)?, xs.dim(2)?, xs.dim(3)?);
-        let _ = (_nt, _h, hp, wp);
-        let xs = xs.reshape((n * t, self.hidden_size, xs.dim(2)?, xs.dim(3)?))?;
+        let xs = self.proj.forward(&xs)?;
         let xs = xs
             .permute((0, 2, 3, 1))?
             .reshape((n * t * xs.dim(2)? * xs.dim(3)?, self.hidden_size))?;
-        let bias = self.bias.unsqueeze(0)?;
-        xs.broadcast_add(&bias)
+        Ok(xs)
     }
 }
 
@@ -267,8 +256,8 @@ pub struct VisionMlp {
 impl VisionMlp {
     pub fn new(dim: usize, hidden_dim: usize, vb: VarBuilder) -> Result<Self> {
         Ok(Self {
-            fc1: candle_nn::linear(dim, hidden_dim, vb.pp("linear_fc1"))?,
-            fc2: candle_nn::linear(hidden_dim, dim, vb.pp("linear_fc2"))?,
+            fc1: candle_nn::linear(dim, hidden_dim, vb.pp("fc1"))?,
+            fc2: candle_nn::linear(hidden_dim, dim, vb.pp("fc2"))?,
         })
     }
 
@@ -280,8 +269,8 @@ impl VisionMlp {
 pub struct VisionEncoderLayer {
     attn: VisionAttention,
     mlp: VisionMlp,
-    norm1: candle_nn::LayerNorm,
-    norm2: candle_nn::LayerNorm,
+    layer_norm1: candle_nn::LayerNorm,
+    layer_norm2: candle_nn::LayerNorm,
 }
 
 impl VisionEncoderLayer {
@@ -293,8 +282,8 @@ impl VisionEncoderLayer {
                 vb.pp("self_attn"),
             )?,
             mlp: VisionMlp::new(cfg.hidden_size, cfg.intermediate_size, vb.pp("mlp"))?,
-            norm1: candle_nn::layer_norm(cfg.hidden_size, 1e-6, vb.pp("norm1"))?,
-            norm2: candle_nn::layer_norm(cfg.hidden_size, 1e-6, vb.pp("norm2"))?,
+            layer_norm1: candle_nn::layer_norm(cfg.hidden_size, 1e-6, vb.pp("layer_norm1"))?,
+            layer_norm2: candle_nn::layer_norm(cfg.hidden_size, 1e-6, vb.pp("layer_norm2"))?,
         })
     }
 
@@ -306,7 +295,7 @@ impl VisionEncoderLayer {
         sin: &Tensor,
     ) -> Result<Tensor> {
         let residual = xs;
-        let normed = xs.apply(&self.norm1)?;
+        let normed = xs.apply(&self.layer_norm1)?;
         let head_dim = self.attn.head_dim;
         let n_heads = self.attn.num_heads;
         let seq = normed.dim(0)?;
@@ -354,7 +343,7 @@ impl VisionEncoderLayer {
         let xs = (residual + attn_out)?;
         let residual2 = &xs;
         let xs = xs
-            .apply(&self.norm2)?
+            .apply(&self.layer_norm2)?
             .apply(&self.mlp.fc1)?
             .gelu_erf()?
             .apply(&self.mlp.fc2)?;
@@ -393,27 +382,28 @@ impl VisionEncoder {
 
 pub struct VisionPatchMerger {
     ln_q: candle_nn::LayerNorm,
-    fc1a: candle_nn::Linear,
-    fc1b: candle_nn::Linear,
-    fc2a: candle_nn::Linear,
-    fc2b: candle_nn::Linear,
+    fc0: candle_nn::Linear,
+    fc2: candle_nn::Linear,
+    merge_size: usize,
     merge: usize,
 }
 
 impl VisionPatchMerger {
     pub fn new(cfg: &MageVlVisionConfig, vb: VarBuilder) -> Result<Self> {
-        let merge = cfg.spatial_merge_size.pow(2);
+        let merge_size = cfg.spatial_merge_size;
+        let merge = merge_size.pow(2);
         let merged_dim = cfg.hidden_size * merge;
-        let mlp_hidden = merged_dim;
         let mlp_out = cfg.out_hidden_size;
-        let mlp0 = vb.pp("mlp0");
-        let mlp1 = vb.pp("mlp1");
+        // Reference stores the two-linears as `mlp.0` and `mlp.2`
+        // (the `.1` slot is the GELU activation). The LayerNorm
+        // operates on `hidden_size` per-patch; the reshape to
+        // merged_dim happens AFTER the norm.
+        let mlp = vb.pp("mlp");
         Ok(Self {
-            ln_q: candle_nn::layer_norm(merged_dim, 1e-6, vb.pp("ln_q"))?,
-            fc1a: candle_nn::linear(merged_dim, mlp_hidden, mlp0.pp("linear_fc1"))?,
-            fc1b: candle_nn::linear(mlp_hidden, merged_dim, mlp0.pp("linear_fc2"))?,
-            fc2a: candle_nn::linear(merged_dim, mlp_out, mlp1.pp("linear_fc1"))?,
-            fc2b: candle_nn::linear(mlp_out, mlp_out, mlp1.pp("linear_fc2"))?,
+            ln_q: candle_nn::layer_norm(cfg.hidden_size, 1e-6, vb.pp("ln_q"))?,
+            fc0: candle_nn::linear(merged_dim, merged_dim, mlp.pp("0"))?,
+            fc2: candle_nn::linear(merged_dim, mlp_out, mlp.pp("2"))?,
+            merge_size,
             merge,
         })
     }
@@ -422,34 +412,37 @@ impl VisionPatchMerger {
         let n_samples = grid_thw.dim(0)?;
         let mut pieces = Vec::with_capacity(n_samples);
         let mut cursor = 0usize;
+        let ms = self.merge_size;
         for i in 0..n_samples {
             let row = grid_thw.i(i)?.to_dtype(DType::F32)?;
             let t = row.i(0)?.to_scalar::<f32>()? as usize;
             let h = row.i(1)?.to_scalar::<f32>()? as usize;
             let w = row.i(2)?.to_scalar::<f32>()? as usize;
             let n = t * h * w;
-            let h0 = h / 2;
-            let w0 = w / 2;
+            let h0 = h / ms;
+            let w0 = w / ms;
             let seg = xs.i(cursor..cursor + n)?;
             let last_dim = seg.dim(1)?;
+            // Apply LayerNorm per-patch (last_dim = hidden_size)
+            // BEFORE the 2x2 reshape so the norm operates on the
+            // same axis the reference's ln_q does.
+            let seg = seg.apply(&self.ln_q)?;
             let seg = seg.reshape((t, h, w, last_dim))?;
-            let seg = seg.reshape((t, h0, 2, w0, 2, last_dim))?;
+            let seg = seg.reshape((t, h0, ms, w0, ms, last_dim))?;
             let seg = seg.permute((0, 1, 3, 2, 4, 5))?;
-            let seg = seg.reshape((t * h0 * w0, 4 * last_dim))?;
+            let seg = seg.reshape((t * h0 * w0, ms * ms * last_dim))?;
             pieces.push(seg);
             cursor += n;
             let _ = (h0, w0);
         }
         let merged = Tensor::cat(&pieces, 0)?;
-        let merged = merged.apply(&self.ln_q)?;
-        let merged = merged.apply(&self.fc1a)?.gelu_erf()?.apply(&self.fc1b)?;
-        merged.apply(&self.fc2a)?.gelu_erf()?.apply(&self.fc2b)
+        merged.apply(&self.fc0)?.gelu_erf()?.apply(&self.fc2)
     }
 }
 
 pub struct MageViT {
     patch_embed: PatchEmbed,
-    pos_embed: Tensor,
+    layernorm_pre: candle_nn::LayerNorm,
     rotary: VisionRotaryEmbedding,
     encoder: VisionEncoder,
     merger: VisionPatchMerger,
@@ -459,19 +452,17 @@ pub struct MageViT {
 impl MageViT {
     pub fn new(cfg: MageVlVisionConfig, vb: VarBuilder, device: &Device) -> Result<Self> {
         let patch_embed = PatchEmbed::new(&cfg, vb.pp("visual"))?;
-        let pos_embed = vb
-            .pp("visual")
-            .pp("pos_embed")
-            .get(
-                (cfg.num_hidden_layers + 1, cfg.hidden_size),
-                "pos_embed",
-            )?;
+        let layernorm_pre = candle_nn::layer_norm(
+            cfg.hidden_size,
+            1e-6,
+            vb.pp("visual").pp("layernorm_pre"),
+        )?;
         let rotary = VisionRotaryEmbedding::new(&cfg, device)?;
         let encoder = VisionEncoder::new(&cfg, vb.pp("visual"))?;
         let merger = VisionPatchMerger::new(&cfg, vb.pp("visual").pp("merger"))?;
         Ok(Self {
             patch_embed,
-            pos_embed,
+            layernorm_pre,
             rotary,
             encoder,
             merger,
@@ -479,21 +470,36 @@ impl MageViT {
         })
     }
 
+    /// Load a MageViT from the official `microsoft/Mage-VL`
+    /// shard set. Pass the same sharded `.safetensors` files you
+    /// fetched from `huggingface.co/microsoft/Mage-VL`; the
+    /// loader expects `model.visual.*` weight names (the HF
+    /// `model.safetensors.index.json` puts the visual tower under
+    /// that prefix).
+    pub fn load_safetensors<P: AsRef<std::path::Path>>(
+        paths: &[P],
+        cfg: MageVlVisionConfig,
+        dtype: DType,
+        device: &Device,
+    ) -> Result<Self> {
+        let vb = unsafe { VarBuilder::from_mmaped_safetensors(paths, dtype, device)? };
+        Self::new(cfg, vb.pp("model"), device)
+    }
+
     pub fn config(&self) -> &MageVlVisionConfig {
         &self.cfg
     }
 
     /// Encode one or more `(t, h, w)` patch grids from raw pixels.
-    /// `pixels` shape: `[N, C, T, H, W]` (the Conv3d patch embed
-    /// flattens the N axis into batch). `grid_thw`: `[N, 3]`.
+    /// `pixels` shape: `[N, C, T, H, W]` (the patch embed flattens
+    /// the N axis into batch). `grid_thw`: `[N, 3]`.
     /// Returns merged tokens `[Σ(t·h/2·w/2), out_hidden]`.
     pub fn forward_pixels(&self, pixels: &Tensor, grid_thw: &Tensor) -> Result<Tensor> {
         let tokens = self.patch_embed.forward(pixels)?;
         let cu_seqlens = self.build_cu_seqlens(grid_thw)?;
         let freqs = self.rotary.forward(grid_thw)?;
         let (cos, sin) = self.cos_sin_from_freqs(&freqs)?;
-        let pos = self.pos_embed.i(0)?;
-        let x = tokens.broadcast_add(&pos)?;
+        let x = tokens.apply(&self.layernorm_pre)?;
         let x = self.encoder.forward(&x, &cu_seqlens, &cos, &sin)?;
         self.merger.forward(&x, grid_thw)
     }
@@ -527,8 +533,7 @@ impl MageViT {
             None => self.rotary.forward(grid_thw)?,
         };
         let (cos, sin) = self.cos_sin_from_freqs(&freqs)?;
-        let pos = self.pos_embed.i(0)?;
-        let x = tokens.broadcast_add(&pos)?;
+        let x = tokens.apply(&self.layernorm_pre)?;
         let x = self.encoder.forward(&x, &cu_seqlens, &cos, &sin)?;
         self.merger.forward(&x, grid_thw)
     }
@@ -950,5 +955,149 @@ mod tests {
         assert_eq!(probs.len(), 1);
         let p = probs[0];
         assert!(p.is_nan() || (0.0..=1.0).contains(&p), "p_speak {p} outside [0,1]");
+    }
+
+    /// End-to-end test against the real `microsoft/Mage-VL`
+    /// checkpoint (24-layer ViT d1024, Qwen3-4B + Mage-ViT, ~2GB on
+    /// disk in two sharded safetensors). Skipped automatically when
+    /// the weights are not present on disk; force it with
+    /// `cargo test --lib -- --ignored mage_vl::vision`.
+    #[test]
+    #[ignore = "requires the ~2GB microsoft/Mage-VL checkpoint on disk"]
+    fn real_checkpoint_forward_pixels_produces_merged_tokens() -> Result<()> {
+        let shard_dir = std::path::Path::new(
+            "/home/ibloc/Projects/OpenSourceProjects/mage/mage-vl-checkpoint",
+        );
+        let shard1 = shard_dir.join("model-00001-of-00002.safetensors");
+        let shard2 = shard_dir.join("model-00002-of-00002.safetensors");
+        if !shard1.exists() || !shard2.exists() {
+            // Test path is opt-in: skip silently when the weights
+            // aren't on disk. The user is expected to fetch them
+            // from huggingface.co/microsoft/Mage-VL when they want
+            // to run this gated test.
+            eprintln!(
+                "skipping real_checkpoint test: shards not found at {}",
+                shard_dir.display()
+            );
+            return Ok(());
+        }
+
+        let cfg = MageVlVisionConfig::default();
+        let device = Device::Cpu;
+        // BF16 weights are cast to F32 at load time. The CPU backend
+        // mmap is bandwidth-bound; expect a few seconds of load +
+        // ~10s of forward per shard.
+        let vit = MageViT::load_safetensors(
+            &[shard1.as_path(), shard2.as_path()],
+            cfg.clone(),
+            DType::F32,
+            &device,
+        )
+        .expect("load MageViT from real checkpoint");
+
+        // 1 frame at 224×224 pixels → 14×14 = 196 patches under
+        // patch_size=16; the merger pools every 2×2 → 7×7 = 49
+        // tokens per frame.
+        let img = 224usize;
+        let patch = cfg.patch_size;
+        let pixels = Tensor::randn(
+            0f32,
+            1f32,
+            (1usize, cfg.num_channels, 1usize, img, img),
+            &device,
+        )?;
+        let grid = Tensor::from_slice(
+            &[1u32, (img / patch) as u32, (img / patch) as u32],
+            (1usize, 3usize),
+            &device,
+        )
+        .unwrap();
+
+        let merged = vit.forward_pixels(&pixels, &grid).unwrap();
+        let t = 1usize;
+        let h0 = (img / patch) / cfg.spatial_merge_size;
+        let w0 = h0;
+        assert_eq!(merged.dim(0).unwrap(), t * h0 * w0);
+        assert_eq!(merged.dim(1).unwrap(), cfg.out_hidden_size);
+
+        // Sanity: the L2 norm per token should be non-trivial
+        // (real weights) — all-zero embeddings would indicate a
+        // weight-load miss.
+        let norms = merged.sqr()?.sum(D::Minus1)?.sqrt()?;
+        let mean_norm = norms.mean_all()?.to_scalar::<f32>()?;
+        let max_norm = norms.max_all()?.to_scalar::<f32>()?;
+        eprintln!("real-checkpoint forward: mean_norm={mean_norm} max_norm={max_norm}");
+        assert!(mean_norm > 0.1, "mean L2 norm {mean_norm} too small — weights may not have loaded");
+        assert!(mean_norm.is_finite(), "mean L2 norm {mean_norm} is non-finite — check for NaN/inf");
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires the ~2GB microsoft/Mage-VL checkpoint on disk"]
+    fn real_checkpoint_score_video_returns_p_speak_per_segment() -> Result<()> {
+        let shard_dir = std::path::Path::new(
+            "/home/ibloc/Projects/OpenSourceProjects/mage/mage-vl-checkpoint",
+        );
+        let shard1 = shard_dir.join("model-00001-of-00002.safetensors");
+        let shard2 = shard_dir.join("model-00002-of-00002.safetensors");
+        if !shard1.exists() || !shard2.exists() {
+            return Ok(());
+        }
+
+        let cfg = MageVlVisionConfig::default();
+        let device = Device::Cpu;
+        let vit = MageViT::load_safetensors(
+            &[shard1.as_path(), shard2.as_path()],
+            cfg.clone(),
+            DType::F32,
+            &device,
+        )
+        .expect("load MageViT");
+
+        let gate_path = std::path::Path::new(
+            "/home/ibloc/Projects/OpenSourceProjects/mage/hf-model-code/streammind_gate.safetensors",
+        );
+        if !gate_path.exists() {
+            eprintln!("skipping: streammind_gate.safetensors not at {}", gate_path.display());
+            return Ok(());
+        }
+        let gate =
+            crate::mage_vl::gate::StreamMindGate::load_safetensors(gate_path, &device)
+                .expect("load StreamMindGate");
+
+        // 2 contiguous frames → 2 segments of p_speak each. 224×224
+        // pixels per frame → 14×14 patches → 49 merged tokens per
+        // frame; under StreamMind the 49 spatial tokens are mean-
+        // pooled to 1 EPFE token per frame, so the gate sees 2 time
+        // steps and returns 2 probabilities.
+        let img = 224usize;
+        let patch = cfg.patch_size;
+        let pixels = Tensor::randn(
+            0f32,
+            1f32,
+            (1usize, cfg.num_channels, 2usize, img, img),
+            &device,
+        )?;
+        let grid = Tensor::from_slice(
+            &[2u32, (img / patch) as u32, (img / patch) as u32],
+            (1usize, 3usize),
+            &device,
+        )
+        .unwrap();
+        let probs = vit.score_video(&pixels, &grid, &gate).unwrap();
+        // grid_thw has 1 row (2 contiguous frames, 14×14 patches) —
+        // score_video returns one p_speak per grid row.
+        assert_eq!(probs.len(), 1);
+        let p = probs[0];
+        eprintln!("real-checkpoint score_video: p_speak={p}");
+        assert!(
+            p.is_finite(),
+            "p_speak {p} is non-finite (NaN/inf) from real checkpoint"
+        );
+        assert!(
+            (0.0..=1.0).contains(&p),
+            "p_speak {p} outside [0,1] from real checkpoint"
+        );
+        Ok(())
     }
 }
