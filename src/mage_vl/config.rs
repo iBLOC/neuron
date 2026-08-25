@@ -84,6 +84,66 @@ impl Default for MageVlVisionConfig {
     }
 }
 
+/// Multimodal placeholder token ids. Mirrors `config.json` from
+/// `microsoft/Mage-VL`: `vision_start_token_id` / `vision_end_token_id`
+/// bracket an image region, `image_token_id` / `video_token_id`
+/// mark per-patch placeholders the vision encoder fills in.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlaceholderTokens {
+    pub vision_start_token_id: u32,
+    pub vision_end_token_id: u32,
+    pub image_token_id: u32,
+    pub video_token_id: u32,
+}
+
+impl Default for PlaceholderTokens {
+    fn default() -> Self {
+        // Values lifted from `config.json` of `microsoft/Mage-VL`.
+        Self {
+            vision_start_token_id: 151_652,
+            vision_end_token_id: 151_653,
+            image_token_id: 151_655,
+            video_token_id: 151_656,
+        }
+    }
+}
+
+/// Top-level multimodal model configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MageVLConfig {
+    #[serde(default)]
+    pub vision: MageVlVisionConfig,
+    /// Hidden size of the Qwen3-4B text decoder. Defaults to the
+    /// same value `out_hidden_size` the vision merger emits, which
+    /// is the only safe pairing (Qwen2VL/Qwen3-VL style models are
+    /// width-aligned end-to-end).
+    #[serde(default = "default_text_hidden_size")]
+    pub text_hidden_size: usize,
+    /// Vocabulary size of the text decoder.
+    #[serde(default = "default_vocab_size")]
+    pub vocab_size: usize,
+    #[serde(default)]
+    pub placeholders: PlaceholderTokens,
+}
+
+fn default_text_hidden_size() -> usize {
+    2_560
+}
+fn default_vocab_size() -> usize {
+    151_936
+}
+
+impl Default for MageVLConfig {
+    fn default() -> Self {
+        Self {
+            vision: MageVlVisionConfig::default(),
+            text_hidden_size: default_text_hidden_size(),
+            vocab_size: default_vocab_size(),
+            placeholders: PlaceholderTokens::default(),
+        }
+    }
+}
+
 /// StreamMind cognition-gate hyperparameters.
 ///
 /// The gate head itself is a 4-layer Qwen3 decoder used as a binary

@@ -24,7 +24,11 @@
 pub mod config;
 pub mod gate;
 pub mod http;
+pub mod model;
+pub mod processor;
 pub mod vision;
 
-pub use config::{MageVlVisionConfig, StreamMindGateConfig};
+pub use config::{MageVLConfig, MageVlVisionConfig, PlaceholderTokens, StreamMindGateConfig};
 pub use gate::StreamMindGate;
+pub use model::MageVLModel;
+pub use processor::{placeholder_positions, scatter_merged, PlaceholderKind};
