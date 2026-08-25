@@ -25,6 +25,7 @@ pub use ort_runtime::{OrtModelConfig, OrtSession, OrtVisionRuntime};
 
 pub mod coco_classes;
 pub mod letterbox;
+pub mod memory_pool;
 pub mod nms;
 pub mod integration_tests;
 
