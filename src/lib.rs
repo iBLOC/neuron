@@ -9,6 +9,7 @@ pub mod embedded;
 pub mod embedding;
 pub mod engine;
 pub mod llm;
+pub mod mage_vl;
 pub mod metrics;
 pub mod models;
 pub mod rerank;
