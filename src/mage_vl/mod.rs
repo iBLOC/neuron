@@ -23,6 +23,7 @@
 
 pub mod config;
 pub mod gate;
+pub mod http;
 pub mod vision;
 
 pub use config::{MageVlVisionConfig, StreamMindGateConfig};

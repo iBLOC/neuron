@@ -607,3 +607,5 @@ pub async fn forecast(
     }))
 }
 
+
+pub use crate::mage_vl::http::gate_score;

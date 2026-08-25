@@ -45,6 +45,9 @@ pub struct ServerState {
     pub config: NeureConfig,
     pub puller: Arc<crate::models::Puller>,
     pub catalog: Arc<crate::models::Catalog>,
+
+    // -- Mage-VL StreamMind gate (lazy-loaded single instance) --
+    pub mage_vl_gate: Arc<crate::mage_vl::http::GateRuntime>,
 }
 
 impl ServerState {
@@ -442,6 +445,7 @@ impl ServerState {
             config,
             puller,
             catalog,
+            mage_vl_gate: Arc::new(crate::mage_vl::http::GateRuntime::new()),
         }
     }
 

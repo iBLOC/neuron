@@ -21,7 +21,7 @@ mod state;
 
 pub use error::ServerError;
 pub use handlers::{
-    audio_speech, audio_transcriptions, chat_completions, embedding_handler, forecast,
+    audio_speech, audio_transcriptions, chat_completions, embedding_handler, forecast, gate_score,
     health_handler, info_handler, list_models, rerank, vision_classify, vision_detect,
     vision_lora_list, vision_lora_register, vision_lora_unregister, vision_pose, vision_segment,
     ChatCompletionsRequest, EmbeddingHttpRequest, ModelList, RerankHttpRequest,
@@ -80,6 +80,7 @@ pub fn routes() -> Router<ServerState> {
         )
         .route("/v1/messages", post(crate::server::dispatch::adapter_dispatch))
         .route("/v1/forecast", post(forecast))
+        .route("/v1/vision/gate/score", post(gate_score))
 }
 
 /// Build the full axum [`Router`] with all endpoints registered.
@@ -416,5 +417,117 @@ mod tests {
             axum::Json(req),
         ).await;
         assert!(resp.is_err());
+    }
+
+    // -- Mage-VL StreamMind gate validation tests ----------------------------
+
+    #[tokio::test]
+    async fn test_gate_score_empty_segments_returns_400() {
+        let config = crate::config::NeureConfig::default();
+        let state = ServerState::new(config);
+        let req = crate::mage_vl::http::GateScoreRequest {
+            segments: vec![],
+            gate_path: None,
+            threshold: 0.5,
+        };
+        let resp = handlers::gate_score(
+            axum::extract::State(state),
+            axum::Json(req),
+        ).await;
+        let err = resp.unwrap_err();
+        assert_eq!(err.0, axum::http::StatusCode::BAD_REQUEST);
+        assert!(err.1.contains("segments"));
+    }
+
+    #[tokio::test]
+    async fn test_gate_score_invalid_threshold_returns_400() {
+        let config = crate::config::NeureConfig::default();
+        let state = ServerState::new(config);
+        let req = crate::mage_vl::http::GateScoreRequest {
+            segments: vec![crate::mage_vl::http::SegmentRequest {
+                tokens: vec![],
+                t: 1,
+                p: 1,
+                d: 2560,
+            }],
+            gate_path: None,
+            threshold: 1.5,
+        };
+        let resp = handlers::gate_score(
+            axum::extract::State(state),
+            axum::Json(req),
+        ).await;
+        let err = resp.unwrap_err();
+        assert_eq!(err.0, axum::http::StatusCode::BAD_REQUEST);
+        assert!(err.1.contains("threshold"));
+    }
+
+    #[tokio::test]
+    async fn test_gate_score_zero_dim_segment_returns_400() {
+        let config = crate::config::NeureConfig::default();
+        let state = ServerState::new(config);
+        let req = crate::mage_vl::http::GateScoreRequest {
+            segments: vec![crate::mage_vl::http::SegmentRequest {
+                tokens: vec![],
+                t: 1,
+                p: 1,
+                d: 0,
+            }],
+            gate_path: None,
+            threshold: 0.5,
+        };
+        let resp = handlers::gate_score(
+            axum::extract::State(state),
+            axum::Json(req),
+        ).await;
+        let err = resp.unwrap_err();
+        assert_eq!(err.0, axum::http::StatusCode::BAD_REQUEST);
+        assert!(err.1.contains("> 0"));
+    }
+
+    #[tokio::test]
+    async fn test_gate_score_token_length_mismatch_returns_400() {
+        let config = crate::config::NeureConfig::default();
+        let state = ServerState::new(config);
+        let req = crate::mage_vl::http::GateScoreRequest {
+            segments: vec![crate::mage_vl::http::SegmentRequest {
+                tokens: vec![0.0; 5],
+                t: 2,
+                p: 4,
+                d: 2560,
+            }],
+            gate_path: None,
+            threshold: 0.5,
+        };
+        let resp = handlers::gate_score(
+            axum::extract::State(state),
+            axum::Json(req),
+        ).await;
+        let err = resp.unwrap_err();
+        assert_eq!(err.0, axum::http::StatusCode::BAD_REQUEST);
+        assert!(err.1.contains("tokens.len"));
+    }
+
+    #[tokio::test]
+    async fn test_gate_score_missing_weights_returns_503() {
+        let config = crate::config::NeureConfig::default();
+        let state = ServerState::new(config);
+        let req = crate::mage_vl::http::GateScoreRequest {
+            segments: vec![crate::mage_vl::http::SegmentRequest {
+                tokens: vec![0.0; 2 * 4 * 2560],
+                t: 2,
+                p: 4,
+                d: 2560,
+            }],
+            gate_path: Some("/nonexistent/streammind_gate.safetensors".into()),
+            threshold: 0.5,
+        };
+        let resp = handlers::gate_score(
+            axum::extract::State(state),
+            axum::Json(req),
+        ).await;
+        let err = resp.unwrap_err();
+        assert_eq!(err.0, axum::http::StatusCode::SERVICE_UNAVAILABLE);
+        assert!(err.1.contains("streammind_gate.safetensors"));
     }
 }
