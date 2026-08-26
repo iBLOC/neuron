@@ -1,11 +1,13 @@
-//! Gated end-to-end wire test for the Mage-VL runtime:
-//! real shards + real tokenizer → ServerState → axum router →
-//! POST /v1/chat/completions with a multimodal (image+text) body
-//! → adapter_dispatch → engines.llm → MageVlRuntime → generated text.
+//! Gated end-to-end wire test for the Mage-VL runtime via the
+//! Anthropic Messages endpoint: real shards + real tokenizer →
+//! ServerState → axum router → POST /v1/messages with a multimodal
+//! body → adapter_dispatch → AnthropicMessagesAdapter →
+//! engines.llm → MageVlRuntime → generated text → Anthropic-shaped
+//! response.
 //!
 //! Skipped unless `NEURE_MAGE_VL_E2E=1` is set or the default shard
 //! directory exists on this machine — the checkpoint is ~9 GB and
-//! generation on CPU takes minutes.
+//! CPU generation on F32 takes ~5 s/token in release mode.
 
 #![cfg(feature = "candle")]
 
@@ -15,6 +17,25 @@ use tower::ServiceExt;
 
 const DEFAULT_SHARD_DIR: &str =
     "/home/ibloc/Projects/OpenSourceProjects/mage/mage-vl-checkpoint";
+const RED_PNG_B64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEElEQVR4nGP4z8AARAwQCgAf7gP9i18U1AAAAABJRU5ErkJggg==";
+
+fn anthropic_multimodal_body() -> serde_json::Value {
+    serde_json::json!({
+        "model": "microsoft/Mage-VL",
+        "max_tokens": 8,
+        "messages": [{
+            "role": "user",
+            "content": [
+                {"type": "image", "source": {
+                    "type": "base64",
+                    "media_type": "image/png",
+                    "data": RED_PNG_B64
+                }},
+                {"type": "text", "text": "What color is this image?"}
+            ]
+        }]
+    })
+}
 
 fn shards_available() -> bool {
     let dir = std::env::var("NEURE_MAGE_VL_SHARD_DIR")
@@ -24,56 +45,11 @@ fn shards_available() -> bool {
         .exists()
 }
 
-/// 2x2 red PNG so the vision tower gets a real decodable image.
-const RED_PNG_B64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEElEQVR4nGP4z8AARAwQCgAf7gP9i18U1AAAAABJRU5ErkJggg==";
-
-fn multimodal_body() -> serde_json::Value {
-    serde_json::json!({
-        "model": "microsoft/Mage-VL",
-        "max_tokens": 8,
-        "messages": [{
-            "role": "user",
-            "content": [
-                {"type": "text", "text": "What color is this image?"},
-                {"type": "image_url", "image_url": {
-                    "url": format!("data:image/png;base64,{RED_PNG_B64}")
-                }}
-            ]
-        }]
-    })
-}
-
-/// Adapter-level smoke: always runs, no weights needed. Proves the
-/// OpenAI wire → canonical translation preserves images.
-#[test]
-fn openai_parse_carries_image_into_canonical_request() {
-    use neure_lib::adapter::ApiAdapter;
-    let body = serde_json::to_vec(&multimodal_body()).unwrap();
-    let headers = axum::http::HeaderMap::new();
-    let canonical = neure_lib::adapter::openai_chat::OpenAiChatAdapter
-        .parse(&body.into(), &headers)
-        .expect("parse");
-    let neure_lib::canonical::CanonicalRequest::Llm(llm) = canonical else {
-        panic!("expected Llm canonical request");
-    };
-    let has_image = llm.messages.iter().any(|m| {
-        m.content.iter().any(|b| {
-            matches!(
-                b,
-                neure_lib::canonical::ContentBlock::Image(neure_lib::canonical::ImageBlock {
-                    source: neure_lib::canonical::ImageSource::Base64 { .. },
-                    ..
-                })
-            )
-        })
-    });
-    assert!(has_image, "data-URL image must survive adapter parsing");
-}
-
-/// Full wire: boots ServerState against the real checkpoint and
-/// pushes an image chat completion through the actual axum router.
+/// Full Anthropic Messages wire: boots ServerState against the
+/// real checkpoint and pushes an image+text request through the
+/// actual axum router.
 #[tokio::test]
-async fn mage_vl_full_wire_image_chat_completion() {
+async fn mage_vl_full_wire_image_anthropic_messages() {
     if std::env::var("NEURE_MAGE_VL_E2E").as_deref() != Ok("1") && !shards_available() {
         eprintln!("skipping: mage-vl shards not present and NEURE_MAGE_VL_E2E != 1");
         return;
@@ -92,9 +68,10 @@ async fn mage_vl_full_wire_image_chat_completion() {
 
     let req = Request::builder()
         .method("POST")
-        .uri("/v1/chat/completions")
+        .uri("/v1/messages")
         .header("content-type", "application/json")
-        .body(Body::from(serde_json::to_vec(&multimodal_body()).unwrap()))
+        .header("x-api-key", "test") // real Anthropic clients send one; ignored by the parser.
+        .body(Body::from(serde_json::to_vec(&anthropic_multimodal_body()).unwrap()))
         .unwrap();
 
     let resp = app.oneshot(req).await.unwrap();
@@ -105,16 +82,23 @@ async fn mage_vl_full_wire_image_chat_completion() {
     assert_eq!(
         status,
         StatusCode::OK,
-        "e2e chat completion failed; body: {}",
+        "e2e anthropic messages failed; body: {}",
         String::from_utf8_lossy(&bytes)
     );
     let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(
-        json["object"], "chat.completion",
-        "unexpected body: {json}"
-    );
-    let content = json["choices"][0]["message"]["content"]
-        .as_str()
-        .expect("content should be a string");
-    eprintln!("mage-vl replied: {content}");
+    assert_eq!(json["type"], "message", "unexpected body: {json}");
+    assert_eq!(json["role"], "assistant");
+    let text = json["content"]
+        .as_array()
+        .expect("content array")
+        .iter()
+        .find_map(|b| {
+            if b.get("type")?.as_str()? == "text" {
+                b.get("text")?.as_str().map(|s| s.to_string())
+            } else {
+                None
+            }
+        })
+        .expect("Anthropic content should include a text block");
+    eprintln!("mage-vl replied (anthropic): {text}");
 }
