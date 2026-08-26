@@ -332,4 +332,150 @@ impl MageVlTextModel {
             .i((.., seq_len - 1, ..))?
             .contiguous()
     }
+
+    /// Reset every per-layer KV cache to empty. The internal
+    /// `KvCache` accumulates K/V across every `forward_embeds` call
+    /// and candle provides no public reset hook — without this,
+    /// the second generation on the same model instance would
+    /// attend to the previous request's tokens. Callers must invoke
+    /// this before each request; concurrent callers must
+    /// serialize externally.
+    pub(crate) fn reset_cache(&self) {
+        for layer in &self.layers {
+            layer.self_attn.kv_cache.lock().expect("kv cache poisoned").reset();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use candle_core::DType;
+    use candle_nn::VarBuilder;
+    use std::collections::HashMap;
+
+    fn small_text_cfg() -> TextConfig {
+        use candle_nn::Activation;
+        TextConfig {
+            vocab_size: 32,
+            hidden_size: 16,
+            intermediate_size: 32,
+            num_hidden_layers: 2,
+            num_attention_heads: 2,
+            num_key_value_heads: 1, // GQA: kv cache stores fewer entries
+            head_dim: 8,
+            hidden_act: Activation::Silu,
+            max_position_embeddings: 32,
+            rms_norm_eps: 1e-5,
+            tie_word_embeddings: false,
+            rope_theta: 10_000.0,
+            sliding_window: None,
+        }
+    }
+
+    /// Build a `VarBuilder` whose every weight is a tiny random
+    /// tensor (mean 0, std 0.1). candle's `Tensor::randn` uses a
+    /// thread-local RNG that is deterministic within one process,
+    /// which is exactly what the two-call comparison needs.
+    fn randn_vb(cfg: &TextConfig, dev: Device) -> VarBuilder {
+        let mut ts: HashMap<String, Tensor> = HashMap::new();
+        let mk = |key: &str, shape: &[usize]| -> Tensor {
+            let n: usize = shape.iter().product();
+            let v: Vec<f32> = (0..n)
+                .map(|i| {
+                    let x = ((i.wrapping_mul(2_654_435_761)).wrapping_add(1)) as f32;
+                    (x / u32::MAX as f32 - 0.5) * 0.2
+                })
+                .collect();
+            Tensor::from_vec(v, shape, &dev).unwrap()
+        };
+        ts.insert(
+            "model.language_model.embed_tokens.weight".into(),
+            mk("emb", &[cfg.vocab_size, cfg.hidden_size]),
+        );
+        ts.insert(
+            "lm_head.weight".into(),
+            mk("lmh", &[cfg.vocab_size, cfg.hidden_size]),
+        );
+        ts.insert(
+            "model.language_model.norm.weight".into(),
+            mk("n", &[cfg.hidden_size]),
+        );
+        for l in 0..cfg.num_hidden_layers {
+            let p = format!("model.language_model.layers.{l}");
+            ts.insert(format!("{p}.input_layernorm.weight"), mk("in", &[cfg.hidden_size]));
+            ts.insert(
+                format!("{p}.post_attention_layernorm.weight"),
+                mk("po", &[cfg.hidden_size]),
+            );
+            for proj in ["q_proj", "k_proj", "v_proj", "o_proj"] {
+                let out = match proj {
+                    "k_proj" | "v_proj" => cfg.num_key_value_heads * cfg.head_dim,
+                    _ => cfg.num_attention_heads * cfg.head_dim,
+                };
+                ts.insert(
+                    format!("{p}.self_attn.{proj}.weight"),
+                    mk(proj, &[out, cfg.hidden_size]),
+                );
+            }
+            ts.insert(
+                format!("{p}.self_attn.q_norm.weight"),
+                mk("qn", &[cfg.head_dim]),
+            );
+            ts.insert(
+                format!("{p}.self_attn.k_norm.weight"),
+                mk("kn", &[cfg.head_dim]),
+            );
+            ts.insert(
+                format!("{p}.mlp.gate_proj.weight"),
+                mk("g", &[cfg.intermediate_size, cfg.hidden_size]),
+            );
+            ts.insert(
+                format!("{p}.mlp.up_proj.weight"),
+                mk("u", &[cfg.intermediate_size, cfg.hidden_size]),
+            );
+            ts.insert(
+                format!("{p}.mlp.down_proj.weight"),
+                mk("d", &[cfg.hidden_size, cfg.intermediate_size]),
+            );
+        }
+        VarBuilder::from_tensors(ts, DType::F32, &dev)
+    }
+
+    #[test]
+    fn reset_cache_makes_consecutive_forwards_byte_identical() {
+        let dev = Device::Cpu;
+        let cfg = small_text_cfg();
+        let vb = randn_vb(&cfg, dev);
+        let text = MageVlTextModel::new(&cfg, vb).expect("build text tower");
+        let ids = Tensor::from_slice(&[1u32, 2, 3, 4], (1usize, 4usize), &Device::Cpu).unwrap();
+        let embeds = text.embed_tokens(&ids).unwrap();
+
+        let to_flat = |out: Tensor| -> Vec<f32> { out.i(0).unwrap().to_vec1::<f32>().unwrap() };
+        let logits_a = to_flat(text.forward_embeds(embeds.clone(), None, &[0]).unwrap());
+        let logits_no_reset = to_flat(text.forward_embeds(embeds.clone(), None, &[4]).unwrap());
+        let diff_no_reset: f32 = logits_a
+            .iter()
+            .zip(logits_no_reset.iter())
+            .map(|(a, b)| (a - b).abs())
+            .sum();
+        assert!(
+            diff_no_reset > 0.0,
+            "without reset, the cache should change the second forward (diff={diff_no_reset})"
+        );
+
+        // After reset, the same input + offset 0 must reproduce the
+        // original logits bit-for-bit.
+        text.reset_cache();
+        let logits_b = to_flat(text.forward_embeds(embeds, None, &[0]).unwrap());
+        let diff_after_reset: f32 = logits_a
+            .iter()
+            .zip(logits_b.iter())
+            .map(|(a, b)| (a - b).abs())
+            .sum();
+        assert_eq!(
+            diff_after_reset, 0.0,
+            "reset_cache must restore the initial forward; diff={diff_after_reset}"
+        );
+    }
 }

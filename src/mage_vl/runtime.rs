@@ -146,6 +146,11 @@ impl LlmRuntime for MageVlRuntime {
         req: CanonicalLlmRequest,
     ) -> crate::llm::ChatResult<CanonicalLlmResponse> {
         let cached = self.ensure_loaded().await?;
+        // Drop KV entries the previous request left behind — candle's
+        // text tower appends forever and never resets on its own.
+        // Safe to call before the first request (no-op on an empty
+        // cache). Serializes concurrent requests on the same model.
+        cached.model.reset_cache();
         let (input_ids, pixel_values, image_grid_thw) =
             build_qwen3_inputs(&req, &cached.device, &cached.tokenizer)
                 .await

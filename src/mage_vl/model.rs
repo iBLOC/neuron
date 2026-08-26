@@ -201,6 +201,15 @@ impl MageVLModel {
     pub fn vision_forward(&self, pixels: &Tensor, grid_thw: &Tensor) -> Result<Tensor> {
         self.vision.forward_pixels(pixels, grid_thw)
     }
+
+    /// Drop every KV cache entry the text tower accumulated across
+    /// the previous request. Safe to call when the text tower is
+    /// absent (vision-only mode) — it's a no-op in that case.
+    pub fn reset_cache(&self) {
+        if let Some(text) = &self.text {
+            text.reset_cache();
+        }
+    }
 }
 
 /// Greedy sample: index of the max logit in the LAST sequence
