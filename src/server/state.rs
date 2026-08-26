@@ -63,7 +63,7 @@ impl ServerState {
         // mutable local first so the env match below can register
         // mage-vl into it before we wrap it in an Arc for
         // self.engines.
-        let mut engines =
+        let engines =
             crate::engine::registry::CapabilityRegistries::new();
 
         let llm_runtime_env = std::env::var("NEURE_LLM_RUNTIME").ok();

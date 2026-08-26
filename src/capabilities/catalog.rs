@@ -129,8 +129,10 @@ pub fn default_capabilities() -> Vec<ModelCapabilities> {
         cap("ort", "florence-2-base", &[ImageInput], &[BoundingBox],
             &[ApiStyle::openai_vision()], false, false, false, false),
         // Mage-VL (codec-native streaming VLM, image+video understanding)
-        // Apache-2.0 license. Uses mistralrs backend for inference.
-        cap("mistralrs", "microsoft/Mage-VL", &[ImageInput, TextInput], &[TextOutput],
+        // Apache-2.0 license. Uses the neure-native mage_vl vendor tree
+        // (candle port of MageViT + Qwen3-4B) for inference; register
+        // via NEURE_LLM_RUNTIME=mage_vl.
+        cap("mage_vl", "microsoft/Mage-VL", &[ImageInput, TextInput], &[TextOutput],
             &[ApiStyle::openai_chat(), ApiStyle::anthropic_messages()],
             true, true, false, false),
 

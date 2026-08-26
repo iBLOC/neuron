@@ -63,7 +63,7 @@ pub fn routes() -> Router<ServerState> {
                 .delete(crate::models::handlers::delete_model),
         )
         .route("/v1/catalog/sources", get(crate::models::handlers::list_sources))
-        .route("/v1/chat/completions", post(chat_completions))
+        .route("/v1/chat/completions", post(crate::server::dispatch::adapter_dispatch))
         .route("/v1/audio/speech", post(audio_speech))
         .route("/v1/audio/transcriptions", post(audio_transcriptions))
         .route("/v1/rerank", post(rerank))

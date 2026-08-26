@@ -122,17 +122,54 @@ pub fn openai_to_canonical(req: OpenAiChatRequest) -> Result<CanonicalRequest, S
             "tool" => MessageRole::Tool,
             other => return Err(format!("unsupported role: {other}")),
         };
-        let content_text = match m.content {
-            Some(Value::String(s)) => s,
+        let content_text = match &m.content {
+            Some(Value::String(s)) => s.clone(),
             Some(Value::Array(parts)) => parts.iter()
                 .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
                 .collect::<Vec<_>>()
                 .join("\n"),
             _ => String::new(),
         };
+        // Multimodal parts: OpenAI `image_url` entries become
+        // ContentBlock::Image. Data URLs ("data:<mime>;base64,<payload>")
+        // map to ImageSource::Base64; remote http(s) URLs stay Url so the
+        // engine can decide whether it has a fetcher.
+        let mut images = Vec::new();
+        if let Some(Value::Array(parts)) = &m.content {
+            for p in parts {
+                if p.get("type").and_then(|t| t.as_str()) != Some("image_url") {
+                    continue;
+                }
+                let url = p
+                    .get("image_url")
+                    .and_then(|iu| iu.get("url"))
+                    .and_then(|u| u.as_str())
+                    .unwrap_or_default();
+                if let Some((mime, data)) = url
+                    .strip_prefix("data:")
+                    .and_then(|rest| rest.split_once(";base64,"))
+                {
+                    images.push(ContentBlock::Image(crate::canonical::ImageBlock {
+                        source: crate::canonical::ImageSource::Base64 {
+                            media_type: mime.to_string(),
+                            data: data.to_string(),
+                        },
+                        detail: None,
+                    }));
+                } else if url.starts_with("http://") || url.starts_with("https://") {
+                    images.push(ContentBlock::Image(crate::canonical::ImageBlock {
+                        source: crate::canonical::ImageSource::Url(url.to_string()),
+                        detail: None,
+                    }));
+                }
+            }
+        }
+        let mut content = Vec::with_capacity(1 + images.len());
+        content.push(ContentBlock::Text(TextBlock { text: content_text }));
+        content.extend(images);
         messages.push(CanonicalMessage {
             role,
-            content: vec![ContentBlock::Text(TextBlock { text: content_text })],
+            content,
             tool_calls: vec![],
             tool_call_id: m.tool_call_id,
             reasoning_content: None,

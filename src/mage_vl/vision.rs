@@ -222,10 +222,10 @@ impl PatchEmbed {
     pub fn forward(&self, xs: &Tensor) -> Result<Tensor> {
         let (n, c, t, h, w) = xs.dims5()?;
         let xs = xs.reshape((n * t, c, h, w))?;
-        let xs = self.proj.forward(&xs)?;
-        let xs = xs
+        let conv = self.proj.forward(&xs)?;
+        let xs = conv
             .permute((0, 2, 3, 1))?
-            .reshape((n * t * xs.dim(2)? * xs.dim(3)?, self.hidden_size))?;
+            .reshape((n * t * conv.dim(2)? * conv.dim(3)?, self.hidden_size))?;
         Ok(xs)
     }
 }

@@ -27,6 +27,7 @@ pub mod http;
 pub mod model;
 pub mod processor;
 pub mod runtime;
+pub(crate) mod text_tower;
 pub mod vision;
 
 pub use config::{MageVLConfig, MageVlVisionConfig, PlaceholderTokens, StreamMindGateConfig};
