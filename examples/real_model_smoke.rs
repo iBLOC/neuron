@@ -1,42 +1,39 @@
-//! Real-model smoke test for the embedding runtime.
+//! Real-model smoke harness for the neure runtime.
 //!
-//! Spins up the embedded server, loads `all-MiniLM-L6-v2` from
-//! `$NEURE_EMBEDDING_MODEL_PATH` (default: `/tmp/neure-smoke/models/embedding/all-MiniLM-L6-v2`),
-//! and exercises the `/v1/embeddings` endpoint with three checks:
+//! Boots a single embedded server and runs whichever engine smokes
+//! are configured by env vars:
 //!
-//! 1. `encoding_format: "float"` — request a real embedding, verify the
-//!    output is a 384-dim vector with non-trivial variance (i.e. not
-//!    a constant echo vector).
-//! 2. `encoding_format: "base64"` — same input, base64-encoded response.
-//!    Verify the decoded bytes round-trip to the same 384 values.
-//! 3. **Batched forward** — request a 4-element input batch. Verify
-//!    each row gets its own deterministic embedding and that the
-//!    returned count matches the input count.
+//! - **Embedding smoke**: three checks against `/v1/embeddings`
+//!   using `all-MiniLM-L6-v2`. Requires `NEURE_EMBEDDING_MODEL_PATH`
+//!   (default `/tmp/neure-smoke/models/embedding/all-MiniLM-L6-v2`)
+//!   to exist on disk.
 //!
-//! Run with:
+//! - **mage-vl smoke**: a multimodal `/v1/chat/completions` request
+//!   with a real inline PNG against `microsoft/Mage-VL`. Requires
+//!   `NEURE_LLM_RUNTIME=mage_vl` and `NEURE_MAGE_VL_SHARD_DIR`
+//!   (default points at the OpenSourceProjects checkout). Skipped
+//!   silently when the engine isn't registered.
+//!
+//! Run with embedding alone (default):
 //! ```bash
 //! cargo run --example real_model_smoke --features candle
 //! ```
 //!
-//! Set `NEURE_EMBEDDING_MODEL_PATH` to override the default model location.
+//! Run with mage-vl too (heavy — ~18 GB F32 on CPU):
+//! ```bash
+//! NEURE_LLM_RUNTIME=mage_vl \
+//! NEURE_MAGE_VL_SHARD_DIR=$HOME/Projects/OpenSourceProjects/mage/mage-vl-checkpoint \
+//! cargo run --release --example real_model_smoke --features candle
+//! ```
+//!
 //! Set `NEURE_PORT=0` (default) to bind to a random free port.
 
 use neure_lib::{run_embedded, NeureConfig, NeureEmbedConfig};
 
+const RED_PNG_B64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEElEQVR4nGP4z8AARAwQCgAf7gP9i18U1AAAAABJRU5ErkJggg==";
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let model_path = std::env::var("NEURE_EMBEDDING_MODEL_PATH").unwrap_or_else(|_| {
-        "/tmp/neure-smoke/models/embedding/all-MiniLM-L6-v2".to_string()
-    });
-    eprintln!("[smoke] loading embedding model from {model_path}");
-    if !std::path::Path::new(&model_path).join("model.safetensors").exists() {
-        eprintln!(
-            "[smoke] FATAL: model.safetensors not found in {model_path}. \
-             Download all-MiniLM-L6-v2 first."
-        );
-        std::process::exit(2);
-    }
-
     let port: u16 = std::env::var("NEURE_PORT")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -49,11 +46,59 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let port = handle.addr.port();
     eprintln!("[smoke] server bound on 127.0.0.1:{port}");
 
+    // What engines got registered? Each smoke section reports itself.
+    let did_embedding = embedding_smoke(port).await?;
+    let did_mage_vl = mage_vl_smoke(port).await?;
+
+    // ---- cleanup ----
+    eprintln!("\n[smoke] shutting down server...");
+    handle.request_shutdown();
+    handle.join().await;
+
+    match (did_embedding, did_mage_vl) {
+        (false, false) => {
+            eprintln!(
+                "[smoke] FATAL: no engines were exercised. Set \
+                 NEURE_EMBEDDING_MODEL_PATH (embedding) or \
+                 NEURE_LLM_RUNTIME=mage_vl + NEURE_MAGE_VL_SHARD_DIR (mage-vl)."
+            );
+            std::process::exit(2);
+        }
+        _ => {
+            eprintln!(
+                "[smoke] ALL CHECKS PASSED (embedding={}, mage_vl={})",
+                did_embedding, did_mage_vl
+            );
+            Ok(())
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Embedding smoke (unchanged from the original example)
+// ---------------------------------------------------------------------------
+
+async fn embedding_smoke(port: u16) -> Result<bool, Box<dyn std::error::Error>> {
+    let model_path = std::env::var("NEURE_EMBEDDING_MODEL_PATH").unwrap_or_else(|_| {
+        "/tmp/neure-smoke/models/embedding/all-MiniLM-L6-v2".to_string()
+    });
+    if !std::path::Path::new(&model_path)
+        .join("model.safetensors")
+        .exists()
+    {
+        eprintln!(
+            "[smoke:embedding] skipping: model.safetensors not found in {model_path}. \
+             Download all-MiniLM-L6-v2 first."
+        );
+        return Ok(false);
+    }
+    eprintln!("\n[smoke:embedding] loading from {model_path}");
+
     let client = reqwest::Client::new();
     let url = format!("http://127.0.0.1:{port}/v1/embeddings");
 
     // ---- 1. float encoding ----
-    eprintln!("\n[smoke 1] float encoding");
+    eprintln!("[smoke:embedding] 1. float encoding");
     let r: serde_json::Value = client
         .post(&url)
         .json(&serde_json::json!({
@@ -67,13 +112,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let float_vec = r["data"][0]["embedding"].as_array().expect("array");
     let float_count = float_vec.len();
     let float_var = variance(float_vec.iter().filter_map(|v| v.as_f64()).collect());
-    eprintln!("[smoke 1]   embedding dim = {float_count}");
-    eprintln!("[smoke 1]   variance     = {float_var:.6}");
+    eprintln!("[smoke:embedding]   embedding dim = {float_count}");
+    eprintln!("[smoke:embedding]   variance     = {float_var:.6}");
     assert_eq!(float_count, 384, "expected 384-dim embedding");
     assert!(float_var > 1e-6, "embedding has near-zero variance — model not loaded?");
 
     // ---- 2. base64 encoding ----
-    eprintln!("\n[smoke 2] base64 encoding");
+    eprintln!("[smoke:embedding] 2. base64 encoding");
     let r: serde_json::Value = client
         .post(&url)
         .json(&serde_json::json!({
@@ -92,8 +137,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .chunks_exact(4)
         .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
         .collect();
-    eprintln!("[smoke 2]   decoded bytes = {}", bytes.len());
-    eprintln!("[smoke 2]   first 3 values = {:?}", &base64_vec[..3]);
+    eprintln!("[smoke:embedding]   decoded bytes = {}", bytes.len());
+    eprintln!("[smoke:embedding]   first 3 values = {:?}", &base64_vec[..3]);
 
     // Verify base64 roundtrip matches float encoding for the same input
     let base64_first: Vec<f32> = base64_vec[..3].to_vec();
@@ -106,10 +151,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let diff = (a - b).abs();
         assert!(diff < 1e-5, "base64[{i}] {a} != float[{i}] {b} (diff {diff})");
     }
-    eprintln!("[smoke 2]   base64/float roundtrip OK (max diff < 1e-5)");
+    eprintln!("[smoke:embedding]   base64/float roundtrip OK (max diff < 1e-5)");
 
-    // ---- 3. batched forward ----
-    eprintln!("\n[smoke 3] batched forward (4 inputs)");
+    // ---- 3. batched forward + determinism ----
+    eprintln!("[smoke:embedding] 3. batched forward (4 inputs)");
     let r: serde_json::Value = client
         .post(&url)
         .json(&serde_json::json!({
@@ -131,7 +176,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let v = row["embedding"].as_array().expect("embedding");
         assert_eq!(v.len(), 384, "row {i} not 384-dim");
     }
-    // Verify per-row determinism: same input twice → same vector.
     let r2: serde_json::Value = client
         .post(&url)
         .json(&serde_json::json!({
@@ -150,16 +194,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let bv = b.as_f64().unwrap_or(0.0);
         max_diff = max_diff.max((av - bv).abs());
     }
-    eprintln!("[smoke 3]   determinism max diff = {max_diff:.2e}");
+    eprintln!("[smoke:embedding]   determinism max diff = {max_diff:.2e}");
     assert!(max_diff < 1e-5, "determinism broken: max diff {max_diff}");
-    eprintln!("[smoke 3]   batched forward + determinism OK");
+    eprintln!("[smoke:embedding]   batched forward + determinism OK");
 
-    // ---- cleanup ----
-    eprintln!("\n[smoke] shutting down server...");
-    handle.request_shutdown();
-    handle.join().await;
-    eprintln!("[smoke] ALL CHECKS PASSED");
-    Ok(())
+    Ok(true)
 }
 
 fn variance(values: Vec<f64>) -> f64 {
@@ -210,4 +249,116 @@ fn base64_decode(s: &str) -> Option<Vec<u8>> {
         out.push((buf[0] << 2) | (buf[1] >> 4));
     }
     Some(out)
+}
+
+// ---------------------------------------------------------------------------
+// mage-vl smoke (opt-in; requires NEURE_LLM_RUNTIME=mage_vl + shards)
+// ---------------------------------------------------------------------------
+
+/// Returns `true` if the engine was exercised; `false` if it was
+/// skipped because the runtime wasn't configured or the shards
+/// weren't on disk. The host embedding smoke already printed an
+/// explanatory message; this one stays terse.
+async fn mage_vl_smoke(port: u16) -> Result<bool, Box<dyn std::error::Error>> {
+    let runtime = std::env::var("NEURE_LLM_RUNTIME").ok();
+    if runtime.as_deref() != Some("mage_vl") {
+        eprintln!(
+            "[smoke:mage_vl] skipping: NEURE_LLM_RUNTIME != \"mage_vl\" \
+             (got {runtime:?})"
+        );
+        return Ok(false);
+    }
+
+    let shard_dir = std::env::var("NEURE_MAGE_VL_SHARD_DIR").unwrap_or_else(|_| {
+        "/home/ibloc/Projects/OpenSourceProjects/mage/mage-vl-checkpoint".to_string()
+    });
+    if !std::path::Path::new(&shard_dir)
+        .join("model-00001-of-00002.safetensors")
+        .exists()
+    {
+        eprintln!(
+            "[smoke:mage_vl] skipping: shards not found at {shard_dir}. \
+             Set NEURE_MAGE_VL_SHARD_DIR to the directory containing the two \
+             model-0000X-of-00002.safetensors shards."
+        );
+        return Ok(false);
+    }
+    eprintln!("\n[smoke:mage_vl] loading from {shard_dir}");
+
+    let client = reqwest::Client::new();
+    let url = format!("http://127.0.0.1:{port}/v1/chat/completions");
+
+    // ---- 1. multimodal chat completion ----
+    eprintln!("[smoke:mage_vl] 1. multimodal chat completion (image + text)");
+    let r: serde_json::Value = client
+        .post(&url)
+        .json(&serde_json::json!({
+            "model": "microsoft/Mage-VL",
+            "max_tokens": 8,
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "What color is this image?"},
+                    {"type": "image_url", "image_url": {
+                        "url": format!("data:image/png;base64,{RED_PNG_B64}")
+                    }}
+                ]
+            }]
+        }))
+        .send()
+        .await?
+        .json()
+        .await?;
+    assert_eq!(
+        r["object"], "chat.completion",
+        "unexpected response shape: {r}"
+    );
+    let content = r["choices"][0]["message"]["content"]
+        .as_str()
+        .expect("content should be a string");
+    assert!(
+        !content.is_empty(),
+        "mage-vl returned an empty response (forward produced no logits?)"
+    );
+    eprintln!("[smoke:mage_vl]   reply = {content:?}");
+
+    // ---- 2. cross-request isolation (reset_cache) ----
+    // Two identical requests after the first must produce identical
+    // content because MageVlRuntime resets the text-tower KV cache
+    // before every execute. The OpenAI API doesn't surface raw logits
+    // so we compare the decoded text — the text being byte-identical
+    // is the strongest correctness signal available at the wire.
+    eprintln!("[smoke:mage_vl] 2. cross-request isolation (reset_cache)");
+    let body = serde_json::json!({
+        "model": "microsoft/Mage-VL",
+        "max_tokens": 8,
+        "messages": [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "What color is this image?"},
+                {"type": "image_url", "image_url": {
+                    "url": format!("data:image/png;base64,{RED_PNG_B64}")
+                }}
+            ]
+        }]
+    });
+    let r2: serde_json::Value = client
+        .post(&url)
+        .json(&body)
+        .send()
+        .await?
+        .json()
+        .await?;
+    let content2 = r2["choices"][0]["message"]["content"]
+        .as_str()
+        .expect("content should be a string");
+    assert_eq!(
+        content, content2,
+        "second request must be byte-identical to the first — \
+         reset_cache failed (KV cross-request contamination); \
+         got {content2:?} after {content:?}"
+    );
+    eprintln!("[smoke:mage_vl]   both requests produced identical text");
+
+    Ok(true)
 }
