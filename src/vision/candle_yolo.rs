@@ -43,6 +43,11 @@ pub struct CandleYoloRuntime {
     /// Inference lock — YOLOv8 forward passes are not safe to run concurrently
     /// on a single loaded model (KV cache / workspace reuse).
     inference_lock: Mutex<()>,
+    /// Tensor pool for forward-pass intermediates. Reduces allocation
+    /// overhead on mobile/edge devices. Always present (CPU) under
+    /// `--features candle`; absent under feature-off builds.
+    #[cfg(feature = "candle")]
+    tensor_pool: crate::vision::memory_pool::TensorPool,
 }
 
 impl CandleYoloRuntime {
@@ -50,12 +55,41 @@ impl CandleYoloRuntime {
         let model_path = std::env::var("NEURE_VISION_MODEL_PATH")
             .ok()
             .map(std::path::PathBuf::from);
+        #[cfg(feature = "candle")]
+        let tensor_pool = crate::vision::memory_pool::TensorPool::new(
+            match device {
+                DeviceSelection::Cpu | DeviceSelection::Auto => candle_core::Device::Cpu,
+                _ => candle_core::Device::Cpu,
+            },
+        );
         Self {
             model_id: model_id.to_string(),
             device: *device,
             model_path,
             inference_lock: Mutex::new(()),
+            #[cfg(feature = "candle")]
+            tensor_pool,
         }
+    }
+
+    /// Return the number of tensors currently held in the memory pool.
+    /// Diagnostic helper for mobile/edge deployments to verify the pool
+    /// is being hit after warmup.
+    #[cfg(feature = "candle")]
+    pub fn pool_size(&self) -> usize {
+        self.tensor_pool.size()
+    }
+
+    /// Return the bytes currently held in the memory pool.
+    #[cfg(feature = "candle")]
+    pub fn pool_memory_bytes(&self) -> usize {
+        self.tensor_pool.memory_bytes()
+    }
+
+    /// Drop all pooled tensors and free their memory.
+    #[cfg(feature = "candle")]
+    pub fn pool_clear(&self) {
+        self.tensor_pool.clear();
     }
 
     /// Decode an image from bytes (PNG / JPEG / WebP) into an RGB u8 buffer.
@@ -695,5 +729,21 @@ mod tests {
         assert!(tasks.contains(&VisionTask::Classify));
         assert!(tasks.contains(&VisionTask::Segment));
         assert!(tasks.contains(&VisionTask::Pose));
+    }
+
+    #[cfg(feature = "candle")]
+    #[test]
+    fn test_candle_yolo_runtime_owns_tensor_pool() {
+        let rt = CandleYoloRuntime::new("yolov8n", &DeviceSelection::Cpu);
+        assert_eq!(rt.pool_size(), 0, "fresh runtime should have empty pool");
+        assert_eq!(rt.pool_memory_bytes(), 0);
+    }
+
+    #[cfg(feature = "candle")]
+    #[test]
+    fn test_candle_yolo_runtime_pool_clear_is_safe_on_empty() {
+        let rt = CandleYoloRuntime::new("yolov8n", &DeviceSelection::Cpu);
+        rt.pool_clear();
+        assert_eq!(rt.pool_size(), 0);
     }
 }
