@@ -23,6 +23,9 @@ pub use rtdetr_arch::{RtDetrRuntime, DetrRuntime};
 pub mod ort_runtime;
 pub use ort_runtime::{OrtModelConfig, OrtSession, OrtVisionRuntime};
 
+#[cfg(feature = "tract")]
+pub mod ort_backends;
+
 pub mod coco_classes;
 pub mod letterbox;
 pub mod memory_pool;

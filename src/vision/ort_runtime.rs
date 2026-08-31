@@ -482,18 +482,26 @@ OrtOutputLayout::Florence2 => {
     }
 }
 
-fn build_session(_onnx_path: &Path) -> Result<OrtSession, NeureError> {
-    // The real build_session constructs an OrtSession from a concrete
-    // OrtSessionRunner implementation (e.g. tract, ort, onnxruntime).
-    // The runner loads the ONNX model from the path and prepares it
-    // for inference.
-    Err(NeureError::not_implemented(
-        "ONNX session construction requires a concrete backend (ort / tract / onnxruntime); \
-         plug one in by replacing `build_session` with the real implementation. \
-         See the design spec at docs/superpowers/specs/2026-07-03-vision-yolo-lora-design.md \
-         for the contract."
-            .to_string(),
-    ))
+fn build_session(onnx_path: &Path) -> Result<OrtSession, NeureError> {
+    #[cfg(feature = "tract")]
+    {
+        use crate::vision::ort_backends::TractSession;
+        let path_str = onnx_path
+            .to_str()
+            .ok_or_else(|| NeureError::invalid_input("onnx path contains non-UTF8".to_string()))?;
+        let tract = TractSession::new(path_str)?;
+        return Ok(OrtSession::new(tract));
+    }
+    #[cfg(not(feature = "tract"))]
+    {
+        let _ = onnx_path;
+        Err(NeureError::not_implemented(
+            "ONNX session construction requires a concrete backend (ort / tract / onnxruntime); \
+             enable --features tract for pure-Rust ONNX inference. \
+             See docs/superpowers/specs/2026-07-03-vision-yolo-lora-design.md for the contract."
+                .to_string(),
+        ))
+    }
 }
 
 fn run_session(
