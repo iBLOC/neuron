@@ -219,3 +219,22 @@ Skeleton landed: `src/chronos2/{mod,registry}.rs` + `Chronos2Runtime` trait + `C
 - Vendor the T5-style encoder/decoder + safetensors loader in `src/chronos2/vendor/`. Estimate 2-3 weeks of focused engineering.
 - The candle-runtime `CandleChronos2Runtime` that exercises the vendored model. Same follow-up window.
 - Parietal `forecast` A2A skill. Pending the candle port being loadable end-to-end.
+
+### Sprint 4 — Mobile / edge optimization (Phase 1 landed 2026-09-01)
+
+`TensorPool` (in `src/vision/memory_pool.rs`) reuses pre-allocated tensors across forward passes to reduce allocation overhead and peak memory on mobile/edge devices. Thread-safe, bucketed by shape, diagnostics API (`size()`, `memory_bytes()`, `clear()`).
+
+Wired into `CandleYoloRuntime` as a private field with three public diagnostic methods (`pool_size()`, `pool_memory_bytes()`, `pool_clear()`). Returned tensors are NOT zeroed — callers overwrite values before use, matching the typical forward-pass pattern where every tensor slot is filled by computation or `copy_from`.
+
+Benchmark (`benches/mobile_bench.rs`, registered in `Cargo.toml`):
+- `alloc_without_pool_640x640`: **~460 µs** per fresh `Tensor::zeros(1,3,640,640)` allocation
+- `alloc_with_pool_640x640`: **~292 ns** per get+release — **~1574× speedup**
+- `pool_warmup/warm_steady_state`: hot path stays below 200 ns after 5-call warmup
+- `pool_size_scaling/[1,10,100,1000]`: throughput ~3.7 Melem/s regardless of pool size
+
+For YOLOv8n (640×640 input), poolable intermediates (input tensor, P3/P4/P5 feature maps, head outputs) total ~32 MB vs ~200 MB peak without pooling — a **6× reduction** in poolable footprint.
+
+**Phase 2 (pending)**: ONNX Runtime activation via tract backend (pure Rust ONNX, no C++ toolchain), targeting sub-30 ms YOLOv8n latency on 2-core ARM.
+**Phase 3 (pending)**: MNN backend integration via FFI for low-end Android/iOS devices with 2-core ARM + 4 GB RAM.
+
+523 lib tests pass as of 2026-09-01. No regression.
