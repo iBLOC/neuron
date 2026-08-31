@@ -87,6 +87,10 @@ harness = false
 name = "memory_bench"
 harness = false
 
+[[bench]]
+name = "mobile_bench"
+harness = false
+
 [features]
 default = ["candle"]
 candle = ["dep:candle-core", "dep:candle-nn", "dep:candle-transformers", "dep:tokenizers", "dep:image", "dep:base64", "dep:safetensors"]

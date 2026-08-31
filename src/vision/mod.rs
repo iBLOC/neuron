@@ -29,6 +29,9 @@ pub mod memory_pool;
 pub mod nms;
 pub mod integration_tests;
 
+#[cfg(feature = "candle")]
+pub use memory_pool::TensorPool;
+
 pub mod lora;
 #[cfg(feature = "candle")]
 pub mod lora_weights;
