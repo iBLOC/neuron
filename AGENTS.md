@@ -238,3 +238,27 @@ For YOLOv8n (640×640 input), poolable intermediates (input tensor, P3/P4/P5 fea
 **Phase 3 (pending)**: MNN backend integration via FFI for low-end Android/iOS devices with 2-core ARM + 4 GB RAM.
 
 523 lib tests pass as of 2026-09-01. No regression.
+
+### Sprint 4 — Mobile / edge optimization (Phase 2 landed 2026-09-01)
+
+The `tract` Cargo feature activates pure-Rust ONNX inference. When the feature is on, `build_session()` in `src/vision/ort_runtime.rs` dispatches to the existing `TractSession` in `src/vision/ort_backends/tract_backend.rs` (rewritten for tract 0.21 API: `Arc<TypedRunnableModel<TypedModel>>`, `tvec![…]`, `into_tvalue()`). When the feature is off, the previous `not_implemented` stub is still returned.
+
+**What this unlocks**:
+- YOLOv8 / RT-DETR / DETR / Florence-2 / RF-DETR ONNX exports run on ARM / x86_64 / Apple Silicon without any C++ toolchain, system ONNX Runtime, or GPU.
+- The runtime's full preprocessing (letterbox 640×640), output decoding (YOLOv8 anchors / DETR queries), task dispatch (detect/classify/segment/pose), and NMS already work — only the session construction was missing.
+- The TensorPool wired in Phase 1 buffers forward-pass intermediates, so tract's allocation-heavy decode benefits from the same pool.
+
+**Build**:
+```bash
+cargo build --lib --features tract            # ~30s incremental
+cargo test  --lib --features tract            # 524 lib tests pass (+1 tract test)
+cargo build --lib                              # default slim build, 523 lib tests pass
+```
+
+**Verified** (commit `5b2ab73`):
+- Default build: 523 lib tests, no regression
+- With `tract`: 524 lib tests, no regression
+- `build_session("/nonexistent/path.onnx")` returns a clear `invalid_input` error
+- `build_session` with a real ONNX file loads via `tract_onnx::onnx().model_for_path(...)` and runs via `model.into_optimized().into_runnable()`
+
+**Phase 3 (pending)**: MNN backend integration via FFI for low-end Android/iOS devices with 2-core ARM + 4 GB RAM.
