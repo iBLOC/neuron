@@ -53,7 +53,6 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg"]
 base64 = { version = "0.22", optional = true }
 safetensors = { version = "0.4", optional = true }
 wide = { version = "0.7", optional = true }
-rayon = { version = "1.10", optional = true }
 ndarray = { version = "0.16", optional = true }
 tract-onnx = { version = "0.21", optional = true }
 
@@ -106,7 +105,6 @@ voxcpm = ["dep:burn", "dep:burn-store", "dep:hound"]
 litert = ["dep:litert-lm"]
 asr-audio = ["dep:symphonia", "dep:rubato"]
 mistralrs = ["dep:mistralrs", "candle"]
-parallel = ["dep:rayon", "candle"]
 ndarray = ["dep:ndarray"]
 tract = ["dep:tract-onnx", "dep:ndarray"]
 

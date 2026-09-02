@@ -6145,7 +6145,6 @@ dependencies = [
  "litert-lm",
  "mistralrs",
  "ndarray 0.16.1",
- "rayon",
  "reqwest 0.12.28",
  "rubato 3.0.0",
  "safetensors 0.4.5",

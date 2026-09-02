@@ -162,24 +162,7 @@ pub fn merge_lora_delta(
     // Compute: delta[i, j] = scale * sum_k B[i, k] * A[k, j]
     let mut delta = vec![0.0f32; out_dim * in_dim];
 
-    #[cfg(feature = "parallel")]
-    {
-        use rayon::prelude::*;
-        delta.par_chunks_mut(in_dim).enumerate().for_each(|(i, delta_row)| {
-            for k in 0..rank {
-                let b_ik = b.data[i * rank + k];
-                if b_ik == 0.0 {
-                    continue;
-                }
-                let a_row = &a.data[k * in_dim..(k + 1) * in_dim];
-                for j in 0..in_dim {
-                    delta_row[j] += scale * b_ik * a_row[j];
-                }
-            }
-        });
-    }
-
-    #[cfg(all(feature = "candle", not(feature = "parallel")))]
+    #[cfg(feature = "candle")]
     {
         use wide::f32x8;
         let scale_vec = f32x8::splat(scale);
@@ -210,7 +193,7 @@ pub fn merge_lora_delta(
         }
     }
 
-    #[cfg(not(any(feature = "candle", feature = "parallel")))]
+    #[cfg(not(feature = "candle"))]
     {
         for i in 0..out_dim {
             for k in 0..rank {
@@ -268,10 +251,8 @@ pub fn apply_lora_delta(
         let chunks = total / 8;
         let remainder = total % 8;
 
-        // Process 8 elements at a time
         for i in 0..chunks {
             let offset = i * 8;
-            // Use unsafe for aligned SIMD operations
             unsafe {
                 let base_ptr = base.as_ptr().add(offset) as *const f32x8;
                 let delta_ptr = delta.as_ptr().add(offset) as *const f32x8;
@@ -282,7 +263,6 @@ pub fn apply_lora_delta(
             }
         }
 
-        // Handle remaining elements
         for i in chunks * 8..chunks * 8 + remainder {
             out[i] = base[i] + delta[i];
         }
