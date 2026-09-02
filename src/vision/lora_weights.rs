@@ -179,7 +179,7 @@ pub fn merge_lora_delta(
         });
     }
 
-    #[cfg(all(feature = "simd", not(feature = "parallel")))]
+    #[cfg(all(feature = "candle", not(feature = "parallel")))]
     {
         use wide::f32x8;
         let scale_vec = f32x8::splat(scale);
@@ -210,7 +210,7 @@ pub fn merge_lora_delta(
         }
     }
 
-    #[cfg(not(any(feature = "simd", feature = "parallel")))]
+    #[cfg(not(any(feature = "candle", feature = "parallel")))]
     {
         for i in 0..out_dim {
             for k in 0..rank {
@@ -262,7 +262,7 @@ pub fn apply_lora_delta(
     let mut out = vec![0.0f32; out_dim * in_dim];
     let total = out_dim * in_dim;
 
-    #[cfg(feature = "simd")]
+    #[cfg(feature = "candle")]
     {
         use wide::f32x8;
         let chunks = total / 8;
@@ -288,7 +288,7 @@ pub fn apply_lora_delta(
         }
     }
 
-    #[cfg(not(feature = "simd"))]
+    #[cfg(not(feature = "candle"))]
     {
         for i in 0..total {
             out[i] = base[i] + delta[i];

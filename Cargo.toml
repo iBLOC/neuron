@@ -91,9 +91,13 @@ harness = false
 name = "mobile_bench"
 harness = false
 
+[[bench]]
+name = "lora_bench"
+harness = false
+
 [features]
 default = ["candle"]
-candle = ["dep:candle-core", "dep:candle-nn", "dep:candle-transformers", "dep:tokenizers", "dep:image", "dep:base64", "dep:safetensors"]
+candle = ["dep:candle-core", "dep:candle-nn", "dep:candle-transformers", "dep:tokenizers", "dep:image", "dep:base64", "dep:safetensors", "dep:wide"]
 flash-attn = ["candle-transformers/flash-attn", "dep:candle-flash-attn"]
 metal = ["candle-core/metal", "candle-nn/metal", "candle-transformers/metal"]
 cuda = ["candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda"]
@@ -102,8 +106,7 @@ voxcpm = ["dep:burn", "dep:burn-store", "dep:hound"]
 litert = ["dep:litert-lm"]
 asr-audio = ["dep:symphonia", "dep:rubato"]
 mistralrs = ["dep:mistralrs", "candle"]
-simd = ["dep:wide"]
-parallel = ["dep:rayon"]
+parallel = ["dep:rayon", "candle"]
 ndarray = ["dep:ndarray"]
 tract = ["dep:tract-onnx", "dep:ndarray"]
 
