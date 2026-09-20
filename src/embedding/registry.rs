@@ -17,6 +17,16 @@ pub struct EmbeddingRuntimeRegistry {
     resources: Mutex<ResourceTracker>,
 }
 
+impl Clone for EmbeddingRuntimeRegistry {
+    fn clone(&self) -> Self {
+        Self {
+            registered: self.registered.clone(),
+            loaded: self.loaded.clone(),
+            resources: Mutex::new(ResourceTracker::default()),
+        }
+    }
+}
+
 impl EmbeddingRuntimeRegistry {
     pub fn new(_config: Arc<NeureConfig>) -> Self {
         Self {

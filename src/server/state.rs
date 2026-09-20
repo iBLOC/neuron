@@ -8,9 +8,18 @@
 
 use std::sync::Arc;
 
+use tokio::sync::Mutex;
+
 use crate::config::{DeviceSelection, NeureConfig};
-use crate::llm::{LlmImpl, LlmRuntime, LlmRuntimeRegistry, ModelInfo};
+use crate::llm::{LlmImpl, LlmRuntime, LlmRuntimeRegistry, ModelInfo, RegisteredLlm};
 use crate::models::EngineType;
+
+use crate::chronos2::{Chronos2Registry, RegisteredChronos2};
+use crate::embedding::RegisteredEmbedding;
+use crate::rerank::RegisteredRerank;
+use crate::tts::RegisteredTts;
+use crate::asr::RegisteredAsr;
+use crate::vision::RegisteredVision;
 
 /// Shared application state injected into every axum handler.
 #[derive(Clone)]
@@ -23,6 +32,17 @@ pub struct ServerState {
     pub embedding_registry: Arc<crate::embedding::EmbeddingRuntimeRegistry>,
     pub vision_registry: Arc<crate::vision::VisionRuntimeRegistry>,
     pub chronos2_registry: Arc<crate::chronos2::Chronos2Registry>,
+
+    // -- Runtime registration locks (for dynamic model loading) --
+    // These wrap the registries above to allow &mut self registration at runtime.
+    // Cortex uses these via register_model() to dynamically load models.
+    pub(crate) llm_registry_lock: Arc<Mutex<LlmRuntimeRegistry>>,
+    pub(crate) tts_registry_lock: Arc<Mutex<crate::tts::TtsRuntimeRegistry>>,
+    pub(crate) asr_registry_lock: Arc<Mutex<crate::asr::AsrRuntimeRegistry>>,
+    pub(crate) rerank_registry_lock: Arc<Mutex<crate::rerank::RerankRuntimeRegistry>>,
+    pub(crate) embedding_registry_lock: Arc<Mutex<crate::embedding::EmbeddingRuntimeRegistry>>,
+    pub(crate) vision_registry_lock: Arc<Mutex<crate::vision::VisionRuntimeRegistry>>,
+    pub(crate) chronos2_registry_lock: Arc<Mutex<crate::chronos2::Chronos2Registry>>,
 
     // -- LoRA adapter registry (dynamic detection class extension) --
     pub vision_lora_registry: Arc<crate::vision::LoraRegistry>,
@@ -389,15 +409,16 @@ impl ServerState {
         // rather than failing boot. The candle port of the T5-style
         // architecture is a follow-up commit; this block exists so
         // /v1/forecast can route through the registry end-to-end.
-        let mut chronos2_registry = crate::chronos2::Chronos2Registry::new();
+        let mut chronos2_reg = crate::chronos2::Chronos2Registry::new();
         if let Some((model_id, _path)) = crate::chronos2::env_discovery() {
-            let _ = chronos2_registry.register(
+            let _ = chronos2_reg.register(
                 model_id,
                 DeviceSelection::Cpu,
                 crate::chronos2::required_memory_bytes(),
             );
         }
-        let chronos2_registry = Arc::new(chronos2_registry);
+        let chronos2_registry_lock = Arc::new(Mutex::new(chronos2_reg.clone()));
+        let chronos2_registry = Arc::new(chronos2_reg);
 
         // ---- Shared infrastructure (unchanged) ----------------------------
         let mut source_registry = crate::models::SourceRegistry::new();
@@ -462,6 +483,13 @@ impl ServerState {
             catalog_config,
         ));
 
+        let llm_registry_lock = Arc::new(Mutex::new(llm_registry.clone()));
+        let tts_registry_lock = Arc::new(Mutex::new(tts_registry.clone()));
+        let asr_registry_lock = Arc::new(Mutex::new(asr_registry.clone()));
+        let rerank_registry_lock = Arc::new(Mutex::new(rerank_registry.clone()));
+        let embedding_registry_lock = Arc::new(Mutex::new(embedding_registry.clone()));
+        let vision_registry_lock = Arc::new(Mutex::new(vision_registry.clone()));
+
         Self {
             llm_registry: Arc::new(llm_registry),
             tts_registry: Arc::new(tts_registry),
@@ -471,6 +499,13 @@ impl ServerState {
             vision_registry: Arc::new(vision_registry),
             vision_lora_registry,
             chronos2_registry,
+            llm_registry_lock,
+            tts_registry_lock,
+            asr_registry_lock,
+            rerank_registry_lock,
+            embedding_registry_lock,
+            vision_registry_lock,
+            chronos2_registry_lock,
             llm: llm_shortcut,
             tts: tts_shortcut,
             asr: asr_shortcut,
@@ -551,6 +586,65 @@ impl ServerState {
         }
 
         models
+    }
+
+    pub async fn register_model(
+        &self,
+        capability: &str,
+        model_id: String,
+        engine: String,
+        device: DeviceSelection,
+        required_memory_bytes: u64,
+    ) -> Result<(), crate::llm::NeureError> {
+        match capability {
+            "llm" => {
+                let mut reg = self.llm_registry_lock.lock().await;
+                let impl_id = LlmImpl::parse(&engine)
+                    .map_err(|e| crate::llm::NeureError::new(format!("Invalid LLM engine: {e}")))?;
+                reg.register(model_id, impl_id, device, required_memory_bytes)?;
+            }
+            "tts" => {
+                let mut reg = self.tts_registry_lock.lock().await;
+                let impl_id = crate::tts::TtsImpl::parse(&engine)
+                    .map_err(|e| crate::llm::NeureError::new(format!("Invalid TTS engine: {e}")))?;
+                reg.register(model_id, impl_id, device, required_memory_bytes)?;
+            }
+            "asr" => {
+                let mut reg = self.asr_registry_lock.lock().await;
+                let impl_id = crate::asr::AsrImpl::parse(&engine)
+                    .map_err(|e| crate::llm::NeureError::new(format!("Invalid ASR engine: {e}")))?;
+                reg.register(model_id, impl_id, device, required_memory_bytes)?;
+            }
+            "rerank" => {
+                let mut reg = self.rerank_registry_lock.lock().await;
+                let impl_id = crate::rerank::RerankImpl::parse(&engine)
+                    .map_err(|e| crate::llm::NeureError::new(format!("Invalid rerank engine: {e}")))?;
+                reg.register(model_id, impl_id, device, required_memory_bytes)?;
+            }
+            "embedding" => {
+                let mut reg = self.embedding_registry_lock.lock().await;
+                let impl_id = crate::embedding::EmbeddingImpl::parse(&engine)
+                    .map_err(|e| crate::llm::NeureError::new(format!("Invalid embedding engine: {e}")))?;
+                reg.register(model_id, impl_id, device, required_memory_bytes)?;
+            }
+            "vision" => {
+                let mut reg = self.vision_registry_lock.lock().await;
+                let impl_id = crate::vision::VisionImpl::parse(&engine)
+                    .map_err(|e| crate::llm::NeureError::new(format!("Invalid vision engine: {e}")))?;
+                reg.register(model_id, impl_id, device, required_memory_bytes)?;
+            }
+            "chronos2" => {
+                let mut reg = self.chronos2_registry_lock.lock().await;
+                reg.register(model_id, device, required_memory_bytes)?;
+            }
+            _ => {
+                return Err(crate::llm::NeureError::new(format!(
+                    "Unknown capability: {}. Valid: llm, tts, asr, rerank, embedding, vision, chronos2",
+                    capability
+                )));
+            }
+        }
+        Ok(())
     }
 }
 

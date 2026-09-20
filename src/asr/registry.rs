@@ -17,6 +17,16 @@ pub struct AsrRuntimeRegistry {
     resources: Mutex<ResourceTracker>,
 }
 
+impl Clone for AsrRuntimeRegistry {
+    fn clone(&self) -> Self {
+        Self {
+            registered: self.registered.clone(),
+            loaded: self.loaded.clone(),
+            resources: Mutex::new(ResourceTracker::default()),
+        }
+    }
+}
+
 impl AsrRuntimeRegistry {
     pub fn new(_config: Arc<NeureConfig>) -> Self {
         Self {

@@ -14,6 +14,16 @@ pub struct LlmRuntimeRegistry {
     resources: Mutex<ResourceTracker>,
 }
 
+impl Clone for LlmRuntimeRegistry {
+    fn clone(&self) -> Self {
+        Self {
+            registered: self.registered.clone(),
+            loaded: self.loaded.clone(),
+            resources: Mutex::new(ResourceTracker::default()),
+        }
+    }
+}
+
 impl LlmRuntimeRegistry {
     pub fn new(_config: Arc<NeureConfig>) -> Self {
         Self {

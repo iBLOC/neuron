@@ -14,6 +14,16 @@ pub struct RerankRuntimeRegistry {
     resources: Mutex<ResourceTracker>,
 }
 
+impl Clone for RerankRuntimeRegistry {
+    fn clone(&self) -> Self {
+        Self {
+            registered: self.registered.clone(),
+            loaded: self.loaded.clone(),
+            resources: Mutex::new(ResourceTracker::default()),
+        }
+    }
+}
+
 impl RerankRuntimeRegistry {
     pub fn new(_config: Arc<NeureConfig>) -> Self {
         Self {

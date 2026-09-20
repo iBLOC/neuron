@@ -7,16 +7,20 @@ use super::{Chronos2Runtime, RegisteredChronos2, StubChronos2Runtime};
 use crate::config::{DeviceSelection, ResourceTracker};
 use crate::llm::NeureError;
 
-/// Public registry mirroring the shape of `LlmRuntimeRegistry`.
-/// Holds the registered forecast models, a lazy-loaded-instance
-/// cache, and a `ResourceTracker`. The real candle port of
-/// Chronos2 will plug in via `register_candle_runtime`; v0 of
-/// this registry only ships `StubChronos2Runtime` so the HTTP
-/// layer can be wired end-to-end.
 pub struct Chronos2Registry {
     pub registered: Vec<RegisteredChronos2>,
     loaded: Arc<AsyncMutex<HashMap<String, Arc<dyn Chronos2Runtime>>>>,
     resources: Mutex<ResourceTracker>,
+}
+
+impl Clone for Chronos2Registry {
+    fn clone(&self) -> Self {
+        Self {
+            registered: self.registered.clone(),
+            loaded: self.loaded.clone(),
+            resources: Mutex::new(ResourceTracker::default()),
+        }
+    }
 }
 
 impl Chronos2Registry {

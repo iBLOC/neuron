@@ -14,6 +14,16 @@ pub struct TtsRuntimeRegistry {
     resources: Mutex<ResourceTracker>,
 }
 
+impl Clone for TtsRuntimeRegistry {
+    fn clone(&self) -> Self {
+        Self {
+            registered: self.registered.clone(),
+            loaded: self.loaded.clone(),
+            resources: Mutex::new(ResourceTracker::default()),
+        }
+    }
+}
+
 impl TtsRuntimeRegistry {
     pub fn new(_config: Arc<NeureConfig>) -> Self {
         Self {

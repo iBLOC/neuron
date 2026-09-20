@@ -21,6 +21,16 @@ pub struct VisionRuntimeRegistry {
     resources: Mutex<ResourceTracker>,
 }
 
+impl Clone for VisionRuntimeRegistry {
+    fn clone(&self) -> Self {
+        Self {
+            registered: self.registered.clone(),
+            loaded: self.loaded.clone(),
+            resources: Mutex::new(ResourceTracker::default()),
+        }
+    }
+}
+
 impl VisionRuntimeRegistry {
     pub fn new(_config: Arc<NeureConfig>) -> Self {
         Self {
