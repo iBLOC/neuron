@@ -1,7 +1,7 @@
 //! Configuration types for the Mage-VL vendor tree.
 //!
 //! Mirrors `config.json` from the `microsoft/Mage-VL` HuggingFace
-//! checkpoint (only the fields neure consumes). The vision encoder
+//! checkpoint (only the fields neuron consumes). The vision encoder
 //! config is shared by Mage-ViT and the StreamMind gate path because
 //! both consume the same codec-native patch stream.
 

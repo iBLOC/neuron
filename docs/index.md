@@ -1,10 +1,10 @@
 ---
-title: What is neure?
+title: What is neuron?
 description: Apache-2.0 Rust inference runtime for LLM / TTS / ASR / Rerank / Embedding / Vision
 layout: home
 
 hero:
-  name: neure
+  name: neuron
   text: Neural Inference Runtime
   tagline: OpenAI- and Anthropic-compatible. Library-only. Embed into any Rust host.
   actions:
@@ -13,7 +13,7 @@ hero:
       link: /guide/quick-start
     - theme: alt
       text: GitHub
-      link: https://github.com/iBLOC/neure-rs
+      link: https://github.com/ibloc/neuron
     - theme: alt
       text: API Reference
       link: /reference/api
@@ -38,8 +38,8 @@ features:
       just the engines you need.
   - title: 📦 Library-Only, Embedded
     details: |
-      No standalone daemon. Hosts call neure::run_embedded(...) and get back a
-      NeureHandle that owns the axum server lifetime. Drop neure into Tauri 2 /
+      No standalone daemon. Hosts call neuron::run_embedded(...) and get back a
+      NeuronHandle that owns the axum server lifetime. Drop neuron into Tauri 2 /
       Flutter (via cargo-ndk) / server-side process / any Rust binary.
   - title: 🌍 Multi-Source Model Registry
     details: |
@@ -55,11 +55,11 @@ features:
 
 ---
 
-## What is neure?
+## What is neuron?
 
-`neure` is a **library-only** Rust crate that hosts an OpenAI-compatible (and Anthropic Messages v1) HTTP inference server inside any Rust embedder process. It's designed for AI user-avatars / agent systems / Tauri desktop shells / Flutter mobile apps that need a full inference stack (LLM + TTS + ASR + Rerank + Embedding + Vision) without standing up a separate daemon.
+`neuron` is a **library-only** Rust crate that hosts an OpenAI-compatible (and Anthropic Messages v1) HTTP inference server inside any Rust embedder process. It's designed for AI user-avatars / agent systems / Tauri desktop shells / Flutter mobile apps that need a full inference stack (LLM + TTS + ASR + Rerank + Embedding + Vision) without standing up a separate daemon.
 
-The wire format is byte-for-byte OpenAI / vLLM / ollama / llama.cpp / Anthropic SDK compatible, so any client that already works with those services will work with neure unchanged.
+The wire format is byte-for-byte OpenAI / vLLM / ollama / llama.cpp / Anthropic SDK compatible, so any client that already works with those services will work with neuron unchanged.
 
 ## At a glance
 
@@ -73,15 +73,15 @@ The wire format is byte-for-byte OpenAI / vLLM / ollama / llama.cpp / Anthropic 
 
 Most inference servers (vLLM, ollama, llama.cpp server) are standalone daemons — they bind a port, you point clients at it. That's the right model for shared GPU servers. It's the wrong model for embedding into a desktop app or mobile binary:
 
-- **Tauri 2 desktop shell**: each Tauri app should ship neure as part of its binary, not spawn a sidecar.
-- **Flutter mobile (via cargo-ndk)**: neure becomes a shared library loaded by a Kotlin/Swift shim.
+- **Tauri 2 desktop shell**: each Tauri app should ship neuron as part of its binary, not spawn a sidecar.
+- **Flutter mobile (via cargo-ndk)**: neuron becomes a shared library loaded by a Kotlin/Swift shim.
 - **Server-side process**: any HTTP gateway or orchestrator agent that already has its own main loop.
 
-`neure::run_embedded(NeureEmbedConfig { port: 8085, ... })` returns a `NeureHandle` that owns the axum server's lifetime. The host calls `handle.request_shutdown()` + `handle.join().await` for graceful drain. Drop the handle without shutdown and you leak the bind port — so the type system enforces correct lifecycle.
+`neuron::run_embedded(NeuronEmbedConfig { port: 8085, ... })` returns a `NeuronHandle` that owns the axum server's lifetime. The host calls `handle.request_shutdown()` + `handle.join().await` for graceful drain. Drop the handle without shutdown and you leak the bind port — so the type system enforces correct lifecycle.
 
 ## Where to next?
 
-- [Quick Start](/guide/quick-start) — embed neure in a Rust binary in 20 lines
+- [Quick Start](/guide/quick-start) — embed neuron in a Rust binary in 20 lines
 - [Architecture](/concepts/architecture) — how the data flow works end-to-end
 - [Capabilities](/concepts/capabilities) — the 6 model surfaces, in detail
 - [OpenAI-compatible API](/reference/api) — full route table

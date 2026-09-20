@@ -82,7 +82,7 @@ jobs:
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: neure-docs-${{ github.sha }}
+          name: neuron-docs-${{ github.sha }}
           path: docs/.vitepress/dist
           retention-days: 14
           if-no-files-found: error
@@ -114,7 +114,7 @@ jobs:
       - name: Download build artifact
         uses: actions/download-artifact@v4
         with:
-          name: neure-docs-${{ github.sha }}
+          name: neuron-docs-${{ github.sha }}
           path: docs/.vitepress/dist
 
       - name: Setup Pages
@@ -124,7 +124,7 @@ jobs:
         id: deployment
         uses: actions/deploy-pages@v4
         with:
-          artifact_name: neure-docs-${{ github.sha }}
+          artifact_name: neuron-docs-${{ github.sha }}
           token: ${{ secrets.GITHUB_TOKEN }}
           retention-days: 14
 

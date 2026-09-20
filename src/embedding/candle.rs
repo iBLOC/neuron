@@ -1,7 +1,7 @@
 //! Candle-based [`MiniLmL6V2EmbeddingRuntime`] — the real
 //! implementation behind `sentence-transformers/all-MiniLM-L6-v2`.
 //!
-//! Loading requires `NEURE_EMBEDDING_MODEL_PATH` to point at a
+//! Loading requires `NEURON_EMBEDDING_MODEL_PATH` to point at a
 //! directory containing `config.json` + `tokenizer.json` +
 //! `*.safetensors`. Without that env var, [`load`] returns a
 //! `not_implemented` error so the embedded server still starts and
@@ -21,7 +21,7 @@ use crate::embedding::{
     EmbeddingData, EmbeddingRequest, EmbeddingResponse, EmbeddingRuntime, EmbeddingUsage,
     EmbeddingVector, EncodingFormat,
 };
-use crate::llm::{ChatResult, ModelInfo, NeureError};
+use crate::llm::{ChatResult, ModelInfo, NeuronError};
 
 pub struct MiniLmL6V2EmbeddingRuntime {
     inner: Arc<Mutex<Option<LoadedModel>>>,
@@ -36,7 +36,7 @@ struct LoadedModel {
 
 impl MiniLmL6V2EmbeddingRuntime {
     pub fn new() -> Self {
-        let mut info = ModelInfo::new("all-minilm-l6-v2", "neure");
+        let mut info = ModelInfo::new("all-minilm-l6-v2", "neuron");
         info.capabilities = Some(vec!["embedding".to_string()]);
         Self {
             inner: Arc::new(Mutex::new(None)),
@@ -46,18 +46,18 @@ impl MiniLmL6V2EmbeddingRuntime {
 
     fn resolve_model_path(model: &str) -> Result<PathBuf, String> {
         let _ = model;
-        let path = match std::env::var("NEURE_EMBEDDING_MODEL_PATH") {
+        let path = match crate::config::env_var_result("EMBEDDING_MODEL_PATH") {
             Ok(p) => PathBuf::from(p),
             Err(_) => {
                 return Err(format!(
-                    "MiniLmL6V2EmbeddingRuntime: set NEURE_EMBEDDING_MODEL_PATH to a \
+                    "MiniLmL6V2EmbeddingRuntime: set NEURON_EMBEDDING_MODEL_PATH to a \
                      directory containing config.json + tokenizer.json + \
                      *.safetensors. Download `sentence-transformers/all-MiniLM-L6-v2` \
                      from HuggingFace and set the path. Requested model: '{model}'"
                 ));
             }
         };
-        ensure_dir(&path, "NEURE_EMBEDDING_MODEL_PATH")?;
+        ensure_dir(&path, "NEURON_EMBEDDING_MODEL_PATH")?;
         let config_path = path.join("config.json");
         let tokenizer_path = path.join("tokenizer.json");
         let has_weights = std::fs::read_dir(&path)
@@ -179,15 +179,15 @@ impl EmbeddingRuntime for MiniLmL6V2EmbeddingRuntime {
     where
         Self: Sized,
     {
-        let path = Self::resolve_model_path(model).map_err(NeureError::not_implemented)?;
-        let device = Self::map_device_selection(device).map_err(NeureError::new)?;
+        let path = Self::resolve_model_path(model).map_err(NeuronError::not_implemented)?;
+        let device = Self::map_device_selection(device).map_err(NeuronError::new)?;
         let config: BertConfig = serde_json::from_slice(
             &std::fs::read(path.join("config.json"))
-                .map_err(|e| NeureError::new(format!("read config.json: {e}")))?,
+                .map_err(|e| NeuronError::new(format!("read config.json: {e}")))?,
         )
-        .map_err(|e| NeureError::new(format!("parse BertConfig: {e}")))?;
+        .map_err(|e| NeuronError::new(format!("parse BertConfig: {e}")))?;
         let tokenizer = Tokenizer::from_file(path.join("tokenizer.json"))
-            .map_err(|e| NeureError::new(format!("load tokenizer: {e}")))?;
+            .map_err(|e| NeuronError::new(format!("load tokenizer: {e}")))?;
         // Enable batch-longest padding so `encode_batch` produces
         // encodings of identical length, ready for a single forward.
         // For all-MiniLM-L6-v2 the [PAD] token has id 0, matching
@@ -210,9 +210,9 @@ impl EmbeddingRuntime for MiniLmL6V2EmbeddingRuntime {
                 &device,
             )
         }
-        .map_err(|e| NeureError::new(format!("load weights: {e}")))?;
+        .map_err(|e| NeuronError::new(format!("load weights: {e}")))?;
         let bert = BertModel::load(vb, &config)
-            .map_err(|e| NeureError::new(format!("build BertModel: {e}")))?;
+            .map_err(|e| NeuronError::new(format!("build BertModel: {e}")))?;
         let runtime = Self::new();
         {
             let mut guard = runtime.inner.lock().unwrap();
@@ -228,19 +228,19 @@ impl EmbeddingRuntime for MiniLmL6V2EmbeddingRuntime {
     async fn embed(&self, req: EmbeddingRequest) -> ChatResult<EmbeddingResponse> {
         let texts = req.texts();
         if texts.is_empty() || (texts.len() == 1 && texts[0].is_empty()) {
-            return Err(NeureError::invalid_input("input cannot be empty"));
+            return Err(NeuronError::invalid_input("input cannot be empty"));
         }
         let format = match &req.encoding_format {
             None => EncodingFormat::Float,
-            Some(s) => EncodingFormat::parse(s).map_err(NeureError::invalid_input)?,
+            Some(s) => EncodingFormat::parse(s).map_err(NeuronError::invalid_input)?,
         };
         let mut guard = self.inner.lock().unwrap();
         let loaded = match guard.as_mut() {
             Some(l) => l,
             None => {
-                return Err(NeureError::not_initialized(
+                return Err(NeuronError::not_initialized(
                     "MiniLmL6V2EmbeddingRuntime: call `load()` first or set \
-                     NEURE_EMBEDDING_RUNTIME=candle via run_embedded()",
+                     NEURON_EMBEDDING_RUNTIME=candle via run_embedded()",
                 ));
             }
         };
@@ -249,7 +249,7 @@ impl EmbeddingRuntime for MiniLmL6V2EmbeddingRuntime {
         let encodings = loaded
             .tokenizer
             .encode_batch(texts.clone(), true)
-            .map_err(|e| NeureError::new(format!("tokenize batch: {e}")))?;
+            .map_err(|e| NeuronError::new(format!("tokenize batch: {e}")))?;
         let batch = encodings.len();
         let seq_len = encodings[0].get_ids().len();
 
@@ -263,26 +263,26 @@ impl EmbeddingRuntime for MiniLmL6V2EmbeddingRuntime {
         }
 
         let ids_t = Tensor::new(all_ids.as_slice(), &loaded.device)
-            .map_err(|e| NeureError::new(format!("ids tensor: {e}")))?
+            .map_err(|e| NeuronError::new(format!("ids tensor: {e}")))?
             .reshape(&[batch, seq_len])
-            .map_err(|e| NeureError::new(format!("reshape ids: {e}")))?;
+            .map_err(|e| NeuronError::new(format!("reshape ids: {e}")))?;
         let mask_t = Tensor::new(all_mask.as_slice(), &loaded.device)
-            .map_err(|e| NeureError::new(format!("mask tensor: {e}")))?
+            .map_err(|e| NeuronError::new(format!("mask tensor: {e}")))?
             .reshape(&[batch, seq_len])
-            .map_err(|e| NeureError::new(format!("reshape mask: {e}")))?;
+            .map_err(|e| NeuronError::new(format!("reshape mask: {e}")))?;
         let type_t = Tensor::new(all_type_ids.as_slice(), &loaded.device)
-            .map_err(|e| NeureError::new(format!("type_ids tensor: {e}")))?
+            .map_err(|e| NeuronError::new(format!("type_ids tensor: {e}")))?
             .reshape(&[batch, seq_len])
-            .map_err(|e| NeureError::new(format!("reshape type_ids: {e}")))?;
+            .map_err(|e| NeuronError::new(format!("reshape type_ids: {e}")))?;
 
         let out = loaded
             .model
             .forward(&ids_t, &type_t, Some(&mask_t))
-            .map_err(|e| NeureError::new(format!("bert forward: {e}")))?;
-        let pooled = Self::mean_pool(&out, &mask_t).map_err(NeureError::new)?;
+            .map_err(|e| NeuronError::new(format!("bert forward: {e}")))?;
+        let pooled = Self::mean_pool(&out, &mask_t).map_err(NeuronError::new)?;
         let rows: Vec<Vec<f32>> = pooled
             .to_vec2()
-            .map_err(|e| NeureError::new(format!("to_vec2: {e}")))?;
+            .map_err(|e| NeuronError::new(format!("to_vec2: {e}")))?;
 
         let data: Vec<EmbeddingData> = rows
             .into_iter()
@@ -313,13 +313,13 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial]
     async fn test_candle_embedding_load_without_env_returns_not_implemented() {
-        unsafe { std::env::remove_var("NEURE_EMBEDDING_MODEL_PATH") };
+        unsafe { std::env::remove_var("NEURON_EMBEDDING_MODEL_PATH") };
         let result =
             MiniLmL6V2EmbeddingRuntime::load("all-minilm-l6-v2", &DeviceSelection::Cpu).await;
         assert!(result.is_err());
         let err = result.err().unwrap();
         assert_eq!(err.error_type, "not_implemented");
-        assert!(err.message.contains("NEURE_EMBEDDING_MODEL_PATH"));
+        assert!(err.message.contains("NEURON_EMBEDDING_MODEL_PATH"));
     }
 
     #[tokio::test]
@@ -352,23 +352,23 @@ mod tests {
 
     #[test]
     fn test_resolve_model_path_missing_env() {
-        unsafe { std::env::remove_var("NEURE_EMBEDDING_MODEL_PATH") };
+        unsafe { std::env::remove_var("NEURON_EMBEDDING_MODEL_PATH") };
         let err = MiniLmL6V2EmbeddingRuntime::resolve_model_path("all-minilm-l6-v2")
             .unwrap_err();
-        assert!(err.contains("NEURE_EMBEDDING_MODEL_PATH"));
+        assert!(err.contains("NEURON_EMBEDDING_MODEL_PATH"));
     }
 
     #[test]
     fn test_resolve_model_path_nonexistent_dir() {
         unsafe {
             std::env::set_var(
-                "NEURE_EMBEDDING_MODEL_PATH",
+                "NEURON_EMBEDDING_MODEL_PATH",
                 "/this/path/does/not/exist/12345",
             );
         }
         let err = MiniLmL6V2EmbeddingRuntime::resolve_model_path("all-minilm-l6-v2")
             .unwrap_err();
         assert!(err.contains("does not exist"));
-        unsafe { std::env::remove_var("NEURE_EMBEDDING_MODEL_PATH") };
+        unsafe { std::env::remove_var("NEURON_EMBEDDING_MODEL_PATH") };
     }
 }

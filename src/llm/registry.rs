@@ -4,8 +4,8 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use futures_util::stream::BoxStream;
 
-use super::{LlmRuntime, LlmImpl, ModelInfo, NeureError, RegisteredLlm, RegistryKey};
-use crate::config::{DeviceSelection, NeureConfig, ResourceTracker};
+use super::{LlmRuntime, LlmImpl, ModelInfo, NeuronError, RegisteredLlm, RegistryKey};
+use crate::config::{DeviceSelection, NeuronConfig, ResourceTracker};
 use crate::llm::{ChatRequest, ChatResponse, ChatChunk};
 
 pub struct LlmRuntimeRegistry {
@@ -25,7 +25,7 @@ impl Clone for LlmRuntimeRegistry {
 }
 
 impl LlmRuntimeRegistry {
-    pub fn new(_config: Arc<NeureConfig>) -> Self {
+    pub fn new(_config: Arc<NeuronConfig>) -> Self {
         Self {
             registered: Vec::new(),
             loaded: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
@@ -39,7 +39,7 @@ impl LlmRuntimeRegistry {
         impl_id: LlmImpl,
         device: DeviceSelection,
         required_memory_bytes: u64,
-    ) -> Result<(), NeureError> {
+    ) -> Result<(), NeuronError> {
         // Check resources before registering
         let mut res = self.resources.lock().unwrap();
         if !res.can_load(required_memory_bytes, &device) {
@@ -47,12 +47,12 @@ impl LlmRuntimeRegistry {
                 DeviceSelection::Cpu | DeviceSelection::Auto => res.available_cpu_bytes(),
                 _ => res.available_gpu_bytes(),
             };
-            return Err(NeureError::new(format!(
+            return Err(NeuronError::new(format!(
                 "InsufficientResources: model={model_id}, required={required_memory_bytes}, available={available}"
             )));
         }
         res.allocate(required_memory_bytes, &device)
-            .map_err(NeureError::new)?;
+            .map_err(NeuronError::new)?;
 
         self.registered.push(RegisteredLlm {
             model_id,
@@ -63,13 +63,13 @@ impl LlmRuntimeRegistry {
         Ok(())
     }
 
-    pub async fn runtime_for(&self, model_id: &str) -> Result<Arc<dyn LlmRuntime>, NeureError> {
+    pub async fn runtime_for(&self, model_id: &str) -> Result<Arc<dyn LlmRuntime>, NeuronError> {
         let entry = self
             .registered
             .iter()
             .find(|r| r.model_id == model_id)
             .ok_or_else(|| {
-                NeureError::new(format!("ModelNotRegistered: {model_id}"))
+                NeuronError::new(format!("ModelNotRegistered: {model_id}"))
             })?;
 
         let key = RegistryKey {
@@ -89,7 +89,7 @@ impl LlmRuntimeRegistry {
                 let loaded = super::CandleLlmRuntime::load(&entry.model_id, &entry.device)
                     .await
                     .map_err(|e| {
-                        NeureError::new(format!("CandleLlmRuntime load failed: {e}"))
+                        NeuronError::new(format!("CandleLlmRuntime load failed: {e}"))
                     })?;
                 Arc::from(loaded)
             }
@@ -98,7 +98,7 @@ impl LlmRuntimeRegistry {
                 let loaded = super::LitertLlmRuntime::load(&entry.model_id, &entry.device)
                     .await
                     .map_err(|e| {
-                        NeureError::new(format!("LitertLlmRuntime load failed: {e}"))
+                        NeuronError::new(format!("LitertLlmRuntime load failed: {e}"))
                     })?;
                 Arc::from(loaded)
             }
@@ -107,7 +107,7 @@ impl LlmRuntimeRegistry {
                 let loaded = super::MistralRsLlmRuntime::load(&entry.model_id, &entry.device)
                     .await
                     .map_err(|e| {
-                        NeureError::new(format!("MistralRsLlmRuntime load failed: {e}"))
+                        NeuronError::new(format!("MistralRsLlmRuntime load failed: {e}"))
                     })?;
                 Arc::from(loaded)
             }
@@ -133,7 +133,7 @@ impl LlmRuntimeRegistry {
                     Ok(handle) => match handle.block_on(async { self.runtime_for(&id).await }) {
                         Ok(rt) => rt,
                         Err(e) => {
-                            eprintln!("[neure] llm: failed to load default runtime for {id}: {e}");
+                            eprintln!("[neuron] llm: failed to load default runtime for {id}: {e}");
                             Arc::new(UnavailableLlmRuntime)
                         }
                     },
@@ -153,13 +153,13 @@ impl LlmRuntime for UnavailableLlmRuntime {
     where
         Self: Sized,
     {
-        Err(NeureError::new(UNV_MSG))
+        Err(NeuronError::new(UNV_MSG))
     }
     async fn chat(&self, _: ChatRequest) -> crate::llm::ChatResult<ChatResponse> {
-        Err(NeureError::new(UNV_MSG))
+        Err(NeuronError::new(UNV_MSG))
     }
     async fn chat_stream(&self, _: ChatRequest) -> crate::llm::ChatResult<BoxStream<'static, ChatChunk>> {
-        Err(NeureError::new(UNV_MSG))
+        Err(NeuronError::new(UNV_MSG))
     }
     fn list_models(&self) -> Vec<ModelInfo> {
         vec![]
@@ -179,7 +179,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_runtime_for_unregistered_returns_error() {
-        let config = Arc::new(NeureConfig::new());
+        let config = Arc::new(NeuronConfig::new());
         let reg = LlmRuntimeRegistry::new(config);
         let result = reg.runtime_for("nonexistent").await;
         assert!(result.is_err());
@@ -189,7 +189,7 @@ mod tests {
 
     #[test]
     fn test_default_runtime_empty_returns_unavailable() {
-        let config = Arc::new(NeureConfig::new());
+        let config = Arc::new(NeuronConfig::new());
         let reg = LlmRuntimeRegistry::new(config);
         let rt = reg.default_runtime();
         assert_eq!(rt.name(), "unavailable");

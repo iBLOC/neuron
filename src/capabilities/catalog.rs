@@ -58,7 +58,7 @@ impl CapabilityCatalog {
 }
 
 /// Return the default set of (engine_impl, model_id, capabilities) entries
-/// covering all engines shipped with neure. Public so host processes can:
+/// covering all engines shipped with neuron. Public so host processes can:
 /// 1. Call `CapabilityCatalog::with_defaults()` for in-memory use
 /// 2. Serialize the Vec<ModelCapabilities> to a config file for persistence
 /// 3. On startup, read the config file and call `CapabilityCatalog::register(...)`
@@ -129,9 +129,9 @@ pub fn default_capabilities() -> Vec<ModelCapabilities> {
         cap("ort", "florence-2-base", &[ImageInput], &[BoundingBox],
             &[ApiStyle::openai_vision()], false, false, false, false),
         // Mage-VL (codec-native streaming VLM, image+video understanding)
-        // Apache-2.0 license. Uses the neure-native mage_vl vendor tree
+        // Apache-2.0 license. Uses the neuron-native mage_vl vendor tree
         // (candle port of MageViT + Qwen3-4B) for inference; register
-        // via NEURE_LLM_RUNTIME=mage_vl.
+        // via NEURON_LLM_RUNTIME=mage_vl.
         cap("mage_vl", "microsoft/Mage-VL", &[ImageInput, TextInput], &[TextOutput],
             &[ApiStyle::openai_chat(), ApiStyle::anthropic_messages()],
             true, true, false, false),

@@ -30,7 +30,7 @@ use std::sync::{Arc, RwLock};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::llm::{ChatResult, NeureError};
+use crate::llm::{ChatResult, NeuronError};
 
 /// Status of a registered LoRA adapter.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -103,10 +103,10 @@ impl LoraRegistry {
     }
 
     /// Register a new LoRA adapter. Returns the assigned class_id range.
-    pub fn register(&self, adapter: LoraAdapter) -> Result<(u32, u32), NeureError> {
+    pub fn register(&self, adapter: LoraAdapter) -> Result<(u32, u32), NeuronError> {
         let mut by_id = self.by_id.write().unwrap();
         if by_id.contains_key(&adapter.meta.id) {
-            return Err(NeureError::invalid_input(format!(
+            return Err(NeuronError::invalid_input(format!(
                 "LoraAdapterExists: id={}",
                 adapter.meta.id
             )));
@@ -137,12 +137,12 @@ impl LoraRegistry {
     }
 
     /// Look up multiple adapters by id. Returns an error if any id is missing.
-    pub fn get_many(&self, ids: &[String]) -> Result<Vec<Arc<LoraAdapter>>, NeureError> {
+    pub fn get_many(&self, ids: &[String]) -> Result<Vec<Arc<LoraAdapter>>, NeuronError> {
         let by_id = self.by_id.read().unwrap();
         let mut out = Vec::with_capacity(ids.len());
         for id in ids {
             let adapter = by_id.get(id).ok_or_else(|| {
-                NeureError::invalid_input(format!("LoraAdapterNotFound: id={id}"))
+                NeuronError::invalid_input(format!("LoraAdapterNotFound: id={id}"))
             })?;
             out.push(adapter.clone());
         }
@@ -236,13 +236,13 @@ pub fn load_lora_from_path<P: AsRef<Path>>(
     let weights_path = path.join("lora.safetensors");
 
     if !meta_path.exists() {
-        return Err(NeureError::invalid_input(format!(
+        return Err(NeuronError::invalid_input(format!(
             "LoraMetadataNotFound: {}",
             meta_path.display()
         )));
     }
     if !weights_path.exists() {
-        return Err(NeureError::invalid_input(format!(
+        return Err(NeuronError::invalid_input(format!(
             "LoraWeightsNotFound: {}",
             weights_path.display()
         )));
@@ -250,10 +250,10 @@ pub fn load_lora_from_path<P: AsRef<Path>>(
 
     // Read metadata.json
     let meta_bytes = std::fs::read(&meta_path).map_err(|e| {
-        NeureError::invalid_input(format!("failed to read metadata: {e}"))
+        NeuronError::invalid_input(format!("failed to read metadata: {e}"))
     })?;
     let mut meta: LoraAdapterMeta = serde_json::from_slice(&meta_bytes).map_err(|e| {
-        NeureError::invalid_input(format!("invalid metadata.json: {e}"))
+        NeuronError::invalid_input(format!("invalid metadata.json: {e}"))
     })?;
     meta.id = request.id.clone();
     meta.name = request.name.clone();
@@ -281,7 +281,7 @@ pub fn load_lora_from_path<P: AsRef<Path>>(
 #[cfg(feature = "candle")]
 pub fn parse_safetensors_lora(path: &Path) -> ChatResult<Vec<LoraTensor>> {
     super::lora_weights::parse_safetensors_lora(path)
-        .map_err(|e| NeureError::new(e.message))
+        .map_err(|e| NeuronError::new(e.message))
 }
 
 /// LoRA safetensors parsing stub when the `candle` feature is off

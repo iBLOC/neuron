@@ -7,9 +7,9 @@
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 
 #[cfg(feature = "candle")]
-use neure_lib::vision::lora_weights::{merge_lora_delta, apply_lora_delta};
+use neuron_lib::vision::lora_weights::{merge_lora_delta, apply_lora_delta};
 #[cfg(feature = "candle")]
-use neure_lib::vision::LoraTensor;
+use neuron_lib::vision::LoraTensor;
 
 #[cfg(feature = "candle")]
 fn bench_lora_merge(c: &mut Criterion) {

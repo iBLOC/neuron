@@ -1,16 +1,16 @@
-//! Real-model smoke harness for the neure runtime.
+//! Real-model smoke harness for the neuron runtime.
 //!
 //! Boots a single embedded server and runs whichever engine smokes
 //! are configured by env vars:
 //!
 //! - **Embedding smoke**: three checks against `/v1/embeddings`
-//!   using `all-MiniLM-L6-v2`. Requires `NEURE_EMBEDDING_MODEL_PATH`
-//!   (default `/tmp/neure-smoke/models/embedding/all-MiniLM-L6-v2`)
+//!   using `all-MiniLM-L6-v2`. Requires `NEURON_EMBEDDING_MODEL_PATH`
+//!   (default `/tmp/neuron-smoke/models/embedding/all-MiniLM-L6-v2`)
 //!   to exist on disk.
 //!
 //! - **mage-vl smoke**: a multimodal `/v1/chat/completions` request
 //!   with a real inline PNG against `microsoft/Mage-VL`. Requires
-//!   `NEURE_LLM_RUNTIME=mage_vl` and `NEURE_MAGE_VL_SHARD_DIR`
+//!   `NEURON_LLM_RUNTIME=mage_vl` and `NEURON_MAGE_VL_SHARD_DIR`
 //!   (default points at the OpenSourceProjects checkout). Skipped
 //!   silently when the engine isn't registered.
 //!
@@ -21,26 +21,26 @@
 //!
 //! Run with mage-vl too (heavy — ~18 GB F32 on CPU):
 //! ```bash
-//! NEURE_LLM_RUNTIME=mage_vl \
-//! NEURE_MAGE_VL_SHARD_DIR=$HOME/Projects/OpenSourceProjects/mage/mage-vl-checkpoint \
+//! NEURON_LLM_RUNTIME=mage_vl \
+//! NEURON_MAGE_VL_SHARD_DIR=$HOME/Projects/OpenSourceProjects/mage/mage-vl-checkpoint \
 //! cargo run --release --example real_model_smoke --features candle
 //! ```
 //!
-//! Set `NEURE_PORT=0` (default) to bind to a random free port.
+//! Set `NEURON_PORT=0` (default) to bind to a random free port.
 
-use neure_lib::{run_embedded, NeureConfig, NeureEmbedConfig};
+use neuron_lib::{run_embedded, NeuronConfig, NeuronEmbedConfig};
 
 const RED_PNG_B64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEElEQVR4nGP4z8AARAwQCgAf7gP9i18U1AAAAABJRU5ErkJggg==";
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let port: u16 = std::env::var("NEURE_PORT")
+    let port: u16 = std::env::var("NEURON_PORT")
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
-    let cfg = NeureEmbedConfig {
+    let cfg = NeuronEmbedConfig {
         port,
-        config: NeureConfig::new(),
+        config: NeuronConfig::new(),
     };
     let handle = run_embedded(cfg).await?;
     let port = handle.addr.port();
@@ -59,8 +59,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         (false, false) => {
             eprintln!(
                 "[smoke] FATAL: no engines were exercised. Set \
-                 NEURE_EMBEDDING_MODEL_PATH (embedding) or \
-                 NEURE_LLM_RUNTIME=mage_vl + NEURE_MAGE_VL_SHARD_DIR (mage-vl)."
+                 NEURON_EMBEDDING_MODEL_PATH (embedding) or \
+                 NEURON_LLM_RUNTIME=mage_vl + NEURON_MAGE_VL_SHARD_DIR (mage-vl)."
             );
             std::process::exit(2);
         }
@@ -79,8 +79,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 // ---------------------------------------------------------------------------
 
 async fn embedding_smoke(port: u16) -> Result<bool, Box<dyn std::error::Error>> {
-    let model_path = std::env::var("NEURE_EMBEDDING_MODEL_PATH").unwrap_or_else(|_| {
-        "/tmp/neure-smoke/models/embedding/all-MiniLM-L6-v2".to_string()
+    let model_path = std::env::var("NEURON_EMBEDDING_MODEL_PATH").unwrap_or_else(|_| {
+        "/tmp/neuron-smoke/models/embedding/all-MiniLM-L6-v2".to_string()
     });
     if !std::path::Path::new(&model_path)
         .join("model.safetensors")
@@ -252,7 +252,7 @@ fn base64_decode(s: &str) -> Option<Vec<u8>> {
 }
 
 // ---------------------------------------------------------------------------
-// mage-vl smoke (opt-in; requires NEURE_LLM_RUNTIME=mage_vl + shards)
+// mage-vl smoke (opt-in; requires NEURON_LLM_RUNTIME=mage_vl + shards)
 // ---------------------------------------------------------------------------
 
 /// Returns `true` if the engine was exercised; `false` if it was
@@ -260,16 +260,16 @@ fn base64_decode(s: &str) -> Option<Vec<u8>> {
 /// weren't on disk. The host embedding smoke already printed an
 /// explanatory message; this one stays terse.
 async fn mage_vl_smoke(port: u16) -> Result<bool, Box<dyn std::error::Error>> {
-    let runtime = std::env::var("NEURE_LLM_RUNTIME").ok();
+    let runtime = std::env::var("NEURON_LLM_RUNTIME").ok();
     if runtime.as_deref() != Some("mage_vl") {
         eprintln!(
-            "[smoke:mage_vl] skipping: NEURE_LLM_RUNTIME != \"mage_vl\" \
+            "[smoke:mage_vl] skipping: NEURON_LLM_RUNTIME != \"mage_vl\" \
              (got {runtime:?})"
         );
         return Ok(false);
     }
 
-    let shard_dir = std::env::var("NEURE_MAGE_VL_SHARD_DIR").unwrap_or_else(|_| {
+    let shard_dir = std::env::var("NEURON_MAGE_VL_SHARD_DIR").unwrap_or_else(|_| {
         "/home/ibloc/Projects/OpenSourceProjects/mage/mage-vl-checkpoint".to_string()
     });
     if !std::path::Path::new(&shard_dir)
@@ -278,7 +278,7 @@ async fn mage_vl_smoke(port: u16) -> Result<bool, Box<dyn std::error::Error>> {
     {
         eprintln!(
             "[smoke:mage_vl] skipping: shards not found at {shard_dir}. \
-             Set NEURE_MAGE_VL_SHARD_DIR to the directory containing the two \
+             Set NEURON_MAGE_VL_SHARD_DIR to the directory containing the two \
              model-0000X-of-00002.safetensors shards."
         );
         return Ok(false);

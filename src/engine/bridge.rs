@@ -53,7 +53,7 @@ impl LlmRuntime for LlmRuntimeBridge {
         -> crate::llm::ChatResult<CanonicalLlmResponse>
     {
         let chat_req = translators::canonical_to_chat_request(&req)
-            .map_err(|e| crate::llm::NeureError::new(format!("bridge canonical→chat: {e}")))?;
+            .map_err(|e| crate::llm::NeuronError::new(format!("bridge canonical→chat: {e}")))?;
         let chat_resp = self.inner.chat(chat_req).await?;
         Ok(translators::chat_response_to_canonical(&req.model, chat_resp))
     }
@@ -63,7 +63,7 @@ impl LlmRuntime for LlmRuntimeBridge {
     {
         use futures_util::StreamExt;
         let chat_req = translators::canonical_to_chat_request(&req)
-            .map_err(|e| crate::llm::NeureError::new(format!("bridge stream: {e}")))?;
+            .map_err(|e| crate::llm::NeuronError::new(format!("bridge stream: {e}")))?;
         let stream = self.inner.chat_stream(chat_req).await?;
         Ok(Box::pin(stream.filter_map(|chunk| async move {
             let text = chunk.choices.into_iter().next()
@@ -89,7 +89,7 @@ mod tests {
         ContentBlock, MessageRole, TextBlock, SystemBlock,
     };
     use std::sync::Arc;
-    use crate::llm::{ChatMessage, ChatRequest, Choice, DeltaMessage, NeureError, Usage};
+    use crate::llm::{ChatMessage, ChatRequest, Choice, DeltaMessage, NeuronError, Usage};
 
     struct MockChatRuntime;
 

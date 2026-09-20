@@ -4,7 +4,7 @@ title: Multi-source Model Registry
 
 # Multi-source Model Registry
 
-neure ships with a **multi-source model registry** that lets you pull model weights from HuggingFace, hf-mirror (China CDN), ModelScope, or any custom source. Per-engine and per-model source overrides give you fine-grained control over where each model comes from.
+neuron ships with a **multi-source model registry** that lets you pull model weights from HuggingFace, hf-mirror (China CDN), ModelScope, or any custom source. Per-engine and per-model source overrides give you fine-grained control over where each model comes from.
 
 ## Quick start: download a model
 
@@ -37,11 +37,11 @@ curl -X DELETE http://localhost:8085/v1/models/pull/abc123
 
 ## Default source
 
-By default, neure uses **ModelScope** as the source (set via `NEURE_DEFAULT_SOURCE=modelscope`). This is the right default for users in China and the Asia-Pacific region; users in other regions should switch to `huggingface` via env var.
+By default, neuron uses **ModelScope** as the source (set via `NEURON_DEFAULT_SOURCE=modelscope`). This is the right default for users in China and the Asia-Pacific region; users in other regions should switch to `huggingface` via env var.
 
 ```bash
 # Switch default source globally
-export NEURE_DEFAULT_SOURCE=huggingface
+export NEURON_DEFAULT_SOURCE=huggingface
 ```
 
 ## Source override syntax
@@ -58,22 +58,22 @@ curl -X POST http://localhost:8085/v1/models/pull \
   -d '{"source_repo": "huggingface:Qwen/Qwen2.5-0.5B-Instruct"}'
 ```
 
-The puller also strips a leading `<other-source>:` prefix if the user has overridden the source via `NEURE_LLM_SOURCE` / `NEURE_MODEL_SOURCE_*` — so requesting `modelscope:openbmb/MiniCPM5-1B` from a process whose per-engine source is `hf-mirror` correctly routes to the mirror rather than 404-ing.
+The puller also strips a leading `<other-source>:` prefix if the user has overridden the source via `NEURON_LLM_SOURCE` / `NEURON_MODEL_SOURCE_*` — so requesting `modelscope:openbmb/MiniCPM5-1B` from a process whose per-engine source is `hf-mirror` correctly routes to the mirror rather than 404-ing.
 
 ## Per-engine and per-model source overrides
 
 ```bash
 # All LLM models come from HuggingFace (overrides the default modelscope)
-export NEURE_LLM_SOURCE=huggingface
+export NEURON_LLM_SOURCE=huggingface
 
 # All TTS models come from ModelScope
-export NEURE_TTS_SOURCE=modelscope
+export NEURON_TTS_SOURCE=modelscope
 
 # This specific LLM model comes from a custom mirror
-export NEURE_MODEL_SOURCE_LLM_QWEN2_5_0_5B="hf-mirror"
+export NEURON_MODEL_SOURCE_LLM_QWEN2_5_0_5B="hf-mirror"
 
 # All downloads from a custom source go through this endpoint
-export NEURE_SOURCE_HUGGINGFACE_ENDPOINT="https://my-internal-mirror.example.com"
+export NEURON_SOURCE_HUGGINGFACE_ENDPOINT="https://my-internal-mirror.example.com"
 ```
 
 Source IDs use underscores for spaces (e.g. `huggingface`, `hf-mirror`, `modelscope`). Model IDs use underscores for hyphens (e.g. `qwen2.5-0.5b`).
@@ -83,7 +83,7 @@ Source IDs use underscores for spaces (e.g. `huggingface`, `hf-mirror`, `modelsc
 You can add a custom download source at runtime via the `Source` trait:
 
 ```rust
-use neure::models::source::{Source, SourceMetadata};
+use neuron::models::source::{Source, SourceMetadata};
 
 struct MyOrgSource {
     endpoint: String,
@@ -107,11 +107,11 @@ state.catalog.register_source(Arc::new(MyOrgSource { ... }));
 
 ```bash
 # Use a custom HuggingFace endpoint (e.g. enterprise proxy)
-export NEURE_SOURCE_HUGGINGFACE_ENDPOINT="https://my-proxy.example.com"
-export NEURE_SOURCE_HUGGINGFACE_TOKEN="..."
+export NEURON_SOURCE_HUGGINGFACE_ENDPOINT="https://my-proxy.example.com"
+export NEURON_SOURCE_HUGGINGFACE_TOKEN="..."
 
 # Use a custom ModelScope endpoint
-export NEURE_SOURCE_MODELSCOPE_ENDPOINT="https://my-modelscope-mirror"
+export NEURON_SOURCE_MODELSCOPE_ENDPOINT="https://my-modelscope-mirror"
 ```
 
 ## Catalog dedup
@@ -159,11 +159,11 @@ For desktop apps or air-gapped servers, you can pre-bundle models as part of you
 
 ```bash
 # Build the model directory manually:
-export NEURE_MODEL_DIRS=/opt/myapp/models
+export NEURON_MODEL_DIRS=/opt/myapp/models
 mkdir -p /opt/myapp/models
 # (manually download weights via huggingface-cli or scp from another machine)
 
-# neure discovers models on startup by scanning NEURE_MODEL_DIRS
+# neuron discovers models on startup by scanning NEURON_MODEL_DIRS
 curl http://localhost:8085/v1/models
 ```
 
@@ -171,6 +171,6 @@ The registry automatically picks up pre-bundled models without any source-pull. 
 
 ## Next steps
 
-- [Embed neure into a Rust Host](/howto/embed-into-host) — full Tauri 2 walkthrough
-- [Environment Variables](/reference/env-vars) — full `NEURE_*` matrix
+- [Embed neuron into a Rust Host](/howto/embed-into-host) — full Tauri 2 walkthrough
+- [Environment Variables](/reference/env-vars) — full `NEURON_*` matrix
 - [Architecture](/concepts/architecture) — registry internals

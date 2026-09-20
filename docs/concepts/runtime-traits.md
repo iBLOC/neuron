@@ -4,7 +4,7 @@ title: Runtime Traits
 
 # Runtime Traits
 
-Every capability in neure follows the same pattern: a **trait** that defines the contract, one or more **implementations** (one per engine backend), and a **registry** that holds lazy-loaded instances and routes requests by model name.
+Every capability in neuron follows the same pattern: a **trait** that defines the contract, one or more **implementations** (one per engine backend), and a **registry** that holds lazy-loaded instances and routes requests by model name.
 
 This page documents the trait surface for each capability. Adding a new runtime (e.g. a new LLM engine) is a ~200-line addition that implements one of these traits and registers it.
 

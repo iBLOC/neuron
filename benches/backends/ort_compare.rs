@@ -1,6 +1,6 @@
 //! ONNX Runtime (ort) comparison benchmarks for the comparative suite.
 //!
-//! Compares neure's candle-based YOLOv8 forward pass against Microsoft's
+//! Compares neuron's candle-based YOLOv8 forward pass against Microsoft's
 //! ONNX Runtime (via the `ort` crate) on the same workload. Both
 //! backends produce functionally equivalent outputs (the same
 //! detection list, up to FP32 precision).
@@ -12,10 +12,10 @@
 
 use criterion::Bencher;
 
-/// Run neure's YOLOv8 forward pass on a 640×640 input and produce one
+/// Run neuron's YOLOv8 forward pass on a 640×640 input and produce one
 /// detection. Implementation runs the full candle backbone + head +
-/// DFL decode in `neure_lib::vision::yolov8_arch::Yolov8Forward`.
-pub fn bench_neure_candle(b: &mut Bencher) {
+/// DFL decode in `neuron_lib::vision::yolov8_arch::Yolov8Forward`.
+pub fn bench_neuron_candle(b: &mut Bencher) {
     b.iter(|| {
         // The runtime is heavy in debug mode (1-2s per call) so this
         // bench uses very few iterations. Real perf data should be
@@ -27,7 +27,7 @@ pub fn bench_neure_candle(b: &mut Bencher) {
 /// Run a single YOLOv8 forward pass, returning a deterministic class id.
 /// Used by `compare.rs::iter_custom` to measure latency + RSS delta
 /// in one combined call.
-pub fn bench_neure_candle_once() -> u64 {
+pub fn bench_neuron_candle_once() -> u64 {
     // v1.0 stub: the real forward pass requires a 256x256+ probe to
     // register all BatchNorm variables (see benches/perf.rs). For now
     // we return a placeholder so the bench can iterate quickly.
@@ -45,8 +45,8 @@ pub fn bench_ort(b: &mut Bencher) {
         // Look for a YOLOv8 ONNX model in the standard location.
         let candidates = [
             PathBuf::from("models/yolov8n.onnx"),
-            PathBuf::from("/usr/share/neure/models/yolov8n.onnx"),
-            std::env::var("NEURE_YOLOV8_ONNX").ok().map(PathBuf::from),
+            PathBuf::from("/usr/share/neuron/models/yolov8n.onnx"),
+            std::env::var("NEURON_YOLOV8_ONNX").ok().map(PathBuf::from),
         ];
         for path in candidates.into_iter().flatten() {
             if path.exists() {
@@ -70,7 +70,7 @@ pub fn bench_ort(b: &mut Bencher) {
             b.iter(|| 0u64);
             eprintln!(
                 "[ort_compare] YOLOv8 ONNX model not found. \
-                 Set NEURE_YOLOV8_ONNX=/path/to/yolov8n.onnx to enable this benchmark."
+                 Set NEURON_YOLOV8_ONNX=/path/to/yolov8n.onnx to enable this benchmark."
             );
         }
     }
@@ -89,7 +89,7 @@ pub fn bench_ort(b: &mut Bencher) {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn test_bench_neure_candle_smoke() {
+    fn test_bench_neuron_candle_smoke() {
         // Ensure the bench function doesn't panic on basic invocation.
         let mut count = 0u64;
         count += 1;

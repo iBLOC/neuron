@@ -4,7 +4,7 @@ title: Vision Tasks (detect / classify / segment / pose)
 
 # Vision Tasks (detect / classify / segment / pose)
 
-neure exposes 4 vision task endpoints under `/v1/vision/*`, dispatched to the appropriate model family. This how-to covers the full request/response shape, the model selection rules, and the LoRA extension mechanism.
+neuron exposes 4 vision task endpoints under `/v1/vision/*`, dispatched to the appropriate model family. This how-to covers the full request/response shape, the model selection rules, and the LoRA extension mechanism.
 
 ## The 4 tasks
 
@@ -203,7 +203,7 @@ Vision models are large (YOLOv8n is ~6MB, RF-DETR-large is ~80MB). The first det
 - **Wrong image format**: only PNG / JPEG / WebP are supported. Other formats (TIFF, BMP, HEIC) return 400.
 - **Too many detections**: if you don't set `max_detections`, you may get 100+ boxes for cluttered scenes. Filter by score client-side.
 - **LoRA on the wrong base model**: if your LoRA was trained on `yolov8s` but you request `yolov8n`, the merge will silently produce nonsense. Make sure `metadata.json::base_model` matches the request.
-- **No CUDA for ONNX**: ONNX runtime falls back to CPU if CUDA isn't available, which is ~10x slower. If you need GPU, set `ORT_CUDA=1` before launching neure.
+- **No CUDA for ONNX**: ONNX runtime falls back to CPU if CUDA isn't available, which is ~10x slower. If you need GPU, set `ORT_CUDA=1` before launching neuron.
 
 ## Next steps
 

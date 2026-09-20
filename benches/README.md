@@ -1,6 +1,6 @@
-# Benchmarking neure
+# Benchmarking neuron
 
-This directory contains Criterion benchmarks for measuring performance of neure's data-structure operations and DTO construction/sorting. Real-engine benchmarks (LLM forward passes, TTS synthesis, rerank scoring) require a separate benchmarking harness with model weights — see `examples/real_model_smoke.rs` and `examples/real_model_rerank_smoke.rs` for end-to-end smoke tests.
+This directory contains Criterion benchmarks for measuring performance of neuron's data-structure operations and DTO construction/sorting. Real-engine benchmarks (LLM forward passes, TTS synthesis, rerank scoring) require a separate benchmarking harness with model weights — see `examples/real_model_smoke.rs` and `examples/real_model_rerank_smoke.rs` for end-to-end smoke tests.
 
 ## Running Benchmarks
 
@@ -68,7 +68,7 @@ The `MemoryTrace` helper records RSS + peak RSS for a single benchmark iteration
 
 ## Comparative benchmarks (vs MNN, llama.cpp, ONNX Runtime)
 
-The `compare.rs` benchmark + `backends/*.rs` stubs compare neure's inference latency against the mainstream frameworks:
+The `compare.rs` benchmark + `backends/*.rs` stubs compare neuron's inference latency against the mainstream frameworks:
 
 ```bash
 cargo bench --bench compare
@@ -78,8 +78,8 @@ cargo run --release --bin compare_report
 
 | Backend | v1.0 status | How to enable real forward pass |
 |---|---|---|
-| **neure-candle** | ✅ Real (candle YOLOv8 forward) | enabled by default |
-| **ort** (ONNX Runtime) | ⚠️ Stub (noop) | add `dep:ort` to `Cargo.toml` + `ort` feature, set `NEURE_YOLOV8_ONNX` |
+| **neuron-candle** | ✅ Real (candle YOLOv8 forward) | enabled by default |
+| **ort** (ONNX Runtime) | ⚠️ Stub (noop) | add `dep:ort` to `Cargo.toml` + `ort` feature, set `NEURON_YOLOV8_ONNX` |
 | **mnn** (Alibaba) | ⚠️ Stub (noop) | build MNN from `https://github.com/alibaba/MNN`, add FFI binding in `crates/mnn-sys` |
 | **llama.cpp** | ⚠️ Stub (noop for non-LLM) | build llama.cpp, add Rust FFI (e.g. `llama-cpp-sys-2`), load a GGUF model |
 

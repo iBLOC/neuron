@@ -28,13 +28,13 @@ fn anthropic_multimodal_body() -> serde_json::Value {
 /// source ordering (image before text) is preserved.
 #[test]
 fn anthropic_parse_carries_image_into_canonical_request() {
-    use neure_lib::adapter::ApiAdapter;
+    use neuron_lib::adapter::ApiAdapter;
     let body = serde_json::to_vec(&anthropic_multimodal_body()).unwrap();
     let headers = axum::http::HeaderMap::new();
-    let canonical = neure_lib::adapter::anthropic_messages::AnthropicMessagesAdapter
+    let canonical = neuron_lib::adapter::anthropic_messages::AnthropicMessagesAdapter
         .parse(&body.into(), &headers)
         .expect("parse");
-    let neure_lib::canonical::CanonicalRequest::Llm(llm) = canonical else {
+    let neuron_lib::canonical::CanonicalRequest::Llm(llm) = canonical else {
         panic!("expected Llm canonical request");
     };
     let user = llm
@@ -45,8 +45,8 @@ fn anthropic_parse_carries_image_into_canonical_request() {
     let has_image = user.content.iter().any(|b| {
         matches!(
             b,
-            neure_lib::canonical::ContentBlock::Image(neure_lib::canonical::ImageBlock {
-                source: neure_lib::canonical::ImageSource::Base64 { .. },
+            neuron_lib::canonical::ContentBlock::Image(neuron_lib::canonical::ImageBlock {
+                source: neuron_lib::canonical::ImageSource::Base64 { .. },
                 ..
             })
         )
@@ -57,7 +57,7 @@ fn anthropic_parse_carries_image_into_canonical_request() {
     let image_first = user
         .content
         .first()
-        .map(|b| matches!(b, neure_lib::canonical::ContentBlock::Image(_)))
+        .map(|b| matches!(b, neuron_lib::canonical::ContentBlock::Image(_)))
         .unwrap_or(false);
     assert!(
         image_first,

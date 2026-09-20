@@ -1,12 +1,12 @@
 //! Mage-VL smoke test — image + text input → text output.
 //!
 //! This example demonstrates loading Mage-VL (a codec-native streaming VLM)
-//! via neure's mistralrs backend and running an image+text inference.
+//! via neuron's mistralrs backend and running an image+text inference.
 //!
 //! ## Prerequisites
 //!
 //! - Mage-VL weights downloaded (mistralrs handles caching via HF hub)
-//! - `NEURE_LLM_MODEL_PATH` set to the Mage-VL model directory, or
+//! - `NEURON_LLM_MODEL_PATH` set to the Mage-VL model directory, or
 //!   use the HuggingFace model ID `microsoft/Mage-VL` directly
 //!
 //! ## Running
@@ -16,8 +16,8 @@
 //! ```
 
 #[cfg(feature = "mistralrs")]
-use neure_lib::{
-    run_embedded, NeureConfig, NeureEmbedConfig, NeureHandle,
+use neuron_lib::{
+    run_embedded, NeuronConfig, NeuronEmbedConfig, NeuronHandle,
     ChatMessage, ChatRequest, LlmRuntime, DeviceSelection,
 };
 
@@ -30,18 +30,18 @@ fn main() {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Build config with Mage-VL as the default LLM model
-    let config = NeureConfig::new()
+    let config = NeuronConfig::new()
         .with_llm_model("microsoft/Mage-VL")
         .with_device(DeviceSelection::Auto);
 
     // 2. Start embedded server (we need it for model loading via registry)
-    let handle = run_embedded(NeureEmbedConfig {
+    let handle = run_embedded(NeuronEmbedConfig {
         port: 0, // random port
         config,
     }).await?;
 
     let addr = handle.addr();
-    println!("neure started on {}", addr);
+    println!("neuron started on {}", addr);
 
     // 3. Wait for the model to load
     tokio::time::sleep(std::time::Duration::from_secs(5)).await;

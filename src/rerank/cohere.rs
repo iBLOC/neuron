@@ -8,11 +8,11 @@
 //! - You're already paying for a Cohere API key
 //!
 //! Configuration via env vars:
-//! - `NEURE_COHERE_API_KEY` (required) — your Cohere API key
-//! - `NEURE_COHERE_ENDPOINT` (optional) — base URL, default `https://api.cohere.com`
-//! - `NEURE_COHERE_MODEL` (optional) — model id, default `rerank-english-v3.0`
+//! - `NEURON_COHERE_API_KEY` (required) — your Cohere API key
+//! - `NEURON_COHERE_ENDPOINT` (optional) — base URL, default `https://api.cohere.com`
+//! - `NEURON_COHERE_MODEL` (optional) — model id, default `rerank-english-v3.0`
 //!
-//! Enable with: `NEURE_RERANK_RUNTIME=cohere`
+//! Enable with: `NEURON_RERANK_RUNTIME=cohere`
 
 use std::sync::Arc;
 
@@ -20,7 +20,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::config::DeviceSelection;
-use crate::llm::{ChatResult, ModelInfo, NeureError};
+use crate::llm::{ChatResult, ModelInfo, NeuronError};
 
 use super::{RerankRequest, RerankResponse, RerankResult, RerankRuntime, RerankUsage};
 
@@ -36,16 +36,16 @@ struct CohereConfig {
 
 impl CohereConfig {
     fn from_env_or(req_model: &str) -> Result<Self, String> {
-        let api_key = std::env::var("NEURE_COHERE_API_KEY")
-            .map_err(|_| "CohereRerankRuntime: set NEURE_COHERE_API_KEY to your Cohere API key".to_string())?;
+        let api_key = crate::config::env_var_result("COHERE_API_KEY")
+            .map_err(|_| "CohereRerankRuntime: set NEURON_COHERE_API_KEY to your Cohere API key".to_string())?;
         if api_key.is_empty() {
-            return Err("CohereRerankRuntime: NEURE_COHERE_API_KEY is empty".to_string());
+            return Err("CohereRerankRuntime: NEURON_COHERE_API_KEY is empty".to_string());
         }
-        let endpoint = std::env::var("NEURE_COHERE_ENDPOINT")
+        let endpoint = crate::config::env_var_result("COHERE_ENDPOINT")
             .unwrap_or_else(|_| DEFAULT_ENDPOINT.to_string())
             .trim_end_matches('/')
             .to_string();
-        let model = std::env::var("NEURE_COHERE_MODEL")
+        let model = crate::config::env_var_result("COHERE_MODEL")
             .unwrap_or_else(|_| req_model.to_string());
         if model.is_empty() {
             return Err("CohereRerankRuntime: model name is empty".to_string());
@@ -130,13 +130,13 @@ impl RerankRuntime for CohereRerankRuntime {
     where
         Self: Sized,
     {
-        let config = CohereConfig::from_env_or(model).map_err(NeureError::not_implemented)?;
+        let config = CohereConfig::from_env_or(model).map_err(NeuronError::not_implemented)?;
         Ok(Box::new(Self::with_config(config)))
     }
 
     async fn rerank(&self, req: RerankRequest) -> ChatResult<RerankResponse> {
         if req.documents.is_empty() {
-            return Err(NeureError::invalid_input("documents cannot be empty"));
+            return Err(NeuronError::invalid_input("documents cannot be empty"));
         }
 
         let body = CohereRequest {
@@ -156,12 +156,12 @@ impl RerankRuntime for CohereRerankRuntime {
             .json(&body)
             .send()
             .await
-            .map_err(|e| NeureError::new(format!("Cohere request failed: {e}")))?;
+            .map_err(|e| NeuronError::new(format!("Cohere request failed: {e}")))?;
 
         let status = resp.status();
         if !status.is_success() {
             let text = resp.text().await.unwrap_or_default();
-            return Err(NeureError::new(format!(
+            return Err(NeuronError::new(format!(
                 "Cohere API error (HTTP {}): {}",
                 status.as_u16(),
                 if text.is_empty() { "<no body>" } else { text.as_str() }
@@ -171,7 +171,7 @@ impl RerankRuntime for CohereRerankRuntime {
         let parsed: CohereResponse = resp
             .json()
             .await
-            .map_err(|e| NeureError::new(format!("Cohere response parse: {e}")))?;
+            .map_err(|e| NeuronError::new(format!("Cohere response parse: {e}")))?;
 
         let mut results: Vec<RerankResult> = parsed
             .results
@@ -265,12 +265,12 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial]
     async fn test_load_without_api_key_returns_useful_error() {
-        unsafe { std::env::remove_var("NEURE_COHERE_API_KEY") };
+        unsafe { std::env::remove_var("NEURON_COHERE_API_KEY") };
         let result = CohereRerankRuntime::load("rerank-english-v3.0", &DeviceSelection::Cpu).await;
         assert!(result.is_err());
         let err = result.err().unwrap();
         assert_eq!(err.error_type, "not_implemented");
-        assert!(err.message.contains("NEURE_COHERE_API_KEY"));
+        assert!(err.message.contains("NEURON_COHERE_API_KEY"));
     }
 
     #[tokio::test]
@@ -278,9 +278,9 @@ mod tests {
     async fn test_rerank_happy_path() {
         let endpoint = spawn_mock(None, Some(true)).await;
         unsafe {
-            std::env::set_var("NEURE_COHERE_API_KEY", "test-key");
-            std::env::set_var("NEURE_COHERE_ENDPOINT", &endpoint);
-            std::env::set_var("NEURE_COHERE_MODEL", "rerank-english-v3.0");
+            std::env::set_var("NEURON_COHERE_API_KEY", "test-key");
+            std::env::set_var("NEURON_COHERE_ENDPOINT", &endpoint);
+            std::env::set_var("NEURON_COHERE_MODEL", "rerank-english-v3.0");
         }
         let runtime = CohereRerankRuntime::load("rerank-english-v3.0", &DeviceSelection::Cpu)
             .await
@@ -303,9 +303,9 @@ mod tests {
         assert!(resp.data[0].document.is_some());
         assert_eq!(resp.data[0].document.as_deref(), Some("Paris is the capital of France."));
         unsafe {
-            std::env::remove_var("NEURE_COHERE_API_KEY");
-            std::env::remove_var("NEURE_COHERE_ENDPOINT");
-            std::env::remove_var("NEURE_COHERE_MODEL");
+            std::env::remove_var("NEURON_COHERE_API_KEY");
+            std::env::remove_var("NEURON_COHERE_ENDPOINT");
+            std::env::remove_var("NEURON_COHERE_MODEL");
         }
     }
 
@@ -314,9 +314,9 @@ mod tests {
     async fn test_rerank_top_n_truncates() {
         let endpoint = spawn_mock(Some(1), Some(true)).await;
         unsafe {
-            std::env::set_var("NEURE_COHERE_API_KEY", "test-key");
-            std::env::set_var("NEURE_COHERE_ENDPOINT", &endpoint);
-            std::env::set_var("NEURE_COHERE_MODEL", "rerank-english-v3.0");
+            std::env::set_var("NEURON_COHERE_API_KEY", "test-key");
+            std::env::set_var("NEURON_COHERE_ENDPOINT", &endpoint);
+            std::env::set_var("NEURON_COHERE_MODEL", "rerank-english-v3.0");
         }
         let runtime = CohereRerankRuntime::load("rerank-english-v3.0", &DeviceSelection::Cpu)
             .await
@@ -330,9 +330,9 @@ mod tests {
         let resp = runtime.rerank(req).await.unwrap();
         assert_eq!(resp.data.len(), 1);
         unsafe {
-            std::env::remove_var("NEURE_COHERE_API_KEY");
-            std::env::remove_var("NEURE_COHERE_ENDPOINT");
-            std::env::remove_var("NEURE_COHERE_MODEL");
+            std::env::remove_var("NEURON_COHERE_API_KEY");
+            std::env::remove_var("NEURON_COHERE_ENDPOINT");
+            std::env::remove_var("NEURON_COHERE_MODEL");
         }
     }
 
@@ -340,8 +340,8 @@ mod tests {
     #[serial_test::serial]
     async fn test_rerank_empty_documents_rejected_locally() {
         unsafe {
-            std::env::set_var("NEURE_COHERE_API_KEY", "test-key");
-            std::env::set_var("NEURE_COHERE_ENDPOINT", "http://127.0.0.1:1");
+            std::env::set_var("NEURON_COHERE_API_KEY", "test-key");
+            std::env::set_var("NEURON_COHERE_ENDPOINT", "http://127.0.0.1:1");
         }
         let runtime = CohereRerankRuntime::load("rerank-english-v3.0", &DeviceSelection::Cpu)
             .await
@@ -353,8 +353,8 @@ mod tests {
         assert_eq!(err.error_type, "invalid_request_error");
         assert!(err.message.contains("documents"));
         unsafe {
-            std::env::remove_var("NEURE_COHERE_API_KEY");
-            std::env::remove_var("NEURE_COHERE_ENDPOINT");
+            std::env::remove_var("NEURON_COHERE_API_KEY");
+            std::env::remove_var("NEURON_COHERE_ENDPOINT");
         }
     }
 

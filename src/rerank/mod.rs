@@ -1,4 +1,4 @@
-//! Rerank module for neure.
+//! Rerank module for neuron.
 //!
 //! Provides [`RerankRuntime`] trait for cross-encoder relevance scoring.
 //! Currently supports:
@@ -35,7 +35,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::config::DeviceSelection;
-use crate::llm::{ChatResult, ModelInfo, NeureError};
+use crate::llm::{ChatResult, ModelInfo, NeuronError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -192,12 +192,12 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial]
     async fn test_candle_rerank_load_without_env_returns_useful_error() {
-        unsafe { std::env::remove_var("NEURE_RERANK_MODEL_PATH") };
+        unsafe { std::env::remove_var("NEURON_RERANK_MODEL_PATH") };
         let result = super::candle::CandleRerankRuntime::load("bge-reranker-base", &DeviceSelection::Cpu).await;
         assert!(result.is_err());
         let err = result.err().unwrap();
         assert_eq!(err.error_type, "not_implemented");
-        assert!(err.message.contains("NEURE_RERANK_MODEL_PATH"));
+        assert!(err.message.contains("NEURON_RERANK_MODEL_PATH"));
     }
 
     #[tokio::test]

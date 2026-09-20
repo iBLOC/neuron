@@ -4,7 +4,7 @@ title: Architecture
 
 # Architecture
 
-`neure` is a **library-only** Rust crate that exposes an OpenAI-compatible (and Anthropic Messages v1) HTTP API on top of three ML frameworks — **candle** (LLM, ASR, Rerank, Embedding, Vision), **burn** (TTS), and **litert_lm** (on-device LLM subprocess).
+`neuron` is a **library-only** Rust crate that exposes an OpenAI-compatible (and Anthropic Messages v1) HTTP API on top of three ML frameworks — **candle** (LLM, ASR, Rerank, Embedding, Vision), **burn** (TTS), and **litert_lm** (on-device LLM subprocess).
 
 ## High-level data flow
 
@@ -12,7 +12,7 @@ title: Architecture
 ┌──────────────────────────────────────────────────────────────────────┐
 │ Host process (Rust — Tauri 2 desktop, server, embedded controller)   │
 │                                                                      │
-│   neure::run_embedded(NeureEmbedConfig { port: 8085, … })           │
+│   neuron::run_embedded(NeuronEmbedConfig { port: 8085, … })           │
 │         │                                                            │
 │         ▼                                                            │
 │   axum HTTP server (N routes, OpenAI + Anthropic shape)             │
@@ -37,7 +37,7 @@ title: Architecture
 
 ```
 src/
-├── lib.rs                       # Re-exports `neure::{run_embedded, NeureHandle, ...}`
+├── lib.rs                       # Re-exports `neuron::{run_embedded, NeuronHandle, ...}`
 ├── embedded.rs                  # `run_embedded()` entry point — owns axum server lifetime
 ├── server/                      # axum Router + OpenAI/Anthropic shape handlers
 │   ├── mod.rs                   # create_router() composes all routes
@@ -132,7 +132,7 @@ src/
 │   ├── output.rs                # Chronos2OutputHead (feature-gated; WIP)
 │   └── vendor/                  # T5-style encoder/decoder (feature-gated; WIP)
 ├── llm/vendor/, tts/voxcpm_burn/  (see above)
-├── config.rs                    # NeureConfig + ModelRegistration + ResourceTracker + DeviceSelection
+├── config.rs                    # NeuronConfig + ModelRegistration + ResourceTracker + DeviceSelection
 ├── api_error.rs                 # ApiError + ApiResult (OpenAI/Anthropic-shaped)
 └── runtime registry shortcuts on ServerState (llm, tts, asr, rerank, embedding, vision)
 ```
@@ -154,7 +154,7 @@ pub trait LlmRuntime: Send + Sync {
 }
 ```
 
-The full per-trait surface for all 6 capabilities is in the [`src/capabilities/`](https://github.com/iBLOC/neure-rs/tree/main/src/capabilities) module.
+The full per-trait surface for all 6 capabilities is in the [`src/capabilities/`](https://github.com/ibloc/neuron/tree/main/src/capabilities) module.
 
 ## Engine selection
 
@@ -177,7 +177,7 @@ pub struct ServerState {
     pub rerank: Arc<dyn RerankRuntime>,
     pub embedding: Arc<dyn EmbeddingRuntime>,
 
-    pub config: NeureConfig,
+    pub config: NeuronConfig,
     pub puller: Arc<Puller>,
     pub catalog: Arc<Catalog>,
     // ...
@@ -202,7 +202,7 @@ Handlers resolve models with `runtime_for(&model).await.unwrap_or_else(|_| state
 | `hf-mirror` | HF REST + `huggingface-cli` | `https://hf-mirror.com` | `huggingface-cli` |
 | `modelscope` | MS REST + `modelscope-cli` | `https://www.modelscope.cn` | `modelscope-cli` |
 
-`POST /v1/models/pull` and the catalog `default_repo` use the `<source>:<repo>` syntax. When the prefix is omitted, the platform falls back to `NEURE_DEFAULT_SOURCE` (default `modelscope`). The puller also strips a leading `<other-source>:` prefix if the user has overridden the source via `NEURE_LLM_SOURCE` / `NEURE_MODEL_SOURCE_*` — so requesting `modelscope:openbmb/MiniCPM5-1B` from a process whose per-engine source is `hf-mirror` correctly routes to the mirror.
+`POST /v1/models/pull` and the catalog `default_repo` use the `<source>:<repo>` syntax. When the prefix is omitted, the platform falls back to `NEURON_DEFAULT_SOURCE` (default `modelscope`). The puller also strips a leading `<other-source>:` prefix if the user has overridden the source via `NEURON_LLM_SOURCE` / `NEURON_MODEL_SOURCE_*` — so requesting `modelscope:openbmb/MiniCPM5-1B` from a process whose per-engine source is `hf-mirror` correctly routes to the mirror.
 
 ## Vision task dispatch
 
@@ -239,11 +239,11 @@ Hosts pick exactly the engines they need; the rest stays out of the binary.
 
 ```rust
 // Host main.rs
-use neure::{run_embedded, NeureConfig, NeureEmbedConfig, NeureHandle};
+use neuron::{run_embedded, NeuronConfig, NeuronEmbedConfig, NeuronHandle};
 
-let handle: NeureHandle = run_embedded(NeureEmbedConfig {
+let handle: NeuronHandle = run_embedded(NeuronEmbedConfig {
     port: 8085,
-    config: NeureConfig::default(),
+    config: NeuronConfig::default(),
 }).await?;
 
 // ... host runs its own UI / agent loop ...
@@ -253,7 +253,7 @@ handle.request_shutdown();
 handle.join().await;
 ```
 
-`NeureHandle` owns the axum server's lifecycle. Dropping the handle without `request_shutdown()` leaks the bind port.
+`NeuronHandle` owns the axum server's lifecycle. Dropping the handle without `request_shutdown()` leaks the bind port.
 
 ## Next steps
 

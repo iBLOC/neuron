@@ -4,8 +4,8 @@
 //! segments (`[T_i, P, D]` Mage-ViT tokens) and returns the
 //! StreamMind p_speak probability per segment. The endpoint is
 //! self-contained: the gate weights are loaded lazily from the path
-//! in `NEURE_MAGE_VL_GATE_PATH` (default
-//! `$NEURE_MODEL_DIRS/mistralrs/microsoft/Mage-VL/streammind_gate.safetensors`)
+//! in `NEURON_MAGE_VL_GATE_PATH` (default
+//! `$NEURON_MODEL_DIRS/mistralrs/microsoft/Mage-VL/streammind_gate.safetensors`)
 //! and cached in-process.
 
 use std::path::PathBuf;
@@ -87,15 +87,15 @@ impl GateRuntime {
 }
 
 fn default_gate_path() -> PathBuf {
-    if let Ok(p) = std::env::var("NEURE_MAGE_VL_GATE_PATH") {
+    if let Ok(p) = crate::config::env_var_result("MAGE_VL_GATE_PATH") {
         return PathBuf::from(p);
     }
-    let root = std::env::var("NEURE_MODEL_DIRS")
+    let root = crate::config::env_var_result("MODEL_DIRS")
         .ok()
         .and_then(|v| v.split(':').next().map(|s| s.to_string()))
         .unwrap_or_else(|| {
             let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-            format!("{home}/.neure/models")
+            format!("{home}/.neuron/models")
         });
     PathBuf::from(root)
         .join("mistralrs")
@@ -150,7 +150,7 @@ pub async fn gate_score(
     if !gate_path.exists() {
         return Err(unavailable(format!(
             "streammind_gate.safetensors not found at {} — \
-             set NEURE_MAGE_VL_GATE_PATH or pass gate_path in the request",
+             set NEURON_MAGE_VL_GATE_PATH or pass gate_path in the request",
             gate_path.display()
         )));
     }

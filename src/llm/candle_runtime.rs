@@ -10,7 +10,7 @@ use tokenizers::Tokenizer;
 
 use super::{ChatMessage, ChatRequest, ChatResponse, Choice, DeltaMessage, LlmRuntime, ModelInfo};
 use crate::config::{ensure_dir, DeviceSelection};
-use crate::llm::NeureError;
+use crate::llm::NeuronError;
 
 #[path = "candle_arch.rs"]
 mod candle_arch;
@@ -56,7 +56,7 @@ impl CausalModel {
     }
 }
 
-/// Resolve the `NEURE_USE_FLASH_ATTN` opt-in for FlashAttention-2.
+/// Resolve the `NEURON_USE_FLASH_ATTN` opt-in for FlashAttention-2.
 ///
 /// `flash-attn` requires the `candle-flash-attn` crate (built against
 /// CUDA) and a CUDA device at runtime; the sdpa path is correct for
@@ -67,7 +67,7 @@ impl CausalModel {
 /// Accepted falsy values: `0`, `false`, `FALSE`, `no`.
 /// Anything else (or unset) returns `None`, falling back to `false`.
 pub(crate) fn parse_use_flash_attn() -> Option<bool> {
-    std::env::var("NEURE_USE_FLASH_ATTN").ok().and_then(|v| {
+    crate::config::env_var("USE_FLASH_ATTN").and_then(|v| {
         match v.as_str() {
             "1" | "true" | "TRUE" | "yes" => Some(true),
             "0" | "false" | "FALSE" | "no" => Some(false),
@@ -105,11 +105,11 @@ impl CandleLlmRuntime {
 
     pub fn resolve_model_path(model: &str) -> Result<PathBuf, String> {
         let _ = model;
-        let path = match std::env::var("NEURE_LLM_MODEL_PATH") {
+        let path = match crate::config::env_var_result("LLM_MODEL_PATH") {
             Ok(p) => PathBuf::from(p),
             Err(_) => {
                 return Err(format!(
-                    "CandleLlmRuntime: set NEURE_LLM_MODEL_PATH to a directory containing \
+                    "CandleLlmRuntime: set NEURON_LLM_MODEL_PATH to a directory containing \
                      config.json + tokenizer.json + *.safetensors. \
                      Download a Qwen model from HuggingFace and set the path. \
                      Requested model: '{}'",
@@ -117,7 +117,7 @@ impl CandleLlmRuntime {
                 ));
             }
         };
-        ensure_dir(&path, "NEURE_LLM_MODEL_PATH")?;
+        ensure_dir(&path, "NEURON_LLM_MODEL_PATH")?;
         let config_path = path.join("config.json");
         let tokenizer_path = path.join("tokenizer.json");
         let has_weights = std::fs::read_dir(&path)
@@ -325,21 +325,21 @@ impl Default for CandleLlmRuntime {
 
 #[async_trait]
 impl super::LlmRuntime for CandleLlmRuntime {
-    async fn load(model: &str, device: &DeviceSelection) -> Result<Box<dyn LlmRuntime>, NeureError>
+    async fn load(model: &str, device: &DeviceSelection) -> Result<Box<dyn LlmRuntime>, NeuronError>
     where
         Self: Sized,
     {
-        let path = Self::resolve_model_path(model).map_err(NeureError::not_implemented)?;
-        let dev = Self::map_device_selection(device).map_err(NeureError::not_implemented)?;
+        let path = Self::resolve_model_path(model).map_err(NeuronError::not_implemented)?;
+        let dev = Self::map_device_selection(device).map_err(NeuronError::not_implemented)?;
 
         let (arch, model_type) = detect_arch(&path)
-            .map_err(NeureError::not_implemented)?;
+            .map_err(NeuronError::not_implemented)?;
         eprintln!(
-            "[neure] CandleLlmRuntime: detected model_type={model_type} in {}",
+            "[neuron] CandleLlmRuntime: detected model_type={model_type} in {}",
             path.display()
         );
 
-        // NEURE_USE_FLASH_ATTN: opt-in to FlashAttention-2 for the
+        // NEURON_USE_FLASH_ATTN: opt-in to FlashAttention-2 for the
         // architectures that support it. Upstream candle-transformers
         // 0.9.2 ships the field for Llama 2/3 + Mistral; Qwen 2/3
         // support is added in src/llm/vendor/ (requires the
@@ -351,29 +351,29 @@ impl super::LlmRuntime for CandleLlmRuntime {
                 CausalArch::Qwen2(_) | CausalArch::Qwen3(_) => {
                     #[cfg(feature = "flash-attn")]
                     eprintln!(
-                        "[neure] CandleLlmRuntime: Qwen2/3 use_flash_attn=true (requires CUDA)"
+                        "[neuron] CandleLlmRuntime: Qwen2/3 use_flash_attn=true (requires CUDA)"
                     );
                     #[cfg(not(feature = "flash-attn"))]
                     eprintln!(
-                        "[neure] WARNING: NEURE_USE_FLASH_ATTN=1 is set but flash-attn feature \
+                        "[neuron] WARNING: NEURON_USE_FLASH_ATTN=1 is set but flash-attn feature \
                          not enabled; re-build with --features flash-attn. Using sdpa."
                     );
                 }
                 CausalArch::Mistral(_) => {
                     eprintln!(
-                        "[neure] CandleLlmRuntime: use_flash_attn=true (requires --features flash-attn and CUDA)"
+                        "[neuron] CandleLlmRuntime: use_flash_attn=true (requires --features flash-attn and CUDA)"
                     );
                 }
                 _ => {
                     eprintln!(
-                        "[neure] CandleLlmRuntime: use_flash_attn=true (requires --features flash-attn and CUDA)"
+                        "[neuron] CandleLlmRuntime: use_flash_attn=true (requires --features flash-attn and CUDA)"
                     );
                 }
             }
         }
 
         let safetensors_files: Vec<PathBuf> = std::fs::read_dir(&path)
-            .map_err(|e| NeureError::not_implemented(format!("read dir: {e}")))?
+            .map_err(|e| NeuronError::not_implemented(format!("read dir: {e}")))?
             .filter_map(|e| e.ok())
             .filter(|e| {
                 e.path()
@@ -385,7 +385,7 @@ impl super::LlmRuntime for CandleLlmRuntime {
             .collect();
 
         if safetensors_files.is_empty() {
-            return Err(NeureError::not_implemented(
+            return Err(NeuronError::not_implemented(
                 "No safetensors files found".to_string(),
             ));
         }
@@ -396,7 +396,7 @@ impl super::LlmRuntime for CandleLlmRuntime {
         let vb = unsafe {
             VarBuilder::from_mmaped_safetensors(safetensors_paths.as_slice(), DType::F32, &dev)
         }
-        .map_err(|e| NeureError::not_implemented(format!("load weights: {e}")))?;
+        .map_err(|e| NeuronError::not_implemented(format!("load weights: {e}")))?;
 
         let model = match &arch {
             CausalArch::Qwen2(cfg) => {
@@ -404,11 +404,11 @@ impl super::LlmRuntime for CandleLlmRuntime {
                 if use_flash_attn {
                     let flash_cfg: vendor::qwen2::Config = cfg.clone().into();
                     let m = vendor::qwen2::ModelForCausalLM::new(&flash_cfg, vb)
-                        .map_err(|e| NeureError::not_implemented(format!("build Qwen2 (flash): {e}")))?;
+                        .map_err(|e| NeuronError::not_implemented(format!("build Qwen2 (flash): {e}")))?;
                     return Ok(CausalModel::Qwen2Flash(m));
                 }
                 let m = qwen2::ModelForCausalLM::new(cfg, vb)
-                    .map_err(|e| NeureError::not_implemented(format!("build Qwen2: {e}")))?;
+                    .map_err(|e| NeuronError::not_implemented(format!("build Qwen2: {e}")))?;
                 CausalModel::Qwen2(m)
             }
             CausalArch::Qwen3(cfg) => {
@@ -416,30 +416,30 @@ impl super::LlmRuntime for CandleLlmRuntime {
                 if use_flash_attn {
                     let flash_cfg: vendor::qwen3::Config = cfg.clone().into();
                     let m = vendor::qwen3::ModelForCausalLM::new(&flash_cfg, vb)
-                        .map_err(|e| NeureError::not_implemented(format!("build Qwen3/3.5 (flash): {e}")))?;
+                        .map_err(|e| NeuronError::not_implemented(format!("build Qwen3/3.5 (flash): {e}")))?;
                     return Ok(CausalModel::Qwen3Flash(m));
                 }
                 let m = qwen3::ModelForCausalLM::new(cfg, vb)
-                    .map_err(|e| NeureError::not_implemented(format!("build Qwen3/3.5: {e}")))?;
+                    .map_err(|e| NeuronError::not_implemented(format!("build Qwen3/3.5: {e}")))?;
                 CausalModel::Qwen3(m)
             }
             CausalArch::Llama(cfg) => {
                 let inner = llama::LlamaConfig::clone(cfg)
                     .into_config(use_flash_attn);
                 let m = llama::Llama::load(vb, &inner)
-                    .map_err(|e| NeureError::not_implemented(format!("build Llama: {e}")))?;
+                    .map_err(|e| NeuronError::not_implemented(format!("build Llama: {e}")))?;
                 let cache = llama::Cache::new(
                     true,
                     DType::F32,
                     &inner,
                     &dev,
                 )
-                .map_err(|e| NeureError::not_implemented(format!("build Llama cache: {e}")))?;
+                .map_err(|e| NeuronError::not_implemented(format!("build Llama cache: {e}")))?;
                 CausalModel::Llama { model: m, cache }
             }
             CausalArch::Phi3(cfg) => {
                 let m = phi3::Model::new(cfg, vb)
-                    .map_err(|e| NeureError::not_implemented(format!("build Phi3: {e}")))?;
+                    .map_err(|e| NeuronError::not_implemented(format!("build Phi3: {e}")))?;
                 CausalModel::Phi3(m)
             }
             CausalArch::Mistral(cfg) => {
@@ -448,18 +448,18 @@ impl super::LlmRuntime for CandleLlmRuntime {
                     cfg.use_flash_attn = true;
                 }
                 let m = mistral::Model::new(&cfg, vb)
-                    .map_err(|e| NeureError::not_implemented(format!("build Mistral: {e}")))?;
+                    .map_err(|e| NeuronError::not_implemented(format!("build Mistral: {e}")))?;
                 CausalModel::Mistral(m)
             }
             CausalArch::ChatGlm(cfg) => {
                 let m = chatglm::Model::new(cfg, vb)
-                    .map_err(|e| NeureError::not_implemented(format!("build ChatGLM: {e}")))?;
+                    .map_err(|e| NeuronError::not_implemented(format!("build ChatGLM: {e}")))?;
                 CausalModel::ChatGlm(m)
             }
         };
 
         let tokenizer = Tokenizer::from_file(path.join("tokenizer.json"))
-            .map_err(|e| NeureError::not_implemented(format!("load tokenizer: {e}")))?;
+            .map_err(|e| NeuronError::not_implemented(format!("load tokenizer: {e}")))?;
 
         // EOS ids: <|im_end|> for Qwen (ChatML turn terminator);
         // <|end_of_text|> for Llama 3; <|endoftext|> for Phi-3;
@@ -481,11 +481,11 @@ impl super::LlmRuntime for CandleLlmRuntime {
         Ok(Box::new(runtime))
     }
 
-    async fn chat(&self, req: ChatRequest) -> Result<ChatResponse, NeureError> {
+    async fn chat(&self, req: ChatRequest) -> Result<ChatResponse, NeuronError> {
         let (tokenizer, eos_token_id) = {
             let inner = self.inner.lock().unwrap();
             let m = inner.as_ref().ok_or_else(|| {
-                NeureError::not_initialized("CandleLlmRuntime not loaded. Call load() first.")
+                NeuronError::not_initialized("CandleLlmRuntime not loaded. Call load() first.")
             })?;
             (m.tokenizer.clone(), m.eos_token_id)
         };
@@ -493,7 +493,7 @@ impl super::LlmRuntime for CandleLlmRuntime {
         let prompt = Self::render_chatml_prompt(&req.messages);
         let encoding = tokenizer
             .encode(prompt.as_str(), true)
-            .map_err(|e| NeureError::not_implemented(format!("tokenize: {e}")))?;
+            .map_err(|e| NeuronError::not_implemented(format!("tokenize: {e}")))?;
         let prompt_token_ids: Vec<u32> = encoding.get_ids().to_vec();
         let prompt_tokens = prompt_token_ids.len() as u32;
         let max_new_tokens = req.max_tokens.unwrap_or(256).min(2048) as usize;
@@ -501,7 +501,7 @@ impl super::LlmRuntime for CandleLlmRuntime {
         // Real token generation: greedy argmax with the model's built-in KV cache.
         let mut inner = self.inner.lock().unwrap();
         let m = inner.as_mut().ok_or_else(|| {
-            NeureError::not_initialized("CandleLlmRuntime not loaded. Call load() first.")
+            NeuronError::not_initialized("CandleLlmRuntime not loaded. Call load() first.")
         })?;
 
         let input_tensor = candle_core::Tensor::from_vec(
@@ -509,20 +509,20 @@ impl super::LlmRuntime for CandleLlmRuntime {
             (1, prompt_token_ids.len()),
             &m.device,
         )
-        .map_err(|e| NeureError::not_implemented(format!("build input tensor: {e}")))?;
+        .map_err(|e| NeuronError::not_implemented(format!("build input tensor: {e}")))?;
 
         let logits = m
             .model
             .forward(&input_tensor, 0)
-            .map_err(|e| NeureError::not_implemented(format!("forward pass 1: {e}")))?;
+            .map_err(|e| NeuronError::not_implemented(format!("forward pass 1: {e}")))?;
         let last_logits = logits
-            .i((0, logits.dim(1).map_err(|e| NeureError::not_implemented(format!("logits dim: {e}")))? - 1, ..))
-            .map_err(|e| NeureError::not_implemented(format!("index last logits: {e}")))?;
+            .i((0, logits.dim(1).map_err(|e| NeuronError::not_implemented(format!("logits dim: {e}")))? - 1, ..))
+            .map_err(|e| NeuronError::not_implemented(format!("index last logits: {e}")))?;
         let mut next_token = last_logits
             .argmax(candle_core::D::Minus1)
-            .map_err(|e| NeureError::not_implemented(format!("argmax: {e}")))?
+            .map_err(|e| NeuronError::not_implemented(format!("argmax: {e}")))?
             .to_scalar::<u32>()
-            .map_err(|e| NeureError::not_implemented(format!("to scalar: {e}")))?;
+            .map_err(|e| NeuronError::not_implemented(format!("to scalar: {e}")))?;
 
         let mut generated: Vec<u32> = Vec::with_capacity(max_new_tokens);
         if next_token != eos_token_id {
@@ -538,19 +538,19 @@ impl super::LlmRuntime for CandleLlmRuntime {
                 (1, 1),
                 &m.device,
             )
-            .map_err(|e| NeureError::not_implemented(format!("build next input: {e}")))?;
+            .map_err(|e| NeuronError::not_implemented(format!("build next input: {e}")))?;
             let logits = m
                 .model
                 .forward(&next_input, offset)
-                .map_err(|e| NeureError::not_implemented(format!("forward pass {}: {}", offset, e)))?;
+                .map_err(|e| NeuronError::not_implemented(format!("forward pass {}: {}", offset, e)))?;
             let last_logits = logits
                 .i((0, 0, ..))
-                .map_err(|e| NeureError::not_implemented(format!("index last: {e}")))?;
+                .map_err(|e| NeuronError::not_implemented(format!("index last: {e}")))?;
             next_token = last_logits
                 .argmax(candle_core::D::Minus1)
-                .map_err(|e| NeureError::not_implemented(format!("argmax: {e}")))?
+                .map_err(|e| NeuronError::not_implemented(format!("argmax: {e}")))?
                 .to_scalar::<u32>()
-                .map_err(|e| NeureError::not_implemented(format!("to scalar: {e}")))?;
+                .map_err(|e| NeuronError::not_implemented(format!("to scalar: {e}")))?;
             if next_token != eos_token_id {
                 generated.push(next_token);
             }
@@ -590,7 +590,7 @@ impl super::LlmRuntime for CandleLlmRuntime {
         let (tokenizer, eos_token_id) = {
             let inner = self.inner.lock().unwrap();
             let m = inner.as_ref().ok_or_else(|| {
-                NeureError::not_initialized("CandleLlmRuntime not loaded. Call load() first.")
+                NeuronError::not_initialized("CandleLlmRuntime not loaded. Call load() first.")
             })?;
             (m.tokenizer.clone(), m.eos_token_id)
         };
@@ -601,7 +601,7 @@ impl super::LlmRuntime for CandleLlmRuntime {
         let prompt = Self::render_chatml_prompt(&req.messages);
         let prompt_ids: Vec<u32> = tokenizer
             .encode(prompt.as_str(), true)
-            .map_err(|e| NeureError::not_implemented(format!("tokenize: {e}")))?
+            .map_err(|e| NeuronError::not_implemented(format!("tokenize: {e}")))?
             .get_ids()
             .to_vec();
         let prompt_len = prompt_ids.len();
@@ -855,21 +855,21 @@ impl super::LlmRuntime for CandleLlmRuntime {
 
     fn list_models(&self) -> Vec<ModelInfo> {
         vec![
-            ModelInfo::new("qwen3-0.6b", "neure-candle"),
-            ModelInfo::new("qwen3.5-0.6b", "neure-candle"),
-            ModelInfo::new("qwen3.5-4b", "neure-candle"),
-            ModelInfo::new("qwen2.5-0.5b", "neure-candle"),
-            ModelInfo::new("qwen2.5-1.5b", "neure-candle"),
-            ModelInfo::new("qwen2.5-7b", "neure-candle"),
-            ModelInfo::new("llama-3.2-1b", "neure-candle"),
-            ModelInfo::new("llama-3.2-3b", "neure-candle"),
-            ModelInfo::new("llama-3.1-8b", "neure-candle"),
-            ModelInfo::new("llama-2-7b", "neure-candle"),
-            ModelInfo::new("phi-3-mini-4k", "neure-candle"),
-            ModelInfo::new("phi-3-small-8k", "neure-candle"),
-            ModelInfo::new("phi-3-medium-4k", "neure-candle"),
-            ModelInfo::new("mistral-7b-v0.1", "neure-candle"),
-            ModelInfo::new("chatglm3-6b", "neure-candle"),
+            ModelInfo::new("qwen3-0.6b", "neuron-candle"),
+            ModelInfo::new("qwen3.5-0.6b", "neuron-candle"),
+            ModelInfo::new("qwen3.5-4b", "neuron-candle"),
+            ModelInfo::new("qwen2.5-0.5b", "neuron-candle"),
+            ModelInfo::new("qwen2.5-1.5b", "neuron-candle"),
+            ModelInfo::new("qwen2.5-7b", "neuron-candle"),
+            ModelInfo::new("llama-3.2-1b", "neuron-candle"),
+            ModelInfo::new("llama-3.2-3b", "neuron-candle"),
+            ModelInfo::new("llama-3.1-8b", "neuron-candle"),
+            ModelInfo::new("llama-2-7b", "neuron-candle"),
+            ModelInfo::new("phi-3-mini-4k", "neuron-candle"),
+            ModelInfo::new("phi-3-small-8k", "neuron-candle"),
+            ModelInfo::new("phi-3-medium-4k", "neuron-candle"),
+            ModelInfo::new("mistral-7b-v0.1", "neuron-candle"),
+            ModelInfo::new("chatglm3-6b", "neuron-candle"),
         ]
     }
 
@@ -884,7 +884,7 @@ impl crate::engine::LlmRuntime for CandleLlmRuntime {
         -> crate::llm::ChatResult<crate::canonical::CanonicalLlmResponse>
     {
         let chat_req = crate::llm::translators::canonical_to_chat_request(&req)
-            .map_err(NeureError::new)?;
+            .map_err(NeuronError::new)?;
         let chat_resp = self.chat(chat_req).await?;
         Ok(crate::llm::translators::chat_response_to_canonical(&req.model, chat_resp))
     }
@@ -893,7 +893,7 @@ impl crate::engine::LlmRuntime for CandleLlmRuntime {
         -> crate::llm::ChatResult<BoxStream<'static, crate::canonical::CanonicalLlmStreamEvent>>
     {
         let chat_req = crate::llm::translators::canonical_to_chat_request(&req)
-            .map_err(NeureError::new)?;
+            .map_err(NeuronError::new)?;
         let stream = self.chat_stream(chat_req).await?;
         use futures_util::StreamExt;
         Ok(Box::pin(stream.filter_map(|chunk| async move {

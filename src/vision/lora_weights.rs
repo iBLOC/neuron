@@ -32,7 +32,7 @@
 
 use std::path::Path;
 
-use crate::llm::NeureError;
+use crate::llm::NeuronError;
 use super::lora::LoraTensor;
 
 /// Parse a LoRA safetensors file into `LoraTensor` entries.
@@ -47,10 +47,10 @@ use super::lora::LoraTensor;
 #[cfg(feature = "candle")]
 pub fn parse_safetensors_lora(
     path: &Path,
-) -> Result<Vec<LoraTensor>, NeureError> {
+) -> Result<Vec<LoraTensor>, NeuronError> {
     // Read the raw bytes
     let bytes = std::fs::read(path).map_err(|e| {
-        NeureError::invalid_input(format!(
+        NeuronError::invalid_input(format!(
             "failed to read LoRA weights at {}: {e}",
             path.display()
         ))
@@ -58,7 +58,7 @@ pub fn parse_safetensors_lora(
 
     // safetensors 0.4 API: SafeTensors::deserialize
     let safetensors = safetensors::SafeTensors::deserialize(&bytes).map_err(|e| {
-        NeureError::invalid_input(format!(
+        NeuronError::invalid_input(format!(
             "invalid safetensors file at {}: {e}",
             path.display()
         ))
@@ -78,7 +78,7 @@ pub fn parse_safetensors_lora(
 
         let shape = view.shape();
         if shape.len() != 2 {
-            return Err(NeureError::invalid_input(format!(
+            return Err(NeuronError::invalid_input(format!(
                 "LoRA tensor {} has shape {:?}, expected 2D [rows, cols]",
                 name_with_prefix, shape
             )));
@@ -116,7 +116,7 @@ pub fn parse_safetensors_lora(
 #[cfg(not(feature = "candle"))]
 pub fn parse_safetensors_lora(
     _path: &Path,
-) -> Result<Vec<LoraTensor>, NeureError> {
+) -> Result<Vec<LoraTensor>, NeuronError> {
     Ok(Vec::new())
 }
 
@@ -132,23 +132,23 @@ pub fn merge_lora_delta(
     a: &LoraTensor,
     b: &LoraTensor,
     alpha: f32,
-) -> Result<Vec<f32>, NeureError> {
+) -> Result<Vec<f32>, NeuronError> {
     if a.data.len() != (a.in_dim * a.rank) as usize {
-        return Err(NeureError::invalid_input(format!(
+        return Err(NeuronError::invalid_input(format!(
             "LoRA A has {} elements, expected in_dim * rank = {}",
             a.data.len(),
             a.in_dim * a.rank
         )));
     }
     if b.data.len() != (b.out_dim * b.rank) as usize {
-        return Err(NeureError::invalid_input(format!(
+        return Err(NeuronError::invalid_input(format!(
             "LoRA B has {} elements, expected out_dim * rank = {}",
             b.data.len(),
             b.out_dim * b.rank
         )));
     }
     if a.rank != b.rank {
-        return Err(NeureError::invalid_input(format!(
+        return Err(NeuronError::invalid_input(format!(
             "LoRA A rank {} != B rank {}",
             a.rank, b.rank
         )));
@@ -227,16 +227,16 @@ pub fn apply_lora_delta(
     delta: &[f32],
     out_dim: usize,
     in_dim: usize,
-) -> Result<Vec<f32>, NeureError> {
+) -> Result<Vec<f32>, NeuronError> {
     if base.len() != out_dim * in_dim {
-        return Err(NeureError::invalid_input(format!(
+        return Err(NeuronError::invalid_input(format!(
             "base weight has {} elements, expected out_dim * in_dim = {}",
             base.len(),
             out_dim * in_dim
         )));
     }
     if delta.len() != out_dim * in_dim {
-        return Err(NeureError::invalid_input(format!(
+        return Err(NeuronError::invalid_input(format!(
             "LoRA delta has {} elements, expected out_dim * in_dim = {}",
             delta.len(),
             out_dim * in_dim

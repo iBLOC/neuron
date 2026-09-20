@@ -1,10 +1,10 @@
-//! neure HTTP server — axum router, handlers, and server state.
+//! neuron HTTP server — axum router, handlers, and server state.
 //!
 //! The module is split into three sub-modules to keep each
 //! responsibility focused:
 //!
 //! * [`error`] — [`ServerError`] enum, its `IntoResponse` impl,
-//!   and its `From<NeureError>` conversion.
+//!   and its `From<NeuronError>` conversion.
 //! * [`state`] — [`ServerState`] struct and its constructor, which
 //!   reads environment variables to select runtimes.
 //! * [`handlers`] — all axum handler functions and their request
@@ -33,7 +33,7 @@ use axum::{
     routing::{get, post},
     Router,
 };
-use crate::config::NeureConfig;
+use crate::config::NeuronConfig;
 
 /// Build the axum route table for the OpenAI-compatible surface.
 /// Hosts that already own a [`ServerState`] (built from
@@ -45,7 +45,7 @@ use crate::config::NeureConfig;
 /// when the host wraps it in a `Router<()>` via merge/nest).
 ///
 /// Most callers want [`create_router`] instead — that wires state
-/// up automatically from `NeureConfig`.
+/// up automatically from `NeuronConfig`.
 pub fn routes() -> Router<ServerState> {
     Router::new()
         .route("/health", get(health_handler))
@@ -90,7 +90,7 @@ pub fn routes() -> Router<ServerState> {
 /// own axum application. The returned router is `Router<()>`
 /// (state-erased) so it can be merged into a host's larger router
 /// tree without state-type gymnastics.
-pub fn create_router(config: NeureConfig) -> Router {
+pub fn create_router(config: NeuronConfig) -> Router {
     let state = ServerState::new(config);
     routes().with_state(state)
 }
@@ -174,9 +174,9 @@ mod tests {
     }
 
     #[test]
-    fn test_server_error_from_neure_error_wraps_message() {
-        let neure_err = crate::llm::NeureError::not_implemented("legacy path");
-        let server_err: ServerError = neure_err.into();
+    fn test_server_error_from_neuron_error_wraps_message() {
+        let neuron_err = crate::llm::NeuronError::not_implemented("legacy path");
+        let server_err: ServerError = neuron_err.into();
         match server_err {
             ServerError::NotImplemented(m) => assert_eq!(m, "legacy path"),
             other => panic!("expected NotImplemented, got: {other:?}"),
@@ -185,8 +185,8 @@ mod tests {
 
     #[test]
     fn test_server_error_from_invalid_input_maps_to_bad_request() {
-        let neure_err = crate::llm::NeureError::invalid_input("bad input");
-        let server_err: ServerError = neure_err.into();
+        let neuron_err = crate::llm::NeuronError::invalid_input("bad input");
+        let server_err: ServerError = neuron_err.into();
         match server_err {
             ServerError::BadRequest(m) => assert_eq!(m, "bad input"),
             other => panic!("expected BadRequest, got: {other:?}"),
@@ -197,7 +197,7 @@ mod tests {
 
     #[test]
     fn test_create_router_returns_router() {
-        let config = crate::config::NeureConfig::default();
+        let config = crate::config::NeuronConfig::default();
         let _router = create_router(config);
         // Router creation should not panic.
     }
@@ -211,14 +211,14 @@ mod tests {
         let bytes = to_bytes(resp.into_body(), 1024).await.unwrap();
         let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(json["status"], "healthy");
-        assert_eq!(json["service"], "neure");
+        assert_eq!(json["service"], "neuron");
     }
 
     // -- Info endpoint tests -----------------------------------------------
 
     #[tokio::test]
     async fn test_info_handler_returns_version() {
-        let config = crate::config::NeureConfig::default();
+        let config = crate::config::NeuronConfig::default();
         let state = ServerState::new(config);
         let resp = handlers::info_handler(axum::extract::State(state)).await.into_response();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -237,7 +237,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_list_models_returns_empty_list() {
-        let config = crate::config::NeureConfig::default();
+        let config = crate::config::NeuronConfig::default();
         let state = ServerState::new(config);
         let resp = handlers::list_models(axum::extract::State(state)).await.into_response();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -251,7 +251,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_chat_completions_empty_messages_returns_400() {
-        let config = crate::config::NeureConfig::default();
+        let config = crate::config::NeuronConfig::default();
         let state = ServerState::new(config);
         let req = handlers::ChatCompletionsRequest {
             model: "test".into(),
@@ -278,7 +278,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_audio_speech_empty_input_returns_400() {
-        let config = crate::config::NeureConfig::default();
+        let config = crate::config::NeuronConfig::default();
         let state = ServerState::new(config);
         let req = handlers::SpeechRequest {
             model: None,
@@ -304,7 +304,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_forecast_empty_series_returns_400() {
-        let config = crate::config::NeureConfig::default();
+        let config = crate::config::NeuronConfig::default();
         let state = ServerState::new(config);
         let req = crate::chronos2::ForecastRequest {
             model: "test".into(),
@@ -329,7 +329,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_forecast_zero_horizon_returns_400() {
-        let config = crate::config::NeureConfig::default();
+        let config = crate::config::NeuronConfig::default();
         let state = ServerState::new(config);
         let req = crate::chronos2::ForecastRequest {
             model: "test".into(),
@@ -356,7 +356,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_embedding_empty_texts_returns_400() {
-        let config = crate::config::NeureConfig::default();
+        let config = crate::config::NeuronConfig::default();
         let state = ServerState::new(config);
         let req = handlers::EmbeddingHttpRequest {
             model: "test".into(),
@@ -375,7 +375,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_rerank_empty_query_returns_400() {
-        let config = crate::config::NeureConfig::default();
+        let config = crate::config::NeuronConfig::default();
         let state = ServerState::new(config);
         let req = handlers::RerankHttpRequest {
             model: "test".into(),
@@ -395,7 +395,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_vision_detect_missing_model_returns_400() {
-        let config = crate::config::NeureConfig::default();
+        let config = crate::config::NeuronConfig::default();
         let state = ServerState::new(config);
         let req = crate::vision::VisionRequest {
             model: "".into(),
@@ -423,7 +423,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_gate_score_empty_segments_returns_400() {
-        let config = crate::config::NeureConfig::default();
+        let config = crate::config::NeuronConfig::default();
         let state = ServerState::new(config);
         let req = crate::mage_vl::http::GateScoreRequest {
             segments: vec![],
@@ -441,7 +441,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_gate_score_invalid_threshold_returns_400() {
-        let config = crate::config::NeureConfig::default();
+        let config = crate::config::NeuronConfig::default();
         let state = ServerState::new(config);
         let req = crate::mage_vl::http::GateScoreRequest {
             segments: vec![crate::mage_vl::http::SegmentRequest {
@@ -464,7 +464,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_gate_score_zero_dim_segment_returns_400() {
-        let config = crate::config::NeureConfig::default();
+        let config = crate::config::NeuronConfig::default();
         let state = ServerState::new(config);
         let req = crate::mage_vl::http::GateScoreRequest {
             segments: vec![crate::mage_vl::http::SegmentRequest {
@@ -487,7 +487,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_gate_score_token_length_mismatch_returns_400() {
-        let config = crate::config::NeureConfig::default();
+        let config = crate::config::NeuronConfig::default();
         let state = ServerState::new(config);
         let req = crate::mage_vl::http::GateScoreRequest {
             segments: vec![crate::mage_vl::http::SegmentRequest {
@@ -510,7 +510,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_gate_score_missing_weights_returns_503() {
-        let config = crate::config::NeureConfig::default();
+        let config = crate::config::NeuronConfig::default();
         let state = ServerState::new(config);
         let req = crate::mage_vl::http::GateScoreRequest {
             segments: vec![crate::mage_vl::http::SegmentRequest {

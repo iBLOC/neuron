@@ -1,10 +1,10 @@
-//! Comparative benchmark suite — neure vs MNN, llama.cpp, ONNX Runtime.
+//! Comparative benchmark suite — neuron vs MNN, llama.cpp, ONNX Runtime.
 //!
 //! This module produces a comparison table measuring the same workloads
 //! (YOLOv8 detection forward pass, LLM single-token forward) across
 //! different inference backends:
 //!
-//! - **neure-candle**: pure-Rust via the `candle` crate (the project's
+//! - **neuron-candle**: pure-Rust via the `candle` crate (the project's
 //!   default)
 //! - **ort**: Microsoft's ONNX Runtime via the `ort` crate
 //! - **mnn**: Alibaba's mobile neural network framework
@@ -62,15 +62,15 @@ fn yolov8_detection_throughput(c: &mut Criterion) {
         .sample_size(20)            // one forward pass is heavy
         .measurement_time(Duration::from_secs(5));
     // Custom measurement: time + RSS delta in one go.
-    group.bench_function("neure-candle", |b| {
+    group.bench_function("neuron-candle", |b| {
         b.iter_custom(|iters| {
             let before = memory::MemorySnapshot::now();
             let start = std::time::Instant::now();
-            for _ in 0..iters { ort_compare::bench_neure_candle_once(); }
+            for _ in 0..iters { ort_compare::bench_neuron_candle_once(); }
             let elapsed = start.elapsed();
             let after = memory::MemorySnapshot::now();
             eprintln!(
-                "neure-candle yolov8: iters={} elapsed={:?} rss_before={} rss_after={} peak={:.1}MB",
+                "neuron-candle yolov8: iters={} elapsed={:?} rss_before={} rss_after={} peak={:.1}MB",
                 iters, elapsed, before, after,
                 after.peak_rss_bytes as f64 / 1_048_576.0
             );
@@ -87,7 +87,7 @@ fn yolov8_detection_throughput(c: &mut Criterion) {
 }
 
 /// Workload: LLM single-token forward pass (one transformer block, no
-/// KV cache). Compares neure's candle LLM against llama.cpp's ggml
+/// KV cache). Compares neuron's candle LLM against llama.cpp's ggml
 /// transformer. Input: 2048-token sequence, 4096-dim hidden, 32 heads,
 /// 32 layers (approximates Llama-3-8B).
 fn llm_single_token_forward(c: &mut Criterion) {
@@ -95,7 +95,7 @@ fn llm_single_token_forward(c: &mut Criterion) {
     group
         .sample_size(20)
         .measurement_time(Duration::from_secs(5));
-    group.bench_function("neure-candle", |b| ort_compare::bench_neure_candle(b));
+    group.bench_function("neuron-candle", |b| ort_compare::bench_neuron_candle(b));
     group.bench_function("ort", |b| ort_compare::bench_ort(b));
     group.bench_function("mnn", |b| mnn_compare::bench_mnn(b));
     group.bench_function("llama.cpp", |b| llama_cpp_compare::bench_llama_cpp(b));

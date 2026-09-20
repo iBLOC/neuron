@@ -4,7 +4,7 @@ title: Engine Selection
 
 # Engine Selection
 
-neure supports **3 ML frameworks** and **multiple impls per framework** to cover different deployment targets. You pick what fits via Cargo feature flags + env vars.
+neuron supports **3 ML frameworks** and **multiple impls per framework** to cover different deployment targets. You pick what fits via Cargo feature flags + env vars.
 
 ## Engine matrix
 
@@ -28,7 +28,7 @@ neure supports **3 ML frameworks** and **multiple impls per framework** to cover
 Engine selection happens at two levels:
 
 1. **Build time** (Cargo feature flag) — controls which engines are *compiled in*. Engines you don't enable have zero compile-time cost.
-2. **Runtime** (`NEURE_*_RUNTIME` env var) — controls which engine handles a given request when multiple are available.
+2. **Runtime** (`NEURON_*_RUNTIME` env var) — controls which engine handles a given request when multiple are available.
 
 ### Build-time example
 
@@ -50,13 +50,13 @@ cargo build --features candle,voxcpm,litert,mistralrs,asr-audio,flash-attn,cuda
 
 ```bash
 # Use candle (default)
-NEURE_LLM_RUNTIME=candle neure-host-binary
+NEURON_LLM_RUNTIME=candle neuron-host-binary
 
 # Use mistralrs for LLM
-NEURE_LLM_RUNTIME=mistralrs neure-host-binary
+NEURON_LLM_RUNTIME=mistralrs neuron-host-binary
 
 # Use cohere for rerank (no local weights needed)
-NEURE_RERANK_RUNTIME=cohere NEURE_COHERE_API_KEY=... neure-host-binary
+NEURON_RERANK_RUNTIME=cohere NEURON_COHERE_API_KEY=... neuron-host-binary
 ```
 
 See [Environment Variables](/reference/env-vars) for the full matrix.
@@ -80,11 +80,11 @@ See [Environment Variables](/reference/env-vars) for the full matrix.
 ### Rerank
 
 - **candle (BGE / mxbai / jina)**: local inference, no API key needed, works offline. Quality varies by model family.
-- **cohere**: hosted Cohere API, requires `NEURE_COHERE_API_KEY`. Multilingual v3 is high quality. Use when you can't ship a 1GB reranker model in your binary.
+- **cohere**: hosted Cohere API, requires `NEURON_COHERE_API_KEY`. Multilingual v3 is high quality. Use when you can't ship a 1GB reranker model in your binary.
 
 ### Embedding
 
-- **candle (MiniLM)** is the only engine. Use `all-MiniLM-L6-v2` (384-dim, Apache-2.0) for general-purpose embeddings. Swap to other MiniLM-family models via `NEURE_EMBEDDING_MODEL_PATH`.
+- **candle (MiniLM)** is the only engine. Use `all-MiniLM-L6-v2` (384-dim, Apache-2.0) for general-purpose embeddings. Swap to other MiniLM-family models via `NEURON_EMBEDDING_MODEL_PATH`.
 
 ### Vision
 
@@ -127,4 +127,4 @@ Use `--no-default-features --features candle` for minimal dev builds. CI should 
 
 - [Capabilities](/concepts/capabilities) — what each capability does
 - [Quick Start](/guide/quick-start) — minimal embed example
-- [Environment Variables](/reference/env-vars) — full `NEURE_*` matrix
+- [Environment Variables](/reference/env-vars) — full `NEURON_*` matrix

@@ -250,7 +250,7 @@ pub fn detect_arch(model_dir: &std::path::Path) -> Result<(CausalArch, String), 
         | "deepseek_v2" | "deepseek_v3" => {
             return Err(format!(
                 "MoE model_type {model_type:?} is not supported. \
-                 neure only loads dense causal LMs. For MoE inference, \
+                 neuron only loads dense causal LMs. For MoE inference, \
                  use candle-vllm or another MoE-aware runtime."
             ));
         }

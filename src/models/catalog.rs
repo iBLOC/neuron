@@ -6,7 +6,7 @@ use crate::models::registry::Registry;
 use crate::models::source::SourceRegistry;
 
 /// Resolved source-override configuration, derived from
-/// `NeureConfig`. Consumed by `SourceRegistry::resolve_for` to
+/// `NeuronConfig`. Consumed by `SourceRegistry::resolve_for` to
 /// pick a source for a given (engine, model_id) at pull time.
 #[derive(Debug, Clone, Default)]
 pub struct CatalogConfig {
@@ -17,10 +17,10 @@ pub struct CatalogConfig {
 
 impl CatalogConfig {
     /// Build a `CatalogConfig` from the relevant fields of
-    /// `NeureConfig`. The source-endpoint map is intentionally
+    /// `NeuronConfig`. The source-endpoint map is intentionally
     /// not copied here — endpoints live on the `SourceRegistry`
     /// itself (set when sources are constructed).
-    pub fn from_neure_config(cfg: &crate::config::NeureConfig) -> Self {
+    pub fn from_neuron_config(cfg: &crate::config::NeuronConfig) -> Self {
         Self {
             default_source_id: cfg.default_source_id.clone(),
             per_engine_source: cfg.per_engine_source.clone(),
@@ -42,7 +42,7 @@ impl CatalogConfig {
     }
 }
 
-/// A model family that neure code can load and serve. Hardcoded
+/// A model family that neuron code can load and serve. Hardcoded
 /// at build time and matched against the on-disk registry to
 /// compute `available: bool` on the `/v1/models` response.
 #[derive(Debug, Clone)]
@@ -55,7 +55,7 @@ pub struct SupportedModel {
     pub families: &'static [&'static str],
 }
 
-/// The full list of models neure currently knows how to serve.
+/// The full list of models neuron currently knows how to serve.
 /// Single static slice so it can be referenced from tests and
 /// from the `/v1/models` handler without rebuilding.
 pub const SUPPORTED_CATALOG: &[SupportedModel] = &[

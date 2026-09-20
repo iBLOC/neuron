@@ -4,7 +4,7 @@ title: Feature Flags
 
 # Feature Flags
 
-neure exposes its full feature set as Cargo features, so the host binary pays compile time + binary size cost only for what it actually uses. Most capabilities have an opt-in feature; `candle` is enabled by default since it covers the most common case (LLM + ASR + Rerank + Embedding + Vision all on the candle backend).
+neuron exposes its full feature set as Cargo features, so the host binary pays compile time + binary size cost only for what it actually uses. Most capabilities have an opt-in feature; `candle` is enabled by default since it covers the most common case (LLM + ASR + Rerank + Embedding + Vision all on the candle backend).
 
 ## Quick reference
 
@@ -74,9 +74,9 @@ Once you've built with certain features, runtime selection picks the specific en
 ```bash
 # Built with: candle,voxcpm,mistralrs
 # Runtime:
-NEURE_LLM_RUNTIME=candle    # uses candle (available)
-NEURE_LLM_RUNTIME=mistralrs # uses mistralrs (available)
-NEURE_LLM_RUNTIME=litert     # ERROR — litert not built
+NEURON_LLM_RUNTIME=candle    # uses candle (available)
+NEURON_LLM_RUNTIME=mistralrs # uses mistralrs (available)
+NEURON_LLM_RUNTIME=litert     # ERROR — litert not built
 ```
 
 If you try to use a runtime that wasn't built in, you'll get a clear error at startup: `Error: requested runtime 'litert' not in this build (built with: candle,voxcpm)`.

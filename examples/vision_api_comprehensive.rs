@@ -1,6 +1,6 @@
 //! Vision API comprehensive example — demonstrates all vision capabilities.
 //!
-//! This example shows how to use neure's vision API for:
+//! This example shows how to use neuron's vision API for:
 //! 1. Object detection (YOLOv8)
 //! 2. Image classification
 //! 3. Instance segmentation
@@ -13,26 +13,26 @@
 //! cargo run --release --example vision_api_comprehensive --features candle
 //! ```
 
-use neure_lib::{
+use neuron_lib::{
     vision::{
         BBox, Detection, VisionImageSource, VisionImageUrl, VisionImpl,
         VisionRequest, VisionResponse, VisionRuntime, VisionTask,
         letterbox::letterbox_rgb, coco_classes, nms,
     },
-    DeviceSelection, NeureConfig, NeureEmbedConfig, NeureHandle,
+    DeviceSelection, NeuronConfig, NeuronEmbedConfig, NeuronHandle,
 };
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("=== Neure Vision API Comprehensive Example ===\n");
+    println!("=== Neuron Vision API Comprehensive Example ===\n");
 
     // 1. Show supported model catalog
-    let catalog = neure_lib::capabilities::CapabilityCatalog::with_defaults();
+    let catalog = neuron_lib::capabilities::CapabilityCatalog::with_defaults();
     let vision_models: Vec<String> = catalog.list()
         .into_iter()
         .filter(|m| {
             catalog.lookup(m)
-                .map(|c| c.api_styles.contains(&neure_lib::capabilities::ApiStyle::openai_vision()))
+                .map(|c| c.api_styles.contains(&neuron_lib::capabilities::ApiStyle::openai_vision()))
                 .unwrap_or(false)
         })
         .collect();
@@ -109,12 +109,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 async fn create_vision_runtime(model_id: &str) -> Result<Box<dyn VisionRuntime>, Box<dyn std::error::Error>> {
-    use neure_lib::vision::VisionRuntime as _;
+    use neuron_lib::vision::VisionRuntime as _;
     // Load the runtime - in a real scenario, this loads the model weights
-    let rt = neure_lib::vision::registry::VisionRuntimeRegistry::new(std::sync::Arc::new(
-        neure_lib::NeureConfig::new()
+    let rt = neuron_lib::vision::registry::VisionRuntimeRegistry::new(std::sync::Arc::new(
+        neuron_lib::NeuronConfig::new()
     ));
     // In a real scenario, we'd register models and use runtime_for()
     // For now, create a runtime directly
-    Ok(Box::new(neure_lib::vision::candle_yolo::CandleYoloRuntime::new(model_id, &DeviceSelection::Cpu)))
+    Ok(Box::new(neuron_lib::vision::candle_yolo::CandleYoloRuntime::new(model_id, &DeviceSelection::Cpu)))
 }

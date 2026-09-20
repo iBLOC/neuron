@@ -1,4 +1,4 @@
-//! HTTP-level error types for the neure API server.
+//! HTTP-level error types for the neuron API server.
 //!
 //! [`ServerError`] is the single error enum used by every axum
 //! handler in `handlers.rs`. It maps to OpenAI-shaped JSON error
@@ -10,7 +10,7 @@ use axum::{
 };
 use serde_json::json;
 
-/// Error response returned by all neure HTTP handlers.
+/// Error response returned by all neuron HTTP handlers.
 ///
 /// Each variant maps to a different HTTP status code and an
 /// OpenAI-shaped JSON error envelope.
@@ -55,8 +55,8 @@ impl std::fmt::Display for ServerError {
 
 impl std::error::Error for ServerError {}
 
-impl From<crate::llm::NeureError> for ServerError {
-    fn from(e: crate::llm::NeureError) -> Self {
+impl From<crate::llm::NeuronError> for ServerError {
+    fn from(e: crate::llm::NeuronError) -> Self {
         match e.error_type.as_str() {
             "invalid_request_error" => ServerError::BadRequest(e.message),
             "not_implemented" | "not_initialized" => ServerError::NotImplemented(e.message),

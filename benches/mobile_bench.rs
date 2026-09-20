@@ -33,7 +33,7 @@ fn bench_alloc_without_pool(c: &mut Criterion) {
 
 #[cfg(feature = "candle")]
 fn bench_alloc_with_pool(c: &mut Criterion) {
-    use neure_lib::vision::memory_pool::TensorPool;
+    use neuron_lib::vision::memory_pool::TensorPool;
     let pool = TensorPool::new(Device::Cpu);
     let shape = vec![1, 3, 640, 640];
     c.bench_function("alloc_with_pool_640x640", |b| {
@@ -46,7 +46,7 @@ fn bench_alloc_with_pool(c: &mut Criterion) {
 
 #[cfg(feature = "candle")]
 fn bench_pool_warmup_vs_cold(c: &mut Criterion) {
-    use neure_lib::vision::memory_pool::TensorPool;
+    use neuron_lib::vision::memory_pool::TensorPool;
     let mut group = c.benchmark_group("pool_warmup");
     let pool = TensorPool::new(Device::Cpu);
     let shape = vec![1, 3, 640, 640];
@@ -74,7 +74,7 @@ fn bench_pool_warmup_vs_cold(c: &mut Criterion) {
 
 #[cfg(feature = "candle")]
 fn bench_pool_size_scaling(c: &mut Criterion) {
-    use neure_lib::vision::memory_pool::TensorPool;
+    use neuron_lib::vision::memory_pool::TensorPool;
     let mut group = c.benchmark_group("pool_size_scaling");
     let pool = TensorPool::new(Device::Cpu);
 

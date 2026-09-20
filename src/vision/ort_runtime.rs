@@ -48,7 +48,7 @@ use super::{
     VisionResponse, VisionRuntime, VisionTask,
 };
 use crate::config::DeviceSelection;
-use crate::llm::{ChatResult, ModelInfo, NeureError};
+use crate::llm::{ChatResult, ModelInfo, NeuronError};
 
 /// Trait for ONNX session implementations. Users implement this
 /// trait for their chosen backend (tract, ort, onnxruntime, etc.)
@@ -63,7 +63,7 @@ pub trait OrtSessionRunner: Send + Sync + 'static {
         input: &[f32],
         input_shape: &[i64],
         output_names: &[String],
-    ) -> Result<(Vec<f32>, Vec<i64>), NeureError>;
+    ) -> Result<(Vec<f32>, Vec<i64>), NeuronError>;
 }
 
 /// Concrete wrapper for the ONNX session. Holds a trait object
@@ -83,7 +83,7 @@ impl OrtSession {
         input: &[f32],
         input_shape: &[i64],
         output_names: &[String],
-    ) -> Result<(Vec<f32>, Vec<i64>), NeureError> {
+    ) -> Result<(Vec<f32>, Vec<i64>), NeuronError> {
         self.inner.run_inference(input_name, input, input_shape, output_names)
     }
 }
@@ -190,7 +190,7 @@ pub struct OrtVisionRuntime {
 
 impl OrtVisionRuntime {
     pub fn new(model_id: &str, _device: &DeviceSelection) -> Self {
-        let model_path = std::env::var("NEURE_VISION_MODEL_PATH")
+        let model_path = crate::config::env_var_result("VISION_MODEL_PATH")
             .ok()
             .map(std::path::PathBuf::from);
         Self {
@@ -203,16 +203,16 @@ impl OrtVisionRuntime {
 
     /// Try to load the ONNX model from `<model_path>/model.onnx` and
     /// `<model_path>/config.json`. Sets the inner session + config.
-    pub fn try_load(&self) -> Result<(), NeureError> {
+    pub fn try_load(&self) -> Result<(), NeuronError> {
         let model_path = self.model_path.as_ref().ok_or_else(|| {
-            NeureError::not_initialized(
-                "NEURE_VISION_MODEL_PATH is not set; cannot load ONNX vision model".to_string(),
+            NeuronError::not_initialized(
+                "NEURON_VISION_MODEL_PATH is not set; cannot load ONNX vision model".to_string(),
             )
         })?;
 
         let onnx_path = model_path.join("model.onnx");
         if !Path::new(&onnx_path).exists() {
-            return Err(NeureError::not_initialized(format!(
+            return Err(NeuronError::not_initialized(format!(
                 "ONNX model not found at {}",
                 onnx_path.display()
             )));
@@ -222,10 +222,10 @@ impl OrtVisionRuntime {
         let config_path = model_path.join("config.json");
         let config = if config_path.exists() {
             let bytes = std::fs::read(&config_path).map_err(|e| {
-                NeureError::invalid_input(format!("failed to read config.json: {e}"))
+                NeuronError::invalid_input(format!("failed to read config.json: {e}"))
             })?;
             serde_json::from_slice::<OrtModelConfig>(&bytes).map_err(|e| {
-                NeureError::invalid_input(format!("invalid config.json: {e}"))
+                NeuronError::invalid_input(format!("invalid config.json: {e}"))
             })?
         } else {
             OrtModelConfig::default()
@@ -267,10 +267,10 @@ impl OrtVisionRuntime {
     /// YOLOv8-ONNX output 0 has shape `[1, 84, 8400]` for COCO (4 bbox
     /// coords + 80 class scores per anchor); the executor flattens it to
     /// a 1-D vector.
-    fn run_inference(&self, _input_tensor: &[f32]) -> Result<(Vec<f32>, Vec<i64>), NeureError> {
+    fn run_inference(&self, _input_tensor: &[f32]) -> Result<(Vec<f32>, Vec<i64>), NeuronError> {
         let mut session_guard = self.session.lock().unwrap();
         let session = session_guard.as_mut().ok_or_else(|| {
-            NeureError::not_initialized("ONNX session not loaded; call try_load() first".to_string())
+            NeuronError::not_initialized("ONNX session not loaded; call try_load() first".to_string())
         })?;
 
         let config = self.config.lock().unwrap().clone();
@@ -482,20 +482,20 @@ OrtOutputLayout::Florence2 => {
     }
 }
 
-fn build_session(onnx_path: &Path) -> Result<OrtSession, NeureError> {
+fn build_session(onnx_path: &Path) -> Result<OrtSession, NeuronError> {
     #[cfg(feature = "tract")]
     {
         use crate::vision::ort_backends::TractSession;
         let path_str = onnx_path
             .to_str()
-            .ok_or_else(|| NeureError::invalid_input("onnx path contains non-UTF8".to_string()))?;
+            .ok_or_else(|| NeuronError::invalid_input("onnx path contains non-UTF8".to_string()))?;
         let tract = TractSession::new(path_str)?;
         return Ok(OrtSession::new(tract));
     }
     #[cfg(not(feature = "tract"))]
     {
         let _ = onnx_path;
-        Err(NeureError::not_implemented(
+        Err(NeuronError::not_implemented(
             "ONNX session construction requires a concrete backend (ort / tract / onnxruntime); \
              enable --features tract for pure-Rust ONNX inference. \
              See docs/superpowers/specs/2026-07-03-vision-yolo-lora-design.md for the contract."
@@ -510,7 +510,7 @@ fn run_session(
     input_tensor: &[f32],
     input_shape: &[i64],
     output_names: &[String],
-) -> Result<(Vec<f32>, Vec<i64>), NeureError> {
+) -> Result<(Vec<f32>, Vec<i64>), NeuronError> {
     session.run(input_name, input_tensor, input_shape, output_names)
 }
 
@@ -543,7 +543,7 @@ impl VisionRuntime for OrtVisionRuntime {
                 use base64::Engine as _;
                 let bytes = base64::engine::general_purpose::STANDARD
                     .decode(data)
-                    .map_err(|e| NeureError::invalid_input(format!("invalid base64: {e}")))?;
+                    .map_err(|e| NeuronError::invalid_input(format!("invalid base64: {e}")))?;
                 (bytes, media_type.clone())
             }
             VisionImageSource::ImageUrl { image_url } => {
@@ -551,26 +551,26 @@ impl VisionRuntime for OrtVisionRuntime {
                 if url.starts_with("data:") {
                     let parts: Vec<&str> = url.splitn(2, ',').collect();
                     if parts.len() != 2 {
-                        return Err(NeureError::invalid_input("invalid data URL"));
+                        return Err(NeuronError::invalid_input("invalid data URL"));
                     }
                     use base64::Engine as _;
                     let bytes = base64::engine::general_purpose::STANDARD
                         .decode(parts[1])
-                        .map_err(|e| NeureError::invalid_input(format!("invalid data URL: {e}")))?;
+                        .map_err(|e| NeuronError::invalid_input(format!("invalid data URL: {e}")))?;
                     (bytes, "data_url".into())
                 } else {
                     let client = reqwest::Client::new();
                     let resp = client.get(url).send().await.map_err(|e| {
-                        NeureError::invalid_input(format!("download failed: {e}"))
+                        NeuronError::invalid_input(format!("download failed: {e}"))
                     })?;
                     let bytes = resp.bytes().await.map_err(|e| {
-                        NeureError::invalid_input(format!("read failed: {e}"))
+                        NeuronError::invalid_input(format!("read failed: {e}"))
                     })?;
                     (bytes.to_vec(), "remote".into())
                 }
             }
             VisionImageSource::FileId { .. } => {
-                return Err(NeureError::not_implemented(
+                return Err(NeuronError::not_implemented(
                     "file_id requires host-supplied storage".to_string(),
                 ));
             }
@@ -578,7 +578,7 @@ impl VisionRuntime for OrtVisionRuntime {
 
         // 2. Decode to RGB u8
         let img = image::load_from_memory(&image_bytes).map_err(|e| {
-            NeureError::invalid_input(format!("decode failed: {e}"))
+            NeuronError::invalid_input(format!("decode failed: {e}"))
         })?;
         let rgb = img.to_rgb8();
         let (src_w, src_h) = rgb.dimensions();
@@ -699,7 +699,7 @@ impl VisionRuntime for OrtVisionRuntime {
     }
 
     fn list_models(&self) -> Vec<ModelInfo> {
-        let mut info = ModelInfo::new(self.model_id.clone(), "neure");
+        let mut info = ModelInfo::new(self.model_id.clone(), "neuron");
         info.capabilities = Some(vec![
             "vision".to_string(),
             "detect".to_string(),
@@ -960,7 +960,7 @@ mod tests {
 
     #[test]
     fn test_ort_load_without_env_var() {
-        // If NEURE_VISION_MODEL_PATH is not set, load should fail with a clear error
+        // If NEURON_VISION_MODEL_PATH is not set, load should fail with a clear error
         let _rt = OrtVisionRuntime::new("yolov8n", &DeviceSelection::Cpu);
         // The session is None until try_load is called, so we can't easily test
         // the full path here without an actual ONNX model. The trait's `load`

@@ -1,12 +1,12 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use neure_lib::{RerankResult, RerankResponse, RerankUsage};
-use neure_lib::{ModelInfo};
-use neure_lib::{base64_encode};
-use neure_lib::vision::letterbox::letterbox_rgb;
-use neure_lib::vision::nms::{nms, Candidate};
-use neure_lib::vision::BBox;
-use neure_lib::vision::lora::{LoraAdapter, LoraAdapterMeta, LoraAdapterStatus, LoraRegistry, LoraTensor};
-use neure_lib::vision::lora_weights::{merge_lora_delta, apply_lora_delta};
+use neuron_lib::{RerankResult, RerankResponse, RerankUsage};
+use neuron_lib::{ModelInfo};
+use neuron_lib::{base64_encode};
+use neuron_lib::vision::letterbox::letterbox_rgb;
+use neuron_lib::vision::nms::{nms, Candidate};
+use neuron_lib::vision::BBox;
+use neuron_lib::vision::lora::{LoraAdapter, LoraAdapterMeta, LoraAdapterStatus, LoraRegistry, LoraTensor};
+use neuron_lib::vision::lora_weights::{merge_lora_delta, apply_lora_delta};
 
 fn base64_encode_micro(c: &mut Criterion) {
     let values: Vec<f32> = (0..384).map(|i| (i as f32) * 0.001).collect();
@@ -83,7 +83,7 @@ fn model_info_10(c: &mut Criterion) {
     c.bench_function("count_10", |b| {
         let models: Vec<ModelInfo> = (0..10)
             .map(|i| {
-                let mut info = ModelInfo::new(format!("model-{}", i), "neure");
+                let mut info = ModelInfo::new(format!("model-{}", i), "neuron");
                 info.capabilities = Some(vec!["chat".to_string()]);
                 info
             })
@@ -96,7 +96,7 @@ fn model_info_100(c: &mut Criterion) {
     c.bench_function("count_100", |b| {
         let models: Vec<ModelInfo> = (0..100)
             .map(|i| {
-                let mut info = ModelInfo::new(format!("model-{}", i), "neure");
+                let mut info = ModelInfo::new(format!("model-{}", i), "neuron");
                 info.capabilities = Some(vec!["chat".to_string()]);
                 info
             })
@@ -109,7 +109,7 @@ fn model_info_1000(c: &mut Criterion) {
     c.bench_function("count_1000", |b| {
         let models: Vec<ModelInfo> = (0..1000)
             .map(|i| {
-                let mut info = ModelInfo::new(format!("model-{}", i), "neure");
+                let mut info = ModelInfo::new(format!("model-{}", i), "neuron");
                 info.capabilities = Some(vec!["chat".to_string()]);
                 info
             })
@@ -177,8 +177,8 @@ fn vision_lora_register_and_lookup(c: &mut Criterion) {
 }
 
 fn vision_ort_decode_yolov8_synthetic(c: &mut Criterion) {
-    use neure_lib::vision::ort_runtime::{OrtVisionRuntime, OrtOutputLayout, OrtModelConfig};
-    use neure_lib::DeviceSelection;
+    use neuron_lib::vision::ort_runtime::{OrtVisionRuntime, OrtOutputLayout, OrtModelConfig};
+    use neuron_lib::DeviceSelection;
     c.bench_function("ort_decode_yolov8_8400_anchors", |b| {
         let rt = OrtVisionRuntime::new("yolov8n", &DeviceSelection::Cpu);
         let cfg = OrtModelConfig::default(); // Yolov8 layout
@@ -197,8 +197,8 @@ fn vision_ort_decode_yolov8_synthetic(c: &mut Criterion) {
 }
 
 fn vision_ort_decode_rfdetr_synthetic(c: &mut Criterion) {
-    use neure_lib::vision::ort_runtime::{OrtVisionRuntime, OrtOutputLayout, OrtModelConfig};
-    use neure_lib::DeviceSelection;
+    use neuron_lib::vision::ort_runtime::{OrtVisionRuntime, OrtOutputLayout, OrtModelConfig};
+    use neuron_lib::DeviceSelection;
     c.bench_function("ort_decode_rfdetr_300_queries", |b| {
         let rt = OrtVisionRuntime::new("rf-detr-base", &DeviceSelection::Cpu);
         let cfg = OrtModelConfig {

@@ -1,4 +1,4 @@
-//! Axum handlers for neure's HTTP API.
+//! Axum handlers for neuron's HTTP API.
 //!
 //! Each handler is an async function that accepts [`ServerState`]
 //! (via axum's `State` extractor) and returns either a JSON response
@@ -33,7 +33,7 @@ use crate::vision::{
 pub async fn health_handler() -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "status": "healthy",
-        "service": "neure"
+        "service": "neuron"
     }))
 }
 

@@ -4,7 +4,7 @@ title: Capabilities
 
 # Capabilities
 
-neure exposes **6 capability surfaces** that mirror the OpenAI wire format where it exists (chat completions, audio, embeddings, rerank) and add 2 surfaces that are neure-specific (vision, multi-source model registry).
+neuron exposes **6 capability surfaces** that mirror the OpenAI wire format where it exists (chat completions, audio, embeddings, rerank) and add 2 surfaces that are neuron-specific (vision, multi-source model registry).
 
 ## LLM — Large Language Model
 
@@ -15,7 +15,7 @@ neure exposes **6 capability surfaces** that mirror the OpenAI wire format where
 - **litert_lm** (opt-in, `--features litert`) — Gemma 3 via Google LiteRT-LM subprocess (shells out to the `lit` binary)
 - **mistralrs** (opt-in, `--features mistralrs`) — 40+ model families via mistral.rs engine, with PagedAttention, prefix caching, KV cache, per-token streaming, ISQ (in-situ quantization)
 
-**Selection**: `NEURE_LLM_RUNTIME=candle|litert|mistralrs` + per-model registration in `NeureConfig::registrations`
+**Selection**: `NEURON_LLM_RUNTIME=candle|litert|mistralrs` + per-model registration in `NeuronConfig::registrations`
 
 **Streaming**: OpenAI SSE format `data: {chunk}\n\n`; Anthropic Messages SSE events; native `data: [DONE]` terminator
 
@@ -30,13 +30,13 @@ neure exposes **6 capability surfaces** that mirror the OpenAI wire format where
 **Model**: VoxCpm 0.5B (Apache-2.0 weights pre-converted to burn `.mpk` format). Voice cloning supported. Chinese + English.
 
 **Configuration**:
-- `NEURE_TTS_RUNTIME=voxcpm` (no other TTS engines)
-- `NEURE_TTS_MODEL_PATH=/path/to/voxcpm-mpk-dir` (must contain `config.json` + `tokenizer.json` + `model.mpk` + `audiovae.mpk`)
+- `NEURON_TTS_RUNTIME=voxcpm` (no other TTS engines)
+- `NEURON_TTS_MODEL_PATH=/path/to/voxcpm-mpk-dir` (must contain `config.json` + `tokenizer.json` + `model.mpk` + `audiovae.mpk`)
 - `voice` (OpenAI): `alloy` / `echo` / `fable` / `onyx` / `nova` / `shimmer` (mapped to VoxCpm speakers; pick closest)
 
 **Streaming**: When `stream: true`, response is `Body::from_stream(...)` of 16 KiB audio chunks. When `false`, single MP3 response.
 
-**License note**: The vendored VoxCpm implementation under `src/tts/voxcpm_burn/` was originally self-published at [github.com/madushan1000/voxcpm_rs](https://github.com/madushan1000/voxcpm_rs) and has been relicensed to Apache-2.0 for inclusion in neure.
+**License note**: The vendored VoxCpm implementation under `src/tts/voxcpm_burn/` was originally self-published at [github.com/madushan1000/voxcpm_rs](https://github.com/madushan1000/voxcpm_rs) and has been relicensed to Apache-2.0 for inclusion in neuron.
 
 ## ASR — Automatic Speech Recognition
 
@@ -47,8 +47,8 @@ neure exposes **6 capability surfaces** that mirror the OpenAI wire format where
 **Model**: Whisper base / small / medium / large-v3 via `candle-transformers`. Multilingual.
 
 **Configuration**:
-- `NEURE_ASR_RUNTIME=candle`
-- `NEURE_ASR_MODEL_PATH=/path/to/whisper-dir`
+- `NEURON_ASR_RUNTIME=candle`
+- `NEURON_ASR_MODEL_PATH=/path/to/whisper-dir`
 - Audio formats: WAV native; MP3 / FLAC / OGG-Vorbis with `--features asr-audio` (via `symphonia` + `rubato` for resampling to 16 kHz mono)
 
 **Response**: OpenAI-shaped `{ "text": "..." }` JSON
@@ -64,9 +64,9 @@ neure exposes **6 capability surfaces** that mirror the OpenAI wire format where
 - **cohere** (Cohere /v1/rerank HTTP proxy, no local weights) — supports `rerank-english-v3.0` and `rerank-multilingual-v3.0` via the hosted API
 
 **Configuration**:
-- `NEURE_RERANK_RUNTIME=candle|cohere` (note: `candle` is a deprecated alias for `bge`, kept for one release cycle)
-- `NEURE_RERANK_MODEL_PATH=/path/to/rerank-dir` (not used for cohere)
-- `NEURE_COHERE_API_KEY=...` (required when `NEURE_RERANK_RUNTIME=cohere`)
+- `NEURON_RERANK_RUNTIME=candle|cohere` (note: `candle` is a deprecated alias for `bge`, kept for one release cycle)
+- `NEURON_RERANK_MODEL_PATH=/path/to/rerank-dir` (not used for cohere)
+- `NEURON_COHERE_API_KEY=...` (required when `NEURON_RERANK_RUNTIME=cohere`)
 
 **Request shape** (OpenAI):
 ```json
@@ -98,8 +98,8 @@ neure exposes **6 capability surfaces** that mirror the OpenAI wire format where
 **Model**: `all-MiniLM-L6-v2` (sentence-transformers, Apache-2.0) by default. Also supports any other MiniLM-family BERT-compatible model directory.
 
 **Configuration**:
-- `NEURE_EMBEDDING_RUNTIME=candle`
-- `NEURE_EMBEDDING_MODEL_PATH=/path/to/minilm-dir` (must contain `config.json` + `tokenizer.json` + `model.safetensors`)
+- `NEURON_EMBEDDING_RUNTIME=candle`
+- `NEURON_EMBEDDING_MODEL_PATH=/path/to/minilm-dir` (must contain `config.json` + `tokenizer.json` + `model.safetensors`)
 
 **Batched inference**: `encode_batch()` pads to the longest sequence in the batch (`BatchLongest`) and runs a single BERT forward pass. Up to 32 inputs per request by default.
 
@@ -111,7 +111,7 @@ neure exposes **6 capability surfaces** that mirror the OpenAI wire format where
 
 ## Vision — Object Detection / Classification / Segmentation / Pose
 
-**Endpoints** (neure-specific; no OpenAI equivalent):
+**Endpoints** (neuron-specific; no OpenAI equivalent):
 - `POST /v1/vision/detect` — object detection (bounding boxes)
 - `POST /v1/vision/classify` — image classification
 - `POST /v1/vision/segment` — semantic segmentation masks
@@ -126,8 +126,8 @@ neure exposes **6 capability surfaces** that mirror the OpenAI wire format where
 - **ultralytics** (subprocess) — Grounding DINO (text-prompted detection)
 
 **Configuration**:
-- `NEURE_VISION_RUNTIME=candle-yolo|candle-rtdetr|candle-detr|ort|ultralytics`
-- `NEURE_VISION_MODEL_PATH=/path/to/vision-model-dir`
+- `NEURON_VISION_RUNTIME=candle-yolo|candle-rtdetr|candle-detr|ort|ultralytics`
+- `NEURON_VISION_MODEL_PATH=/path/to/vision-model-dir`
 
 **Request shape** (multipart/form-data):
 ```

@@ -1,6 +1,6 @@
-//! Integration tests for neure's HTTP API.
+//! Integration tests for neuron's HTTP API.
 //!
-//! These tests require a running neure server. Start the server with:
+//! These tests require a running neuron server. Start the server with:
 //!
 //! ```bash
 //! cargo run
@@ -28,7 +28,7 @@ mod integration {
         assert_eq!(resp.status(), 200);
         let json: serde_json::Value = resp.json().await.expect("json parse failed");
         assert_eq!(json["status"], "healthy");
-        assert_eq!(json["service"], "neure");
+        assert_eq!(json["service"], "neuron");
     }
 
     #[tokio::test]

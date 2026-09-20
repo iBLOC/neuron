@@ -28,7 +28,7 @@ use crate::canonical::{
 use crate::capabilities::{Modality, ModelCapabilities};
 use crate::config::DeviceSelection;
 use crate::engine::LlmRuntime;
-use crate::llm::NeureError;
+use crate::llm::NeuronError;
 
 use super::config::MageVLConfig;
 
@@ -64,14 +64,14 @@ impl MageVlRuntime {
         }
     }
 
-    async fn ensure_loaded(&self) -> std::result::Result<Arc<MageVlCachedModel>, NeureError> {
+    async fn ensure_loaded(&self) -> std::result::Result<Arc<MageVlCachedModel>, NeuronError> {
         self.model
             .get_or_try_init(|| async {
                 let (device, dtype) = resolve_device();
                 let shard1 = self.shard_dir.join("model-00001-of-00002.safetensors");
                 let shard2 = self.shard_dir.join("model-00002-of-00002.safetensors");
                 if !shard1.exists() || !shard2.exists() {
-                    return Err(NeureError::new(format!(
+                    return Err(NeuronError::new(format!(
                         "MageVlRuntime: missing shards at {} (need both \
                          model-00001-of-00002.safetensors and \
                          model-00002-of-00002.safetensors)",
@@ -85,7 +85,7 @@ impl MageVlRuntime {
                     &device,
                 )
                 .map_err(|e| {
-                    NeureError::new(format!("MageVLModel::load_safetensors failed: {e}"))
+                    NeuronError::new(format!("MageVLModel::load_safetensors failed: {e}"))
                 })?;
                 let tokenizer = load_tokenizer_from(&self.shard_dir);
                 if tokenizer.is_none() {
@@ -154,7 +154,7 @@ impl LlmRuntime for MageVlRuntime {
         let (input_ids, pixel_values, image_grid_thw) =
             build_qwen3_inputs(&req, &cached.device, &cached.tokenizer)
                 .await
-                .map_err(|e| NeureError::new(format!("build mage-vl inputs: {e}")))?;
+                .map_err(|e| NeuronError::new(format!("build mage-vl inputs: {e}")))?;
 
         // `<|im_end|>` is Qwen3's EOS. Fall back to the known id if
         // the tokenizer is absent.
@@ -178,12 +178,12 @@ impl LlmRuntime for MageVlRuntime {
                 max_new_tokens,
                 eos_token_id,
             )
-            .map_err(|e| NeureError::new(format!("mage-vl generate: {e}")))?;
+            .map_err(|e| NeuronError::new(format!("mage-vl generate: {e}")))?;
 
         let text = match &cached.tokenizer {
             Some(t) if !generated.is_empty() => t
                 .decode(&generated, true)
-                .map_err(|e| NeureError::new(format!("mage-vl decode: {e}")))?,
+                .map_err(|e| NeuronError::new(format!("mage-vl decode: {e}")))?,
             _ => String::new(),
         };
 
@@ -485,7 +485,7 @@ mod tests {
     #[test]
     fn tokenizer_roundtrip_when_checkpoint_present() {
         let dir = std::path::PathBuf::from(
-            std::env::var("NEURE_MAGE_VL_SHARD_DIR")
+            crate::config::env_var_result("MAGE_VL_SHARD_DIR")
                 .unwrap_or_else(|_| "../OpenSourceProjects/mage/mage-vl-checkpoint".into()),
         );
         let Some(tok) = load_tokenizer_from(&dir) else {

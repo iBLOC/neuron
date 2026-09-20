@@ -3,7 +3,7 @@
 //! Loads a `XLMRobertaForSequenceClassification` model (e.g. BAAI/bge-reranker-base)
 //! and produces [0, 1]-normalized relevance scores via sigmoid.
 //!
-//! Enable with: `NEURE_RERANK_RUNTIME=candle` and set `NEURE_RERANK_MODEL_PATH`
+//! Enable with: `NEURON_RERANK_RUNTIME=candle` and set `NEURON_RERANK_MODEL_PATH`
 //! to a directory containing config.json, tokenizer.json, and model.safetensors.
 
 use std::path::PathBuf;
@@ -18,7 +18,7 @@ use candle_transformers::models::xlm_roberta::{
 use tokenizers::Tokenizer;
 
 use crate::config::{ensure_dir, DeviceSelection};
-use crate::llm::{ChatResult, ModelInfo, NeureError};
+use crate::llm::{ChatResult, ModelInfo, NeuronError};
 
 use super::{RerankRequest, RerankResponse, RerankResult, RerankRuntime, RerankUsage};
 
@@ -42,18 +42,18 @@ impl CandleRerankRuntime {
     }
 
     fn resolve_model_path(model: &str) -> Result<PathBuf, String> {
-        let path = match std::env::var("NEURE_RERANK_MODEL_PATH") {
+        let path = match crate::config::env_var_result("RERANK_MODEL_PATH") {
             Ok(p) => PathBuf::from(p),
             Err(_) => {
                 return Err(format!(
-                    "CandleRerankRuntime: set NEURE_RERANK_MODEL_PATH to a directory containing \
+                    "CandleRerankRuntime: set NEURON_RERANK_MODEL_PATH to a directory containing \
                      config.json + tokenizer.json + *.safetensors for model '{}'. \
                      Download BAAI/bge-reranker-base from HuggingFace and set the path.",
                     model
                 ));
             }
         };
-        ensure_dir(&path, "NEURE_RERANK_MODEL_PATH")?;
+        ensure_dir(&path, "NEURON_RERANK_MODEL_PATH")?;
         let config_path = path.join("config.json");
         let tokenizer_path = path.join("tokenizer.json");
         let has_weights = std::fs::read_dir(&path)
@@ -119,28 +119,28 @@ impl RerankRuntime for CandleRerankRuntime {
     where
         Self: Sized,
     {
-        let path = Self::resolve_model_path(model).map_err(NeureError::not_implemented)?;
-        let dev = Self::map_device(device).map_err(NeureError::not_implemented)?;
+        let path = Self::resolve_model_path(model).map_err(NeuronError::not_implemented)?;
+        let dev = Self::map_device(device).map_err(NeuronError::not_implemented)?;
 
         let config_path = path.join("config.json");
         let config_data = std::fs::read_to_string(&config_path)
-            .map_err(|e| NeureError::not_implemented(format!("read config.json: {}", e)))?;
+            .map_err(|e| NeuronError::not_implemented(format!("read config.json: {}", e)))?;
         let config: XLMRobertaConfig = serde_json::from_str(&config_data)
-            .map_err(|e| NeureError::not_implemented(format!("parse config.json: {}", e)))?;
+            .map_err(|e| NeuronError::not_implemented(format!("parse config.json: {}", e)))?;
 
         let tokenizer_path = path.join("tokenizer.json");
         let tokenizer = Tokenizer::from_file(&tokenizer_path)
-            .map_err(|e| NeureError::not_implemented(format!("load tokenizer: {}", e)))?;
+            .map_err(|e| NeuronError::not_implemented(format!("load tokenizer: {}", e)))?;
 
         let safetensors_path = path.join("model.safetensors");
         let vb = unsafe {
             VarBuilder::from_mmaped_safetensors(&[&safetensors_path], DType::F32, &dev)
         }
-        .map_err(|e| NeureError::not_implemented(format!("load safetensors: {}", e)))?;
+        .map_err(|e| NeuronError::not_implemented(format!("load safetensors: {}", e)))?;
 
         let num_labels = 1;
         let model = XLMRobertaForSequenceClassification::new(num_labels, &config, vb)
-            .map_err(|e| NeureError::not_implemented(format!("build model: {}", e)))?;
+            .map_err(|e| NeuronError::not_implemented(format!("build model: {}", e)))?;
 
         let runtime = CandleRerankRuntime::new();
         *runtime.inner.lock().unwrap() = Some(LoadedModel { model: Arc::new(model), tokenizer, device: dev });
@@ -149,13 +149,13 @@ impl RerankRuntime for CandleRerankRuntime {
 
     async fn rerank(&self, req: RerankRequest) -> ChatResult<RerankResponse> {
         if req.documents.is_empty() {
-            return Err(NeureError::invalid_input("documents cannot be empty"));
+            return Err(NeuronError::invalid_input("documents cannot be empty"));
         }
 
         let (model, tokenizer, device) = {
             let inner = self.inner.lock().unwrap();
             let loaded = inner.as_ref().ok_or_else(|| {
-                NeureError::not_initialized("CandleRerankRuntime not loaded. Call load() first.")
+                NeuronError::not_initialized("CandleRerankRuntime not loaded. Call load() first.")
             })?;
             (Arc::clone(&loaded.model), loaded.tokenizer.clone(), loaded.device.clone())
         };
@@ -166,10 +166,10 @@ impl RerankRuntime for CandleRerankRuntime {
         for (i, doc) in req.documents.iter().enumerate() {
             let encoding = tokenizer
                 .encode(req.query.as_str(), true)
-                .map_err(|e| NeureError::not_implemented(format!("tokenize query: {}", e)))?;
+                .map_err(|e| NeuronError::not_implemented(format!("tokenize query: {}", e)))?;
             let doc_encoding = tokenizer
                 .encode(doc.as_str(), true)
-                .map_err(|e| NeureError::not_implemented(format!("tokenize doc: {}", e)))?;
+                .map_err(|e| NeuronError::not_implemented(format!("tokenize doc: {}", e)))?;
 
             let mut input_ids: Vec<u32> = encoding.get_ids().to_vec();
             let mut attention_mask: Vec<u32> = encoding.get_attention_mask().to_vec();
@@ -186,31 +186,31 @@ impl RerankRuntime for CandleRerankRuntime {
             }
 
             let input_tensor = Tensor::new(input_ids.as_slice(), &device)
-                .map_err(|e| NeureError::not_implemented(format!("input tensor: {}", e)))?
+                .map_err(|e| NeuronError::not_implemented(format!("input tensor: {}", e)))?
                 .unsqueeze(0)
-                .map_err(|e| NeureError::not_implemented(format!("unsqueeze input: {}", e)))?;
+                .map_err(|e| NeuronError::not_implemented(format!("unsqueeze input: {}", e)))?;
             let mask_tensor = Tensor::new(attention_mask.as_slice(), &device)
-                .map_err(|e| NeureError::not_implemented(format!("mask tensor: {}", e)))?
+                .map_err(|e| NeuronError::not_implemented(format!("mask tensor: {}", e)))?
                 .unsqueeze(0)
-                .map_err(|e| NeureError::not_implemented(format!("unsqueeze mask: {}", e)))?;
+                .map_err(|e| NeuronError::not_implemented(format!("unsqueeze mask: {}", e)))?;
             let token_type_tensor = Tensor::new(token_type_ids.as_slice(), &device)
-                .map_err(|e| NeureError::not_implemented(format!("token_type tensor: {}", e)))?
+                .map_err(|e| NeuronError::not_implemented(format!("token_type tensor: {}", e)))?
                 .unsqueeze(0)
-                .map_err(|e| NeureError::not_implemented(format!("unsqueeze token_type: {}", e)))?;
+                .map_err(|e| NeuronError::not_implemented(format!("unsqueeze token_type: {}", e)))?;
 
             let output = model
                 .forward(&input_tensor, &mask_tensor, &token_type_tensor)
-                .map_err(|e| NeureError::not_implemented(format!("forward: {}", e)))?;
+                .map_err(|e| NeuronError::not_implemented(format!("forward: {}", e)))?;
 
             let logits: Vec<Vec<f32>> = output
                 .to_vec2::<f32>()
-                .map_err(|e| NeureError::not_implemented(format!("to_vec2: {}", e)))?;
+                .map_err(|e| NeuronError::not_implemented(format!("to_vec2: {}", e)))?;
             let logit = logits
                 .first()
                 .and_then(|row| row.first())
                 .copied()
                 .ok_or_else(|| {
-                    NeureError::not_implemented(String::from("Failed to extract logit from model output"))
+                    NeuronError::not_implemented(String::from("Failed to extract logit from model output"))
                 })?;
 
             let score = 1.0 / (1.0 + (-logit).exp());
@@ -242,7 +242,7 @@ impl RerankRuntime for CandleRerankRuntime {
     }
 
     fn list_models(&self) -> Vec<ModelInfo> {
-        let mut info = ModelInfo::new("bge-reranker-base", "neure-candle");
+        let mut info = ModelInfo::new("bge-reranker-base", "neuron-candle");
         info.capabilities = Some(vec!["rerank".to_string()]);
         vec![info]
     }
@@ -259,13 +259,13 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn test_resolve_model_path_without_env_returns_useful_error() {
-        unsafe { std::env::remove_var("NEURE_RERANK_MODEL_PATH") };
+        unsafe { std::env::remove_var("NEURON_RERANK_MODEL_PATH") };
         let result = CandleRerankRuntime::resolve_model_path("bge-reranker-base");
         assert!(result.is_err());
         let err = result.err().unwrap();
         assert!(
-            err.contains("NEURE_RERANK_MODEL_PATH"),
-            "Error should mention NEURE_RERANK_MODEL_PATH, got: {}",
+            err.contains("NEURON_RERANK_MODEL_PATH"),
+            "Error should mention NEURON_RERANK_MODEL_PATH, got: {}",
             err
         );
     }
@@ -274,18 +274,18 @@ mod tests {
     #[serial_test::serial]
     fn test_resolve_model_path_with_valid_env_path_returns_ok() {
         let dir = std::env::temp_dir().join(format!(
-            "neure-rerank-resolve-ok-{}",
+            "neuron-rerank-resolve-ok-{}",
             uuid::Uuid::new_v4()
         ));
         std::fs::create_dir_all(&dir).expect("create temp dir");
         std::fs::write(dir.join("config.json"), b"{}").expect("write config");
         std::fs::write(dir.join("tokenizer.json"), b"{}").expect("write tokenizer");
         std::fs::write(dir.join("model.safetensors"), b"fake").expect("write weights");
-        unsafe { std::env::set_var("NEURE_RERANK_MODEL_PATH", &dir) };
+        unsafe { std::env::set_var("NEURON_RERANK_MODEL_PATH", &dir) };
 
         let result = CandleRerankRuntime::resolve_model_path("bge-reranker-base");
         let _ = std::fs::remove_dir_all(&dir);
-        unsafe { std::env::remove_var("NEURE_RERANK_MODEL_PATH") };
+        unsafe { std::env::remove_var("NEURON_RERANK_MODEL_PATH") };
 
         assert!(result.is_ok(), "expected Ok, got: {result:?}");
         assert_eq!(result.unwrap(), dir);

@@ -1,4 +1,4 @@
-//! TTS module for neure.
+//! TTS module for neuron.
 //!
 //! Provides [`TtsRuntime`] trait for text-to-speech synthesis.
 //! Currently supports:
@@ -153,7 +153,7 @@ pub trait TtsRuntime: Send + Sync {
                 if chunk.is_empty() {
                     break;
                 }
-                yield Ok::<_, crate::llm::NeureError>(Bytes::from(chunk));
+                yield Ok::<_, crate::llm::NeuronError>(Bytes::from(chunk));
             }
         };
         Ok(Box::pin(stream))
@@ -176,11 +176,11 @@ mod voxcpm_tests {
     #[tokio::test]
     #[serial_test::serial]
     async fn test_voxcpm_load_without_path_returns_useful_error() {
-        unsafe { std::env::remove_var("NEURE_TTS_MODEL_PATH") };
+        unsafe { std::env::remove_var("NEURON_TTS_MODEL_PATH") };
         let result = VoxCpmTtsRuntime::load("voxcpm-0.5b", &DeviceSelection::Cpu).await;
         assert!(result.is_err());
         let err = result.err().unwrap();
-        assert!(err.message.contains("NEURE_TTS_MODEL_PATH"));
+        assert!(err.message.contains("NEURON_TTS_MODEL_PATH"));
     }
 
     #[tokio::test]

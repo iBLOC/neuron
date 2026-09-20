@@ -11,7 +11,7 @@ title: ServerState Fields
 - Shortcut fields to the first-registered runtime of each capability
 - The puller + catalog for the model registry
 
-This page documents the full surface so you can extend neure without grepping the source.
+This page documents the full surface so you can extend neuron without grepping the source.
 
 ## `ServerState` struct
 
@@ -36,7 +36,7 @@ pub struct ServerState {
     pub embedding: Arc<dyn EmbeddingRuntime>,
 
     // === Config + supporting services ===
-    pub config: NeureConfig,
+    pub config: NeuronConfig,
     pub puller: Arc<Puller>,
     pub catalog: Arc<Catalog>,
 }
@@ -60,9 +60,9 @@ pub struct LlmRuntimeRegistry {
 }
 
 impl LlmRuntimeRegistry {
-    pub fn new(config: Arc<NeureConfig>) -> Self;
-    pub fn register(&mut self, model_id: String, impl_id: LlmImpl, device: DeviceSelection, required_memory_bytes: u64) -> Result<(), NeureError>;
-    pub async fn runtime_for(&self, model_id: &str) -> Result<Arc<dyn LlmRuntime>, NeureError>;
+    pub fn new(config: Arc<NeuronConfig>) -> Self;
+    pub fn register(&mut self, model_id: String, impl_id: LlmImpl, device: DeviceSelection, required_memory_bytes: u64) -> Result<(), NeuronError>;
+    pub async fn runtime_for(&self, model_id: &str) -> Result<Arc<dyn LlmRuntime>, NeuronError>;
     pub fn list_registered(&self) -> Vec<String>;
     pub fn default_runtime(&self) -> Arc<dyn LlmRuntime>;
 }
@@ -104,7 +104,7 @@ Post-2026-06-25 refactor, the engine + adapter registries are managed via a plug
 ```rust
 pub struct CapabilityRegistries {
     // Per-capability engine registry with `Arc<dyn AnyCapabilityEngine>` entries
-    // Populated via `register_engine(...)` on `NeureHandle`
+    // Populated via `register_engine(...)` on `NeuronHandle`
     // Used by `adapter_dispatch` for `/v1/messages` and any future
     // adapter-routed endpoint
 }
@@ -154,10 +154,10 @@ If you only have one runtime of each capability, the shortcut field is the same 
 
 ## Supporting services
 
-### `NeureConfig`
+### `NeuronConfig`
 
 ```rust
-pub struct NeureConfig {
+pub struct NeuronConfig {
     pub port: u16,
     pub host: String,
     pub llm_model_path: Option<String>,
@@ -178,7 +178,7 @@ pub struct NeureConfig {
 }
 ```
 
-Construct via `NeureConfig::default()` (all defaults) or `NeureConfig::from_env()` (read all `NEURE_*` env vars).
+Construct via `NeuronConfig::default()` (all defaults) or `NeuronConfig::from_env()` (read all `NEURON_*` env vars).
 
 ### `Puller`
 
@@ -261,5 +261,5 @@ For embedding-specific fields (e.g. a custom in-memory cache), prefer using a se
 
 - [Architecture](/concepts/architecture) — how the data flow wires registries to handlers
 - [Runtime Traits](/concepts/runtime-traits) — the contract each capability runtime implements
-- [Embed neure into a Rust Host](/howto/embed-into-host) — full Tauri 2 walkthrough
-- [Environment Variables](/reference/env-vars) — full `NEURE_*` matrix
+- [Embed neuron into a Rust Host](/howto/embed-into-host) — full Tauri 2 walkthrough
+- [Environment Variables](/reference/env-vars) — full `NEURON_*` matrix

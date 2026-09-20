@@ -1,7 +1,7 @@
 //! Embedding module benchmarks.
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId};
-use neure_lib::embedding::{EmbeddingRequest, EmbeddingInput};
+use neuron_lib::embedding::{EmbeddingRequest, EmbeddingInput};
 
 fn bench_embedding_request_single(c: &mut Criterion) {
     let mut group = c.benchmark_group("embedding_request");

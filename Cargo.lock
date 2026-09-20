@@ -6118,7 +6118,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "neure"
+name = "neuron"
 version = "0.1.0"
 dependencies = [
  "async-stream",

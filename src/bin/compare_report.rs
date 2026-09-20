@@ -1,7 +1,7 @@
 //! Comparison report generator — runs after `cargo bench --bench compare`.
 //!
 //! Reads Criterion's `estimates.json` files and produces a markdown
-//! table comparing neure's inference performance against the
+//! table comparing neuron's inference performance against the
 //! mainstream frameworks (ONNX Runtime, MNN, llama.cpp).
 //!
 //! ## Usage
@@ -15,7 +15,7 @@
 //!
 //! ## Output format
 //!
-//! The table has one row per backend (neure-candle, ort, mnn,
+//! The table has one row per backend (neuron-candle, ort, mnn,
 //! llama.cpp) and one column per workload. A "not available" entry
 //! indicates the backend wasn't built for this comparison.
 
@@ -58,7 +58,7 @@ fn main() {
     }
     md.push('\n');
 
-    let backends = ["neure-candle", "ort", "mnn", "llama.cpp"];
+    let backends = ["neuron-candle", "ort", "mnn", "llama.cpp"];
     for backend in &backends {
         md.push_str(&format!("| **{}** |", backend));
         for w in &workloads {
@@ -76,7 +76,7 @@ fn main() {
     md.push_str("  `task_info` (macOS), or `GetProcessMemoryInfo` (Windows).\n");
     md.push_str("- **Workloads**: YOLOv8 detection forward pass on 640×640 RGB,\n");
     md.push_str("  and LLM single-token forward (no KV cache, 2048-token seq, 4096-dim hidden, 32 layers).\n");
-    md.push_str("- **neure-candle**: pure-Rust via HuggingFace `candle` crate.\n");
+    md.push_str("- **neuron-candle**: pure-Rust via HuggingFace `candle` crate.\n");
     md.push_str("- **ort**: Microsoft's ONNX Runtime (gated by `feature = \"ort\"` in Cargo.toml).\n");
     md.push_str("- **mnn**: Alibaba MNN. v1.0: stub (binding not yet wired).\n");
     md.push_str("- **llama.cpp**: ggml-based reference. v1.0: stub for non-LLM workloads.\n");

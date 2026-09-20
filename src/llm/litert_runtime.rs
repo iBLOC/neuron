@@ -8,7 +8,7 @@ use litert_lm::LitManager;
 use crate::config::DeviceSelection;
 use crate::llm::{
     ChatChunk, ChatMessage, ChatRequest, ChatResponse, ChatResult, ChunkChoice, DeltaMessage,
-    LlmRuntime, ModelInfo, NeureError,
+    LlmRuntime, ModelInfo, NeuronError,
 };
 
 /// Gemma model sizes supported by the upstream `lit` binary's bundled
@@ -57,7 +57,7 @@ impl LitertLlmRuntime {
             let known: Vec<&str> = Self::supported_model_ids();
             Err(format!(
                 "LitertLlmRuntime: model '{}' is not in the supported set {known:?}. \
-                 Set NEURE_LLM_RUNTIME=litert and request one of the known Gemma variants.",
+                 Set NEURON_LLM_RUNTIME=litert and request one of the known Gemma variants.",
                 model
             ))
         }
@@ -79,17 +79,17 @@ impl LlmRuntime for LitertLlmRuntime {
     where
         Self: Sized,
     {
-        Self::validate_model_name(model).map_err(NeureError::not_implemented)?;
+        Self::validate_model_name(model).map_err(NeuronError::not_implemented)?;
 
         let manager = LitManager::new()
             .await
-            .map_err(|e| NeureError::not_implemented(format!("litert manager: {e}")))?;
+            .map_err(|e| NeuronError::not_implemented(format!("litert manager: {e}")))?;
         let manager = Arc::new(manager);
 
         manager
             .pull(model, Some(model), None)
             .await
-            .map_err(|e| NeureError::not_implemented(format!("litert pull({model}): {e}")))?;
+            .map_err(|e| NeuronError::not_implemented(format!("litert pull({model}): {e}")))?;
 
         let runtime = LitertLlmRuntime::new();
         *runtime.manager.lock().unwrap() = Some(manager);
@@ -103,7 +103,7 @@ impl LlmRuntime for LitertLlmRuntime {
         let text = manager
             .run_completion(&req.model, &prompt)
             .await
-            .map_err(|e| NeureError::not_implemented(format!("litert run_completion: {e}")))?;
+            .map_err(|e| NeuronError::not_implemented(format!("litert run_completion: {e}")))?;
 
         let prompt_tokens = estimate_tokens(&prompt);
         let completion_tokens = estimate_tokens(&text);
@@ -141,7 +141,7 @@ impl LlmRuntime for LitertLlmRuntime {
             .run_completion_stream(&req.model, &prompt)
             .await
             .map_err(|e| {
-                NeureError::not_implemented(format!("litert run_completion_stream: {e}"))
+                NeuronError::not_implemented(format!("litert run_completion_stream: {e}"))
             })?;
 
         let id = format!("litert-{}", uuid::Uuid::new_v4());
@@ -210,7 +210,7 @@ impl LlmRuntime for LitertLlmRuntime {
     fn list_models(&self) -> Vec<ModelInfo> {
         SUPPORTED_GEMMA_MODELS
             .iter()
-            .map(|(id, _)| ModelInfo::new(id.to_string(), "neure-litert"))
+            .map(|(id, _)| ModelInfo::new(id.to_string(), "neuron-litert"))
             .collect()
     }
 
@@ -226,7 +226,7 @@ impl crate::engine::LlmRuntime for LitertLlmRuntime {
         -> crate::llm::ChatResult<crate::canonical::CanonicalLlmResponse>
     {
         let chat_req = crate::llm::translators::canonical_to_chat_request(&req)
-            .map_err(|e| NeureError::new(e))?;
+            .map_err(|e| NeuronError::new(e))?;
         let chat_resp = self.chat(chat_req).await?;
         Ok(crate::llm::translators::chat_response_to_canonical(&req.model, chat_resp))
     }
@@ -235,7 +235,7 @@ impl crate::engine::LlmRuntime for LitertLlmRuntime {
         -> crate::llm::ChatResult<BoxStream<'static, crate::canonical::CanonicalLlmStreamEvent>>
     {
         let chat_req = crate::llm::translators::canonical_to_chat_request(&req)
-            .map_err(|e| NeureError::new(e))?;
+            .map_err(|e| NeuronError::new(e))?;
         let stream = self.chat_stream(chat_req).await?;
         use futures_util::StreamExt;
         Ok(Box::pin(stream.filter_map(|chunk| async move {
@@ -274,9 +274,9 @@ impl LitertLlmRuntime {
             .as_ref()
             .cloned()
             .ok_or_else(|| {
-                NeureError::not_initialized(
+                NeuronError::not_initialized(
                     "LitertLlmRuntime not loaded. Call load() first or set \
-                     NEURE_LLM_RUNTIME=litert and NEURE_LLM_MODEL_PATH. \
+                     NEURON_LLM_RUNTIME=litert and NEURON_LLM_MODEL_PATH. \
                      (The 'model path' is now the lit binary's identifier — see \
                      supported_model_ids().)",
                 )

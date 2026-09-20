@@ -26,21 +26,21 @@ fn multimodal_body() -> serde_json::Value {
 
 #[test]
 fn openai_parse_carries_image_into_canonical_request() {
-    use neure_lib::adapter::ApiAdapter;
+    use neuron_lib::adapter::ApiAdapter;
     let body = serde_json::to_vec(&multimodal_body()).unwrap();
     let headers = axum::http::HeaderMap::new();
-    let canonical = neure_lib::adapter::openai_chat::OpenAiChatAdapter
+    let canonical = neuron_lib::adapter::openai_chat::OpenAiChatAdapter
         .parse(&body.into(), &headers)
         .expect("parse");
-    let neure_lib::canonical::CanonicalRequest::Llm(llm) = canonical else {
+    let neuron_lib::canonical::CanonicalRequest::Llm(llm) = canonical else {
         panic!("expected Llm canonical request");
     };
     let has_image = llm.messages.iter().any(|m| {
         m.content.iter().any(|b| {
             matches!(
                 b,
-                neure_lib::canonical::ContentBlock::Image(neure_lib::canonical::ImageBlock {
-                    source: neure_lib::canonical::ImageSource::Base64 { .. },
+                neuron_lib::canonical::ContentBlock::Image(neuron_lib::canonical::ImageBlock {
+                    source: neuron_lib::canonical::ImageSource::Base64 { .. },
                     ..
                 })
             )

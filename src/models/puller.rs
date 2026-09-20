@@ -19,7 +19,7 @@ pub struct PullRequest {
     /// If set, the puller uses this source id from the
     /// `SourceRegistry` instead of parsing the `reference` prefix.
     /// Per-model / per-engine source overrides from
-    /// `NeureConfig` flow through this field.
+    /// `NeuronConfig` flow through this field.
     pub source_override: Option<String>,
 }
 

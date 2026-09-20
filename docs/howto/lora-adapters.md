@@ -6,7 +6,7 @@ title: LoRA Adapter Registration
 
 LoRA (Low-Rank Adaptation) lets you extend a base detection model's class list without retraining the base weights. This is the right pattern for adding custom classes (e.g. "warehouse_pallet", "forklift", "package") on top of a base YOLOv8n trained on COCO 80.
 
-This how-to covers the full lifecycle: training a LoRA in Python, exporting the safetensors, registering with neure, and using the merged model.
+This how-to covers the full lifecycle: training a LoRA in Python, exporting the safetensors, registering with neuron, and using the merged model.
 
 ## Math refresher
 
@@ -86,15 +86,15 @@ with open("metadata.json", "w") as f:
     json.dump(metadata, f, indent=2)
 ```
 
-The `metadata.json` keys that neure reads:
+The `metadata.json` keys that neuron reads:
 - `base_model` (required) — must match the model name you request
-- `rank` (required) — informational; neure infers from `A` tensor shape
+- `rank` (required) — informational; neuron infers from `A` tensor shape
 - `alpha` (required) — scaling factor for the merge
 - `modules` (required) — list of layer paths that were adapted
 - `custom_classes` (optional) — names of new classes; informational
 - `merge_strategy` (optional, default `linear`) — `linear` (B@A * alpha/rank) or other
 
-## Registering with neure
+## Registering with neuron
 
 ```bash
 curl -X POST http://localhost:8085/v1/vision/lora/register \
@@ -197,4 +197,4 @@ curl ... /v1/vision/lora/register -F "name=construction-v1" -F "base_model=yolov
 
 - [Vision Tasks](/howto/vision-tasks) — full request/response shape for detect/classify/segment/pose
 - [Capabilities](/concepts/capabilities) — vision capability surface
-- [Embed neure into a Rust Host](/howto/embed-into-host) — full Tauri 2 walkthrough
+- [Embed neuron into a Rust Host](/howto/embed-into-host) — full Tauri 2 walkthrough

@@ -1,4 +1,4 @@
-//! Chronos2 time-series forecasting — neure backend.
+//! Chronos2 time-series forecasting — neuron backend.
 //!
 //! Public surface mirrors the existing per-capability pattern
 //! (`LlmRuntime`, `TtsRuntime`, ...): a `Chronos2Runtime` trait, a
@@ -11,10 +11,10 @@
 //! The first commit of the Sprint 3 chronos2 port lays down:
 //! - the trait + DTOs (no architecture implementation yet)
 //! - a `StubChronos2Runtime` that always returns
-//!   `NeureError::not_implemented(...)` so the HTTP layer can
+//!   `NeuronError::not_implemented(...)` so the HTTP layer can
 //!   surface a clean 503 before the candle port is in place
 //! - the route `POST /v1/forecast` wired through the registry
-//! - env-var discovery (NEURE_CHRONOS2_RUNTIME, NEURE_CHRONOS2_MODEL_PATH)
+//! - env-var discovery (NEURON_CHRONOS2_RUNTIME, NEURON_CHRONOS2_MODEL_PATH)
 //! - unit tests covering request validation, state-machine flags,
 //!   and the not-implemented 503 path
 //!
@@ -56,7 +56,7 @@ pub use vendor::{T5Block, T5BlockConfig, T5BlockOutput, T5Embeddings, T5Embeddin
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ForecastRequest {
-    /// Model id. `NEURE_CHRONOS2_RUNTIME` + `NEURE_CHRONOS2_MODEL_PATH`
+    /// Model id. `NEURON_CHRONOS2_RUNTIME` + `NEURON_CHRONOS2_MODEL_PATH`
     /// decide the model at startup; the request carries a name for the
     /// HTTP layer's audit / per-request logging only.
     pub model: String,
@@ -110,7 +110,7 @@ pub struct ForecastResponse {
 }
 
 /// The runtime trait every Chronos2 backend implements. Mirrors the
-/// shape of `LlmRuntime` so the rest of the neure wiring (registry,
+/// shape of `LlmRuntime` so the rest of the neuron wiring (registry,
 /// ServerState shortcut, env-var discovery) stays homogeneous.
 #[async_trait]
 pub trait Chronos2Runtime: Send + Sync {
@@ -174,18 +174,18 @@ impl Chronos2Runtime for StubChronos2Runtime {
 }
 
 /// Locate a Chronos2 model directory the way the LLM candle runtime
-/// does. `NEURE_CHRONOS2_MODEL_PATH` overrides for tests + custom
-/// deployments; the default resolution scans `$NEURE_MODEL_DIRS/chronos2/<id>/`
+/// does. `NEURON_CHRONOS2_MODEL_PATH` overrides for tests + custom
+/// deployments; the default resolution scans `$NEURON_MODEL_DIRS/chronos2/<id>/`
 /// for the matching id.
 pub fn resolve_model_path(model: &str) -> Option<std::path::PathBuf> {
-    if let Ok(p) = std::env::var("NEURE_CHRONOS2_MODEL_PATH") {
+    if let Ok(p) = crate::config::env_var_result("CHRONOS2_MODEL_PATH") {
         let pb = std::path::PathBuf::from(p);
         if pb.is_dir() {
             return Some(pb);
         }
     }
-    for root in std::env::var("NEURE_MODEL_DIRS")
-        .unwrap_or_else(|_| crate::config::NeureConfig::default_model_dir().to_string_lossy().into_owned())
+    for root in crate::config::env_var_result("MODEL_DIRS")
+        .unwrap_or_else(|_| crate::config::NeuronConfig::default_model_dir().to_string_lossy().into_owned())
         .split(':')
     {
         let candidate = std::path::PathBuf::from(root).join("chronos2").join(model);
@@ -207,7 +207,7 @@ pub fn required_memory_bytes() -> u64 {
 /// configured; `None` when the runtime is not enabled (caller maps
 /// that to a 503).
 pub fn env_discovery() -> Option<(String, std::path::PathBuf)> {
-    let model_id = std::env::var("NEURE_CHRONOS2_DEFAULT_MODEL")
+    let model_id = crate::config::env_var_result("CHRONOS2_DEFAULT_MODEL")
         .unwrap_or_else(|_| "chronos-bolt-small".to_string());
     let path = resolve_model_path(&model_id)?;
     Some((model_id, path))

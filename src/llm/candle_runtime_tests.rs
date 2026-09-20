@@ -229,11 +229,11 @@ fn test_check_stop_suffix_multibyte_utf8() {
 #[test]
 #[serial_test::serial]
 fn test_candle_load_without_env_returns_useful_error() {
-    unsafe { std::env::remove_var("NEURE_LLM_MODEL_PATH") };
+    unsafe { std::env::remove_var("NEURON_LLM_MODEL_PATH") };
     let resolved = CandleLlmRuntime::resolve_model_path("qwen3-0.6b");
     assert!(resolved.is_err());
     let err_msg = resolved.err().unwrap();
-    assert!(err_msg.contains("NEURE_LLM_MODEL_PATH"), "got: {err_msg}");
+    assert!(err_msg.contains("NEURON_LLM_MODEL_PATH"), "got: {err_msg}");
 }
 
 #[tokio::test]
@@ -585,7 +585,7 @@ fn test_model_type_str_mapping() {
 // `parse_use_flash_attn` is `pub(crate)` in `candle_runtime.rs`
 // and is brought in by the file-level `use ...::*;` glob at the
 // top of this file. Each test sets / unsets
-// `NEURE_USE_FLASH_ATTN` directly; they all carry
+// `NEURON_USE_FLASH_ATTN` directly; they all carry
 // `#[serial_test::serial]` because env mutation is a
 // shared-global side effect and we run with the default test
 // thread count (>= 2).
@@ -593,7 +593,7 @@ fn test_model_type_str_mapping() {
 #[test]
 #[serial_test::serial]
 fn test_parse_use_flash_attn_unset_returns_none() {
-    unsafe { std::env::remove_var("NEURE_USE_FLASH_ATTN") };
+    unsafe { std::env::remove_var("NEURON_USE_FLASH_ATTN") };
     assert_eq!(parse_use_flash_attn(), None);
 }
 
@@ -601,50 +601,50 @@ fn test_parse_use_flash_attn_unset_returns_none() {
 #[serial_test::serial]
 fn test_parse_use_flash_attn_truthy_values_return_true() {
     for v in ["1", "true", "TRUE", "yes"] {
-        unsafe { std::env::set_var("NEURE_USE_FLASH_ATTN", v) };
+        unsafe { std::env::set_var("NEURON_USE_FLASH_ATTN", v) };
         assert_eq!(
             parse_use_flash_attn(),
             Some(true),
             "value `{v}` should parse as Some(true)"
         );
     }
-    unsafe { std::env::remove_var("NEURE_USE_FLASH_ATTN") };
+    unsafe { std::env::remove_var("NEURON_USE_FLASH_ATTN") };
 }
 
 #[test]
 #[serial_test::serial]
 fn test_parse_use_flash_attn_falsy_values_return_false() {
     for v in ["0", "false", "FALSE", "no"] {
-        unsafe { std::env::set_var("NEURE_USE_FLASH_ATTN", v) };
+        unsafe { std::env::set_var("NEURON_USE_FLASH_ATTN", v) };
         assert_eq!(
             parse_use_flash_attn(),
             Some(false),
             "value `{v}` should parse as Some(false)"
         );
     }
-    unsafe { std::env::remove_var("NEURE_USE_FLASH_ATTN") };
+    unsafe { std::env::remove_var("NEURON_USE_FLASH_ATTN") };
 }
 
 #[test]
 #[serial_test::serial]
 fn test_parse_use_flash_attn_unknown_values_return_none() {
     for v in ["on", "off", "", "2", "TRUE ", " true", "enabled"] {
-        unsafe { std::env::set_var("NEURE_USE_FLASH_ATTN", v) };
+        unsafe { std::env::set_var("NEURON_USE_FLASH_ATTN", v) };
         assert_eq!(
             parse_use_flash_attn(),
             None,
             "value `{v}` should parse as None (fall back to false)"
         );
     }
-    unsafe { std::env::remove_var("NEURE_USE_FLASH_ATTN") };
+    unsafe { std::env::remove_var("NEURON_USE_FLASH_ATTN") };
 }
 
 #[test]
 #[serial_test::serial]
 fn test_flash_attn_env_var_affects_mistral_config() {
-    unsafe { std::env::set_var("NEURE_USE_FLASH_ATTN", "1") };
+    unsafe { std::env::set_var("NEURON_USE_FLASH_ATTN", "1") };
     let use_flash_attn = parse_use_flash_attn().unwrap_or(false);
-    assert!(use_flash_attn, "NEURE_USE_FLASH_ATTN=1 should parse as true");
+    assert!(use_flash_attn, "NEURON_USE_FLASH_ATTN=1 should parse as true");
 
     let mut cfg = candle_transformers::models::mistral::Config::config_7b_v0_1(false);
     assert!(!cfg.use_flash_attn, "default should be false");
@@ -654,13 +654,13 @@ fn test_flash_attn_env_var_affects_mistral_config() {
     }
     assert!(cfg.use_flash_attn, "after env var override, should be true");
 
-    unsafe { std::env::remove_var("NEURE_USE_FLASH_ATTN") };
+    unsafe { std::env::remove_var("NEURON_USE_FLASH_ATTN") };
 }
 
 #[test]
 #[serial_test::serial]
 fn test_flash_attn_qwen2_no_support() {
-    unsafe { std::env::set_var("NEURE_USE_FLASH_ATTN", "1") };
+    unsafe { std::env::set_var("NEURON_USE_FLASH_ATTN", "1") };
     let use_flash_attn = parse_use_flash_attn().unwrap_or(false);
     assert!(use_flash_attn);
 
@@ -681,15 +681,15 @@ fn test_flash_attn_qwen2_no_support() {
         hidden_act: candle_nn::Activation::Silu,
     };
 
-    unsafe { std::env::remove_var("NEURE_USE_FLASH_ATTN") };
+    unsafe { std::env::remove_var("NEURON_USE_FLASH_ATTN") };
 }
 
 #[test]
 #[serial_test::serial]
 fn test_flash_attn_llama_still_works() {
-    unsafe { std::env::set_var("NEURE_USE_FLASH_ATTN", "1") };
+    unsafe { std::env::set_var("NEURON_USE_FLASH_ATTN", "1") };
     let use_flash_attn = parse_use_flash_attn().unwrap_or(false);
     assert!(use_flash_attn);
 
-    unsafe { std::env::remove_var("NEURE_USE_FLASH_ATTN") };
+    unsafe { std::env::remove_var("NEURON_USE_FLASH_ATTN") };
 }

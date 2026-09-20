@@ -1,7 +1,7 @@
 //! llama.cpp comparison benchmarks for the comparative suite.
 //!
 //! llama.cpp (by Georgi Gerganov) is the de-facto standard for CPU LLM
-//! inference. Comparing neure's candle LLM forward pass against
+//! inference. Comparing neuron's candle LLM forward pass against
 //! llama.cpp's ggml-based transformer shows how the pure-Rust path
 //! compares to the highly-tuned C/C++ reference implementation.
 //!

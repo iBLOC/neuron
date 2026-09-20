@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use tokio::sync::Mutex;
 
-use crate::config::{DeviceSelection, NeureConfig};
+use crate::config::{DeviceSelection, NeuronConfig};
 use crate::llm::{LlmImpl, LlmRuntime, LlmRuntimeRegistry, ModelInfo, RegisteredLlm};
 use crate::models::EngineType;
 
@@ -62,7 +62,7 @@ pub struct ServerState {
     pub adapters: Arc<crate::adapter::registry::AdapterRegistry>,
 
     // -- Shared infrastructure --
-    pub config: NeureConfig,
+    pub config: NeuronConfig,
     pub puller: Arc<crate::models::Puller>,
     pub catalog: Arc<crate::models::Catalog>,
 
@@ -72,7 +72,7 @@ pub struct ServerState {
 
 impl ServerState {
     /// Build a new server state by probing environment variables.
-    pub fn new(config: NeureConfig) -> Self {
+    pub fn new(config: NeuronConfig) -> Self {
         let config_arc = Arc::new(config.clone());
         let device = config.device;
 
@@ -86,22 +86,22 @@ impl ServerState {
         let engines =
             crate::engine::registry::CapabilityRegistries::new();
 
-        let llm_runtime_env = std::env::var("NEURE_LLM_RUNTIME").ok();
+        let llm_runtime_env = crate::config::env_var("LLM_RUNTIME");
         match llm_runtime_env.as_deref() {
             Some("candle") => {
                 #[cfg(feature = "candle")]
                 {
-                    let model_id = std::env::var("NEURE_LLM_DEFAULT_MODEL")
+                    let model_id = crate::config::env_var_result("LLM_DEFAULT_MODEL")
                         .unwrap_or_else(|_| "qwen3-0.6b".to_string());
                     if let Err(e) = llm_registry.register(
                         model_id.clone(), LlmImpl::Candle, device, 2_000_000_000,
                     ) {
-                        eprintln!("[neure] Candle LLM register failed: {e}");
+                        eprintln!("[neuron] Candle LLM register failed: {e}");
                     }
                 }
                 #[cfg(not(feature = "candle"))]
                 {
-                    eprintln!("[neure] NEURE_LLM_RUNTIME=candle but candle feature not enabled");
+                    eprintln!("[neuron] NEURON_LLM_RUNTIME=candle but candle feature not enabled");
                 }
             }
             Some("litert") => {
@@ -110,18 +110,18 @@ impl ServerState {
                     if let Err(e) = llm_registry.register(
                         "litert-model".into(), LlmImpl::Litert, device.clone(), 1_000_000_000,
                     ) {
-                        eprintln!("[neure] Litert LLM register failed: {e}");
+                        eprintln!("[neuron] Litert LLM register failed: {e}");
                     }
                 }
                 #[cfg(not(feature = "litert"))]
                 {
-                    eprintln!("[neure] NEURE_LLM_RUNTIME=litert but litert feature not enabled");
+                    eprintln!("[neuron] NEURON_LLM_RUNTIME=litert but litert feature not enabled");
                 }
             }
             Some("mistralrs") => {
                 #[cfg(feature = "mistralrs")]
                 {
-                    let model_id = std::env::var("NEURE_LLM_DEFAULT_MODEL")
+                    let model_id = crate::config::env_var_result("LLM_DEFAULT_MODEL")
                         .unwrap_or_else(|_| "Qwen/Qwen3-0.6B".to_string());
                     if let Err(e) = llm_registry.register(
                         model_id.clone(),
@@ -130,21 +130,21 @@ impl ServerState {
                         2_000_000_000,
                     ) {
                         eprintln!(
-                            "[neure] MistralRs LLM register failed: {e}"
+                            "[neuron] MistralRs LLM register failed: {e}"
                         );
                     }
                 }
                 #[cfg(not(feature = "mistralrs"))]
                 {
                     eprintln!(
-                        "[neure] NEURE_LLM_RUNTIME=mistralrs but mistralrs feature not enabled"
+                        "[neuron] NEURON_LLM_RUNTIME=mistralrs but mistralrs feature not enabled"
                     );
                 }
             }
             Some("mage_vl") => {
-                let model_id = std::env::var("NEURE_MAGE_VL_MODEL_ID")
+                let model_id = crate::config::env_var_result("MAGE_VL_MODEL_ID")
                     .unwrap_or_else(|_| "microsoft/Mage-VL".to_string());
-                let shard_dir = std::env::var("NEURE_MAGE_VL_SHARD_DIR")
+                let shard_dir = crate::config::env_var_result("MAGE_VL_SHARD_DIR")
                     .unwrap_or_else(|_| {
                         "/home/ibloc/Projects/OpenSourceProjects/mage/mage-vl-checkpoint".to_string()
                     });
@@ -153,8 +153,8 @@ impl ServerState {
                     .exists()
                 {
                     eprintln!(
-                        "[neure] NEURE_LLM_RUNTIME=mage_vl but shards not found at {shard_dir}. \
-                         Set NEURE_MAGE_VL_SHARD_DIR to the directory containing the two \
+                        "[neuron] NEURON_LLM_RUNTIME=mage_vl but shards not found at {shard_dir}. \
+                         Set NEURON_MAGE_VL_SHARD_DIR to the directory containing the two \
                          model-0000X-of-00002.safetensors shards."
                     );
                 }
@@ -174,13 +174,13 @@ impl ServerState {
                     engines.llm.set_default(engine);
                 }
                 eprintln!(
-                    "[neure] registered mage-vl runtime for {model_id} (shards at {shard_dir})"
+                    "[neuron] registered mage-vl runtime for {model_id} (shards at {shard_dir})"
                 );
             }
             _ => {}
         }
 
-        // Also register models from NeureConfig.registrations (LLM
+        // Also register models from NeuronConfig.registrations (LLM
         // slice — TTS/ASR/Rerank/Embedding are processed below after
         // their own registries are constructed).
         for reg in &config.registrations {
@@ -194,7 +194,7 @@ impl ServerState {
                     );
                 } else {
                     eprintln!(
-                        "[neure] config.registrations: unknown LLM engine impl {:?} for model {:?}",
+                        "[neuron] config.registrations: unknown LLM engine impl {:?} for model {:?}",
                         reg.engine, reg.model_id
                     );
                 }
@@ -205,7 +205,7 @@ impl ServerState {
 
         // ---- TTS registry -------------------------------------------------
         let mut tts_registry = crate::tts::TtsRuntimeRegistry::new(config_arc.clone());
-        let tts_runtime_env = std::env::var("NEURE_TTS_RUNTIME").ok();
+        let tts_runtime_env = crate::config::env_var("TTS_RUNTIME");
         match tts_runtime_env.as_deref() {
             Some("voxcpm") | Some("burn") => {
                 #[cfg(feature = "voxcpm")]
@@ -216,7 +216,7 @@ impl ServerState {
                 }
                 #[cfg(not(feature = "voxcpm"))]
                 {
-                    eprintln!("[neure] NEURE_TTS_RUNTIME=voxcpm but voxcpm feature not enabled");
+                    eprintln!("[neuron] NEURON_TTS_RUNTIME=voxcpm but voxcpm feature not enabled");
                 }
             }
             _ => {}
@@ -233,7 +233,7 @@ impl ServerState {
                     );
                 } else {
                     eprintln!(
-                        "[neure] config.registrations: unknown TTS engine impl {:?} for model {:?}",
+                        "[neuron] config.registrations: unknown TTS engine impl {:?} for model {:?}",
                         reg.engine, reg.model_id
                     );
                 }
@@ -243,7 +243,7 @@ impl ServerState {
 
         // ---- ASR registry -------------------------------------------------
         let mut asr_registry = crate::asr::AsrRuntimeRegistry::new(config_arc.clone());
-        let asr_runtime_env = std::env::var("NEURE_ASR_RUNTIME").ok();
+        let asr_runtime_env = crate::config::env_var("ASR_RUNTIME");
         match asr_runtime_env.as_deref() {
             Some("whisper") | Some("candle") => {
                 #[cfg(feature = "candle")]
@@ -254,7 +254,7 @@ impl ServerState {
                 }
                 #[cfg(not(feature = "candle"))]
                 {
-                    eprintln!("[neure] NEURE_ASR_RUNTIME=whisper but candle feature not enabled");
+                    eprintln!("[neuron] NEURON_ASR_RUNTIME=whisper but candle feature not enabled");
                 }
             }
             _ => {}
@@ -271,7 +271,7 @@ impl ServerState {
                     );
                 } else {
                     eprintln!(
-                        "[neure] config.registrations: unknown ASR engine impl {:?} for model {:?}",
+                        "[neuron] config.registrations: unknown ASR engine impl {:?} for model {:?}",
                         reg.engine, reg.model_id
                     );
                 }
@@ -281,7 +281,7 @@ impl ServerState {
 
         // ---- Rerank registry ----------------------------------------------
         let mut rerank_registry = crate::rerank::RerankRuntimeRegistry::new(config_arc.clone());
-        let rerank_runtime_env = std::env::var("NEURE_RERANK_RUNTIME").ok();
+        let rerank_runtime_env = crate::config::env_var("RERANK_RUNTIME");
         match rerank_runtime_env.as_deref() {
             Some("bge") | Some("candle") => {
                 #[cfg(feature = "candle")]
@@ -292,7 +292,7 @@ impl ServerState {
                 }
                 #[cfg(not(feature = "candle"))]
                 {
-                    eprintln!("[neure] NEURE_RERANK_RUNTIME=bge but candle feature not enabled");
+                    eprintln!("[neuron] NEURON_RERANK_RUNTIME=bge but candle feature not enabled");
                 }
             }
             Some("mxbai") => {
@@ -312,7 +312,7 @@ impl ServerState {
                 }
             }
             Some("cohere") => {
-                let cohere_model = std::env::var("NEURE_COHERE_MODEL")
+                let cohere_model = crate::config::env_var_result("COHERE_MODEL")
                     .unwrap_or_else(|_| "rerank-english-v3.0".to_string());
                 let _ = rerank_registry.register(
                     cohere_model,
@@ -335,7 +335,7 @@ impl ServerState {
                     );
                 } else {
                     eprintln!(
-                        "[neure] config.registrations: unknown Rerank engine impl {:?} for model {:?}",
+                        "[neuron] config.registrations: unknown Rerank engine impl {:?} for model {:?}",
                         reg.engine, reg.model_id
                     );
                 }
@@ -345,7 +345,7 @@ impl ServerState {
 
         // ---- Embedding registry -------------------------------------------
         let mut embedding_registry = crate::embedding::EmbeddingRuntimeRegistry::new(config_arc.clone());
-        let embedding_runtime_env = std::env::var("NEURE_EMBEDDING_RUNTIME").ok();
+        let embedding_runtime_env = crate::config::env_var("EMBEDDING_RUNTIME");
         if let Some("candle") = embedding_runtime_env.as_deref() {
             #[cfg(feature = "candle")]
             {
@@ -355,7 +355,7 @@ impl ServerState {
             }
             #[cfg(not(feature = "candle"))]
             {
-                eprintln!("[neure] NEURE_EMBEDDING_RUNTIME=candle but candle feature not enabled");
+                eprintln!("[neuron] NEURON_EMBEDDING_RUNTIME=candle but candle feature not enabled");
             }
         }
 
@@ -370,7 +370,7 @@ impl ServerState {
                     );
                 } else {
                     eprintln!(
-                        "[neure] config.registrations: unknown Embedding engine impl {:?} for model {:?}",
+                        "[neuron] config.registrations: unknown Embedding engine impl {:?} for model {:?}",
                         reg.engine, reg.model_id
                     );
                 }
@@ -379,7 +379,7 @@ impl ServerState {
         let embedding_shortcut = embedding_registry.default_runtime();
 
         // ---- Vision registry ----------------------------------------------
-        // Vision is opt-in via NEURE_VISION_RUNTIME=candle. Defaults to no
+        // Vision is opt-in via NEURON_VISION_RUNTIME=candle. Defaults to no
         // models registered (registry returns UnavailableVisionRuntime).
         let mut vision_registry = crate::vision::VisionRuntimeRegistry::new(config_arc.clone());
         for reg in &config.registrations {
@@ -393,7 +393,7 @@ impl ServerState {
                     );
                 } else {
                     eprintln!(
-                        "[neure] config.registrations: unknown Vision engine impl {:?} for model {:?}",
+                        "[neuron] config.registrations: unknown Vision engine impl {:?} for model {:?}",
                         reg.engine, reg.model_id
                     );
                 }
@@ -422,7 +422,7 @@ impl ServerState {
 
         // ---- Shared infrastructure (unchanged) ----------------------------
         let mut source_registry = crate::models::SourceRegistry::new();
-        let hf_cli = std::env::var("NEURE_HUGGINGFACE_CLI")
+        let hf_cli = crate::config::env_var_result("HUGGINGFACE_CLI")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|_| std::path::PathBuf::from("huggingface-cli"));
         let hf_endpoint = config.source_endpoints.get("huggingface").cloned();
@@ -433,7 +433,7 @@ impl ServerState {
         // HF Mirror — China-friendly CDN fronting the same HF
         // protocol. Registered with a distinct source id so the
         // puller can route requests explicitly.
-        let mirror_cli = std::env::var("NEURE_HUGGINGFACE_CLI")
+        let mirror_cli = crate::config::env_var_result("HUGGINGFACE_CLI")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|_| std::path::PathBuf::from("huggingface-cli"));
         let mirror_endpoint = config
@@ -451,7 +451,7 @@ impl ServerState {
         ));
 
         // Register ModelScope source
-        let ms_cli = std::env::var("NEURE_MODELSCOPE_CLI")
+        let ms_cli = crate::config::env_var_result("MODELSCOPE_CLI")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|_| std::path::PathBuf::from("modelscope-cli"));
         let ms_endpoint = config.source_endpoints.get("modelscope").cloned();
@@ -469,14 +469,14 @@ impl ServerState {
                     .model_dirs
                     .first()
                     .cloned()
-                    .unwrap_or_else(NeureConfig::default_model_dir),
+                    .unwrap_or_else(NeuronConfig::default_model_dir),
             )
         };
         let catalog_sources =
             Arc::new(crate::models::SourceRegistry::with_endpoints(
                 &config.source_endpoints,
             ));
-        let catalog_config = crate::models::CatalogConfig::from_neure_config(&config);
+        let catalog_config = crate::models::CatalogConfig::from_neuron_config(&config);
         let catalog = Arc::new(crate::models::Catalog::new(
             catalog_registry,
             catalog_sources,
@@ -557,7 +557,7 @@ impl ServerState {
                 id: format!("tts/{}", voice.id),
                 object: "model".to_string(),
                 created: now,
-                owned_by: "neure".to_string(),
+                owned_by: "neuron".to_string(),
                 capabilities: Some(vec!["audio_speech".to_string()]),
                 is_default: None,
             });
@@ -595,42 +595,42 @@ impl ServerState {
         engine: String,
         device: DeviceSelection,
         required_memory_bytes: u64,
-    ) -> Result<(), crate::llm::NeureError> {
+    ) -> Result<(), crate::llm::NeuronError> {
         match capability {
             "llm" => {
                 let mut reg = self.llm_registry_lock.lock().await;
                 let impl_id = LlmImpl::parse(&engine)
-                    .map_err(|e| crate::llm::NeureError::new(format!("Invalid LLM engine: {e}")))?;
+                    .map_err(|e| crate::llm::NeuronError::new(format!("Invalid LLM engine: {e}")))?;
                 reg.register(model_id, impl_id, device, required_memory_bytes)?;
             }
             "tts" => {
                 let mut reg = self.tts_registry_lock.lock().await;
                 let impl_id = crate::tts::TtsImpl::parse(&engine)
-                    .map_err(|e| crate::llm::NeureError::new(format!("Invalid TTS engine: {e}")))?;
+                    .map_err(|e| crate::llm::NeuronError::new(format!("Invalid TTS engine: {e}")))?;
                 reg.register(model_id, impl_id, device, required_memory_bytes)?;
             }
             "asr" => {
                 let mut reg = self.asr_registry_lock.lock().await;
                 let impl_id = crate::asr::AsrImpl::parse(&engine)
-                    .map_err(|e| crate::llm::NeureError::new(format!("Invalid ASR engine: {e}")))?;
+                    .map_err(|e| crate::llm::NeuronError::new(format!("Invalid ASR engine: {e}")))?;
                 reg.register(model_id, impl_id, device, required_memory_bytes)?;
             }
             "rerank" => {
                 let mut reg = self.rerank_registry_lock.lock().await;
                 let impl_id = crate::rerank::RerankImpl::parse(&engine)
-                    .map_err(|e| crate::llm::NeureError::new(format!("Invalid rerank engine: {e}")))?;
+                    .map_err(|e| crate::llm::NeuronError::new(format!("Invalid rerank engine: {e}")))?;
                 reg.register(model_id, impl_id, device, required_memory_bytes)?;
             }
             "embedding" => {
                 let mut reg = self.embedding_registry_lock.lock().await;
                 let impl_id = crate::embedding::EmbeddingImpl::parse(&engine)
-                    .map_err(|e| crate::llm::NeureError::new(format!("Invalid embedding engine: {e}")))?;
+                    .map_err(|e| crate::llm::NeuronError::new(format!("Invalid embedding engine: {e}")))?;
                 reg.register(model_id, impl_id, device, required_memory_bytes)?;
             }
             "vision" => {
                 let mut reg = self.vision_registry_lock.lock().await;
                 let impl_id = crate::vision::VisionImpl::parse(&engine)
-                    .map_err(|e| crate::llm::NeureError::new(format!("Invalid vision engine: {e}")))?;
+                    .map_err(|e| crate::llm::NeuronError::new(format!("Invalid vision engine: {e}")))?;
                 reg.register(model_id, impl_id, device, required_memory_bytes)?;
             }
             "chronos2" => {
@@ -638,7 +638,7 @@ impl ServerState {
                 reg.register(model_id, device, required_memory_bytes)?;
             }
             _ => {
-                return Err(crate::llm::NeureError::new(format!(
+                return Err(crate::llm::NeuronError::new(format!(
                     "Unknown capability: {}. Valid: llm, tts, asr, rerank, embedding, vision, chronos2",
                     capability
                 )));
@@ -651,9 +651,9 @@ impl ServerState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::NeureConfig;
+    use crate::config::NeuronConfig;
 
-    /// Drive the `NEURE_LLM_RUNTIME=mage_vl` registration branch.
+    /// Drive the `NEURON_LLM_RUNTIME=mage_vl` registration branch.
     /// The shards aren't on disk in CI by default, so this test
     /// only checks the *registration path* fires (engine_impl =
     /// "mage_vl", model_id = "microsoft/Mage-VL") rather than
@@ -664,8 +664,8 @@ mod tests {
     fn mage_vl_runtime_registers_under_mage_vl_env_var() {
         // Snapshot and restore so the test doesn't leak into other
         // tests in the same process.
-        let prev = std::env::var("NEURE_LLM_RUNTIME").ok();
-        let prev_shard = std::env::var("NEURE_MAGE_VL_SHARD_DIR").ok();
+        let prev = crate::config::env_var("LLM_RUNTIME");
+        let prev_shard = crate::config::env_var("MAGE_VL_SHARD_DIR");
         // Point at a path that doesn't have shards so the runtime
         // path is exercised but the actual model load (and its
         // ~3.5GB cost) is skipped. The shard-existence check only
@@ -676,22 +676,22 @@ mod tests {
         // nothing else reads the environment while the ServerState
         // constructor runs inside the same thread.
         unsafe {
-            std::env::set_var("NEURE_LLM_RUNTIME", "mage_vl");
-            std::env::set_var("NEURE_MAGE_VL_SHARD_DIR", "/tmp/no-such-mage-vl-shards");
+            std::env::set_var("NEURON_LLM_RUNTIME", "mage_vl");
+            std::env::set_var("NEURON_MAGE_VL_SHARD_DIR", "/tmp/no-such-mage-vl-shards");
         }
 
-        let state = ServerState::new(NeureConfig::default());
+        let state = ServerState::new(NeuronConfig::default());
         // Restore envs before assertions to keep the test idempotent.
         unsafe {
             if let Some(v) = prev {
-                std::env::set_var("NEURE_LLM_RUNTIME", v);
+                std::env::set_var("NEURON_LLM_RUNTIME", v);
             } else {
-                std::env::remove_var("NEURE_LLM_RUNTIME");
+                std::env::remove_var("NEURON_LLM_RUNTIME");
             }
             if let Some(v) = prev_shard {
-                std::env::set_var("NEURE_MAGE_VL_SHARD_DIR", v);
+                std::env::set_var("NEURON_MAGE_VL_SHARD_DIR", v);
             } else {
-                std::env::remove_var("NEURE_MAGE_VL_SHARD_DIR");
+                std::env::remove_var("NEURON_MAGE_VL_SHARD_DIR");
             }
         }
 

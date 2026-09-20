@@ -2,7 +2,7 @@
 //!
 //! MNN is Alibaba's mobile neural network framework. It excels at
 //! on-device inference with minimal memory overhead. Comparing
-//! neure's candle YOLOv8 forward pass against MNN's equivalent shows
+//! neuron's candle YOLOv8 forward pass against MNN's equivalent shows
 //! how each framework scales on the same workload.
 //!
 //! ## Building MNN for comparison

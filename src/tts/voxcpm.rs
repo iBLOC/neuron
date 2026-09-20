@@ -3,19 +3,19 @@
 //! VoxCPM (https://huggingface.co/openbmb/VoxCpm-0.5B) is a zero-shot TTS model
 //! supporting Chinese and English with voice cloning.
 //!
-//! Enable with: `NEURE_TTS_RUNTIME=candle` and set `NEURE_TTS_MODEL_PATH` to a
+//! Enable with: `NEURON_TTS_RUNTIME=candle` and set `NEURON_TTS_MODEL_PATH` to a
 //! directory containing:
 //! - config.json (VoxCPMConfig)
 //! - tokenizer.json
 //! - model.mpk (pre-converted burn weights)
 //! - audiovae.mpk (pre-converted burn weights for AudioVae)
 //!
-//! Neure consumes **pre-converted** burn weights directly. To get them, either
+//! Neuron consumes **pre-converted** burn weights directly. To get them, either
 //! pull from a HuggingFace repo that already ships `.mpk` files
 //! (`POST /v1/models/pull` with `engine: "tts"`, `id: "voxcpm-0.5b"`,
 //! `reference: "huggingface:OWNER/REPO-WITH-MPK"`), or drop the converted
-//! weights into `NEURE_TTS_MODEL_PATH` manually. Weight conversion is not
-//! in neure's scope.
+//! weights into `NEURON_TTS_MODEL_PATH` manually. Weight conversion is not
+//! in neuron's scope.
 
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -31,7 +31,7 @@ use burn::backend::ndarray::{NdArray, NdArrayDevice};
 use burn::prelude::Backend;
 
 use crate::config::{ensure_dir, DeviceSelection};
-use crate::llm::{ChatResult, NeureError};
+use crate::llm::{ChatResult, NeuronError};
 
 #[cfg(feature = "voxcpm")]
 use super::voxcpm_burn;
@@ -70,18 +70,18 @@ impl VoxCpmTtsRuntime {
     }
 
     fn resolve_model_path(model: &str) -> Result<PathBuf, String> {
-        let path = match std::env::var("NEURE_TTS_MODEL_PATH") {
+        let path = match crate::config::env_var_result("TTS_MODEL_PATH") {
             Ok(p) => PathBuf::from(p),
             Err(_) => {
                 return Err(format!(
-                    "VoxCpmTtsRuntime: set NEURE_TTS_MODEL_PATH to a directory containing \
+                    "VoxCpmTtsRuntime: set NEURON_TTS_MODEL_PATH to a directory containing \
                      config.json + tokenizer.json + model.mpk + audiovae.mpk for VoxCPM model '{}' \
                      (e.g. openbmb/VoxCpm-0.5B). Weights must be pre-converted to burn `.mpk` format.",
                     model
                 ));
             }
         };
-        ensure_dir(&path, "NEURE_TTS_MODEL_PATH")?;
+        ensure_dir(&path, "NEURON_TTS_MODEL_PATH")?;
         let config_path = path.join("config.json");
         let tokenizer_path = path.join("tokenizer.json");
         let has_model = std::fs::read_dir(&path)
@@ -119,14 +119,14 @@ impl VoxCpmTtsRuntime {
         if !has_model {
             return Err(format!(
                 "model.mpk not found in {} (download pre-converted burn weights — \
-                 neure does not convert from safetensors)",
+                 neuron does not convert from safetensors)",
                 path.display()
             ));
         }
         if !has_audiovae {
             return Err(format!(
                 "audiovae.mpk not found in {} (download pre-converted burn weights — \
-                 neure does not convert from safetensors)",
+                 neuron does not convert from safetensors)",
                 path.display()
             ));
         }
@@ -158,16 +158,16 @@ impl TtsRuntime for VoxCpmTtsRuntime {
         Self: Sized,
     {
         let path = Self::resolve_model_path(model)
-            .map_err(|e| NeureError::not_implemented(e))?;
+            .map_err(|e| NeuronError::not_implemented(e))?;
 
         let dev = Self::map_device(device);
 
         let config_path = path.join("config.json");
         let config_json = std::fs::read_to_string(&config_path)
-            .map_err(|e| NeureError::not_implemented(format!("failed to read config.json: {}", e)))?;
+            .map_err(|e| NeuronError::not_implemented(format!("failed to read config.json: {}", e)))?;
 
         let config: voxcpm_burn::voxcpm_model::VoxCPMConfig = serde_json::from_str(&config_json)
-            .map_err(|e| NeureError::not_implemented(format!("failed to parse config.json: {}", e)))?;
+            .map_err(|e| NeuronError::not_implemented(format!("failed to parse config.json: {}", e)))?;
 
         let model: voxcpm_burn::voxcpm_model::VoxCPM<NdArray> = config.init(&dev);
 
@@ -201,7 +201,7 @@ impl TtsRuntime for VoxCpmTtsRuntime {
         // even without the voxcpm feature compiled in. The resolved
         // path is unused by the stub but checked for presence.
         let _path = Self::resolve_model_path(model)
-            .map_err(NeureError::not_implemented)?;
+            .map_err(NeuronError::not_implemented)?;
 
         let sample_rate = 24_000u32;
 
@@ -218,15 +218,15 @@ impl TtsRuntime for VoxCpmTtsRuntime {
     #[cfg(feature = "voxcpm")]
     async fn synthesize(&self, text: &str, _voice: Option<&str>) -> ChatResult<TtsAudio> {
         if text.is_empty() {
-            return Err(NeureError::invalid_input("text cannot be empty"));
+            return Err(NeuronError::invalid_input("text cannot be empty"));
         }
 
         let (model_arc, audio_vae, tokenizer_path, sample_rate, device) = {
             let inner = self.inner.lock().unwrap();
             let loaded = inner.as_ref().ok_or_else(|| {
-                NeureError::not_initialized(
+                NeuronError::not_initialized(
                     "VoxCpmTtsRuntime not loaded. Call load() first or check that \
-                     NEURE_TTS_RUNTIME=candle and NEURE_TTS_MODEL_PATH is valid."
+                     NEURON_TTS_RUNTIME=candle and NEURON_TTS_MODEL_PATH is valid."
                         .to_string(),
                 )
             })?;
@@ -268,15 +268,15 @@ impl TtsRuntime for VoxCpmTtsRuntime {
         let mut cursor = std::io::Cursor::new(Vec::new());
         {
             let mut writer = hound::WavWriter::new(&mut cursor, spec)
-                .map_err(|e| NeureError::not_implemented(format!("failed to create WAV: {}", e)))?;
+                .map_err(|e| NeuronError::not_implemented(format!("failed to create WAV: {}", e)))?;
             for &sample in samples.iter() {
                 let s16 = (sample.clamp(-1.0, 1.0) * 32767.0) as i16;
                 writer.write_sample(s16).map_err(|e| {
-                    NeureError::not_implemented(format!("failed to write sample: {}", e))
+                    NeuronError::not_implemented(format!("failed to write sample: {}", e))
                 })?;
             }
             writer.finalize().map_err(|e| {
-                NeureError::not_implemented(format!("failed to finalize WAV: {}", e))
+                NeuronError::not_implemented(format!("failed to finalize WAV: {}", e))
             })?;
         }
         let wav_bytes = cursor.into_inner();
@@ -293,15 +293,15 @@ impl TtsRuntime for VoxCpmTtsRuntime {
     #[cfg(not(feature = "voxcpm"))]
     async fn synthesize(&self, text: &str, _voice: Option<&str>) -> ChatResult<TtsAudio> {
         if text.is_empty() {
-            return Err(NeureError::invalid_input("text cannot be empty"));
+            return Err(NeuronError::invalid_input("text cannot be empty"));
         }
 
         let loaded = {
             let inner = self.inner.lock().unwrap();
             inner.as_ref().cloned().ok_or_else(|| {
-                NeureError::not_initialized(
+                NeuronError::not_initialized(
                     "VoxCpmTtsRuntime not loaded. Call load() first or check that \
-                     NEURE_TTS_RUNTIME=candle and NEURE_TTS_MODEL_PATH is valid."
+                     NEURON_TTS_RUNTIME=candle and NEURON_TTS_MODEL_PATH is valid."
                         .to_string(),
                 )
             })?
@@ -311,7 +311,7 @@ impl TtsRuntime for VoxCpmTtsRuntime {
         // This branch is only reachable when building with --features candle
         // but not --features voxcpm.
         let _ = (text, loaded);
-        Err(NeureError::not_implemented(
+        Err(NeuronError::not_implemented(
             "VoxCpm TTS requires the voxcpm feature (cargo build --features voxcpm)".to_string(),
         ))
     }
@@ -332,13 +332,13 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn test_resolve_model_path_without_env_returns_useful_error() {
-        unsafe { std::env::remove_var("NEURE_TTS_MODEL_PATH") };
+        unsafe { std::env::remove_var("NEURON_TTS_MODEL_PATH") };
         let result = VoxCpmTtsRuntime::resolve_model_path("voxcpm-0.5b");
         assert!(result.is_err());
         let err = result.err().unwrap();
         assert!(
-            err.contains("NEURE_TTS_MODEL_PATH"),
-            "Error should mention NEURE_TTS_MODEL_PATH, got: {}",
+            err.contains("NEURON_TTS_MODEL_PATH"),
+            "Error should mention NEURON_TTS_MODEL_PATH, got: {}",
             err
         );
     }
@@ -347,7 +347,7 @@ mod tests {
     #[serial_test::serial]
     fn test_resolve_model_path_with_valid_env_path_returns_ok() {
         let dir = std::env::temp_dir().join(format!(
-            "neure-voxcpm-resolve-ok-{}",
+            "neuron-voxcpm-resolve-ok-{}",
             uuid::Uuid::new_v4()
         ));
         std::fs::create_dir_all(&dir).expect("create temp dir");
@@ -355,11 +355,11 @@ mod tests {
         std::fs::write(dir.join("tokenizer.json"), b"{}").expect("write tokenizer");
         std::fs::write(dir.join("model.mpk"), b"fake").expect("write model.mpk");
         std::fs::write(dir.join("vae_audiovae.mpk"), b"fake").expect("write audiovae");
-        unsafe { std::env::set_var("NEURE_TTS_MODEL_PATH", &dir) };
+        unsafe { std::env::set_var("NEURON_TTS_MODEL_PATH", &dir) };
 
         let result = VoxCpmTtsRuntime::resolve_model_path("voxcpm-0.5b");
         let _ = std::fs::remove_dir_all(&dir);
-        unsafe { std::env::remove_var("NEURE_TTS_MODEL_PATH") };
+        unsafe { std::env::remove_var("NEURON_TTS_MODEL_PATH") };
 
         assert!(result.is_ok(), "expected Ok, got: {result:?}");
         assert_eq!(result.unwrap(), dir);
@@ -391,21 +391,21 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial]
     async fn test_voxcpm_load_with_invalid_path_returns_error() {
-        unsafe { std::env::remove_var("NEURE_TTS_MODEL_PATH") };
+        unsafe { std::env::remove_var("NEURON_TTS_MODEL_PATH") };
         let result = VoxCpmTtsRuntime::load("voxcpm-0.5b", &DeviceSelection::Cpu).await;
         assert!(result.is_err());
         let err = result.err().unwrap();
-        assert!(err.message.contains("NEURE_TTS_MODEL_PATH"));
+        assert!(err.message.contains("NEURON_TTS_MODEL_PATH"));
     }
 
     #[test]
     #[serial_test::serial]
     fn test_voxcpm_load_with_safetensors_only_returns_pre_converted_hint() {
-        // Set NEURE_TTS_MODEL_PATH to a temp dir with config.json + tokenizer.json
+        // Set NEURON_TTS_MODEL_PATH to a temp dir with config.json + tokenizer.json
         // + a .safetensors file but NO .mpk files. The error must point the user
         // to download pre-converted weights, not to a "conversion utility".
         let dir = std::env::temp_dir().join(format!(
-            "neure-voxcpm-test-{}",
+            "neuron-voxcpm-test-{}",
             uuid::Uuid::new_v4()
         ));
         std::fs::create_dir_all(&dir).expect("create temp dir");
@@ -413,11 +413,11 @@ mod tests {
         std::fs::write(dir.join("tokenizer.json"), b"{}").expect("write tokenizer");
         std::fs::write(dir.join("model.safetensors"), b"fake").expect("write safetensors");
         std::fs::write(dir.join("audiovae.safetensors"), b"fake").expect("write safetensors");
-        unsafe { std::env::set_var("NEURE_TTS_MODEL_PATH", &dir) };
+        unsafe { std::env::set_var("NEURON_TTS_MODEL_PATH", &dir) };
 
         let result = VoxCpmTtsRuntime::resolve_model_path("voxcpm-0.5b");
         let _ = std::fs::remove_dir_all(&dir);
-        unsafe { std::env::remove_var("NEURE_TTS_MODEL_PATH") };
+        unsafe { std::env::remove_var("NEURON_TTS_MODEL_PATH") };
 
         assert!(result.is_err());
         let err = result.err().unwrap();
@@ -427,14 +427,14 @@ mod tests {
         );
         assert!(
             !err.contains("conversion utility"),
-            "error must not mention 'conversion utility' (neure does not convert weights), got: {err}"
+            "error must not mention 'conversion utility' (neuron does not convert weights), got: {err}"
         );
     }
 
     #[test]
     #[serial_test::serial]
     fn test_voxcpm_load_env_var_error_mentions_pre_converted() {
-        unsafe { std::env::remove_var("NEURE_TTS_MODEL_PATH") };
+        unsafe { std::env::remove_var("NEURON_TTS_MODEL_PATH") };
         let result = VoxCpmTtsRuntime::resolve_model_path("voxcpm-0.5b");
         assert!(result.is_err());
         let err = result.err().unwrap();

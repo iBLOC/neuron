@@ -3,8 +3,8 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 
-use super::{EmbeddingImpl, EmbeddingRequest, EmbeddingResponse, NeureError, RegisteredEmbedding, EmbeddingRegistryKey};
-use crate::config::{DeviceSelection, NeureConfig, ResourceTracker};
+use super::{EmbeddingImpl, EmbeddingRequest, EmbeddingResponse, NeuronError, RegisteredEmbedding, EmbeddingRegistryKey};
+use crate::config::{DeviceSelection, NeuronConfig, ResourceTracker};
 use crate::embedding::EmbeddingRuntime;
 use crate::llm::ModelInfo;
 
@@ -28,7 +28,7 @@ impl Clone for EmbeddingRuntimeRegistry {
 }
 
 impl EmbeddingRuntimeRegistry {
-    pub fn new(_config: Arc<NeureConfig>) -> Self {
+    pub fn new(_config: Arc<NeuronConfig>) -> Self {
         Self {
             registered: Vec::new(),
             loaded: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
@@ -42,19 +42,19 @@ impl EmbeddingRuntimeRegistry {
         impl_id: EmbeddingImpl,
         device: DeviceSelection,
         required_memory_bytes: u64,
-    ) -> Result<(), NeureError> {
+    ) -> Result<(), NeuronError> {
         let mut res = self.resources.lock().unwrap();
         if !res.can_load(required_memory_bytes, &device) {
             let available = match &device {
                 DeviceSelection::Cpu | DeviceSelection::Auto => res.available_cpu_bytes(),
                 _ => res.available_gpu_bytes(),
             };
-            return Err(NeureError::new(format!(
+            return Err(NeuronError::new(format!(
                 "InsufficientResources: model={model_id}, required={required_memory_bytes}, available={available}"
             )));
         }
         res.allocate(required_memory_bytes, &device)
-            .map_err(NeureError::new)?;
+            .map_err(NeuronError::new)?;
 
         self.registered.push(RegisteredEmbedding {
             model_id,
@@ -65,13 +65,13 @@ impl EmbeddingRuntimeRegistry {
         Ok(())
     }
 
-    pub async fn runtime_for(&self, model_id: &str) -> Result<Arc<dyn EmbeddingRuntime>, NeureError> {
+    pub async fn runtime_for(&self, model_id: &str) -> Result<Arc<dyn EmbeddingRuntime>, NeuronError> {
         let entry = self
             .registered
             .iter()
             .find(|r| r.model_id == model_id)
             .ok_or_else(|| {
-                NeureError::new(format!("ModelNotRegistered: {model_id}"))
+                NeuronError::new(format!("ModelNotRegistered: {model_id}"))
             })?;
 
         let key = EmbeddingRegistryKey {
@@ -91,7 +91,7 @@ impl EmbeddingRuntimeRegistry {
                 let loaded: Box<dyn EmbeddingRuntime> = MiniLmL6V2EmbeddingRuntime::load(&entry.model_id, &entry.device)
                     .await
                     .map_err(|e| {
-                        NeureError::new(format!("MiniLmL6V2EmbeddingRuntime load failed: {e}"))
+                        NeuronError::new(format!("MiniLmL6V2EmbeddingRuntime load failed: {e}"))
                     })?;
                 Arc::from(loaded)
             }
@@ -113,7 +113,7 @@ impl EmbeddingRuntimeRegistry {
                     Ok(handle) => match handle.block_on(async { self.runtime_for(&id).await }) {
                         Ok(rt) => rt,
                         Err(e) => {
-                            eprintln!("[neure] embedding: failed to load default runtime for {id}: {e}");
+                            eprintln!("[neuron] embedding: failed to load default runtime for {id}: {e}");
                             Arc::new(UnavailableEmbeddingRuntime)
                         }
                     },
@@ -133,10 +133,10 @@ impl EmbeddingRuntime for UnavailableEmbeddingRuntime {
     where
         Self: Sized,
     {
-        Err(NeureError::new("NoRegisteredModel: register at least one Embedding model"))
+        Err(NeuronError::new("NoRegisteredModel: register at least one Embedding model"))
     }
     async fn embed(&self, _req: EmbeddingRequest) -> crate::llm::ChatResult<EmbeddingResponse> {
-        Err(NeureError::new("NoRegisteredModel: register at least one Embedding model"))
+        Err(NeuronError::new("NoRegisteredModel: register at least one Embedding model"))
     }
     fn list_models(&self) -> Vec<ModelInfo> {
         vec![]
@@ -152,7 +152,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_runtime_for_unregistered_returns_error() {
-        let config = Arc::new(NeureConfig::new());
+        let config = Arc::new(NeuronConfig::new());
         let reg = EmbeddingRuntimeRegistry::new(config);
         let result = reg.runtime_for("nonexistent").await;
         assert!(result.is_err());

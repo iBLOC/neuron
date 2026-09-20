@@ -1,4 +1,4 @@
-//! Embedding module for neure.
+//! Embedding module for neuron.
 //!
 //! Provides [`EmbeddingRuntime`] trait for text-to-vector inference.
 //! Currently supports:
@@ -18,7 +18,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::config::DeviceSelection;
-use crate::llm::{ChatResult, ModelInfo, NeureError};
+use crate::llm::{ChatResult, ModelInfo, NeuronError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -133,7 +133,7 @@ impl EmbeddingRequest {
     }
 }
 
-/// Per-request token usage. `neure` estimates tokens as
+/// Per-request token usage. `neuron` estimates tokens as
 /// `total_chars / 4` (same heuristic used by the Rerank module).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EmbeddingUsage {

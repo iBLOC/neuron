@@ -5,7 +5,7 @@
 //! engines.llm → MageVlRuntime → generated text → Anthropic-shaped
 //! response.
 //!
-//! Skipped unless `NEURE_MAGE_VL_E2E=1` is set or the default shard
+//! Skipped unless `NEURON_MAGE_VL_E2E=1` is set or the default shard
 //! directory exists on this machine — the checkpoint is ~9 GB and
 //! CPU generation on F32 takes ~5 s/token in release mode.
 
@@ -38,7 +38,7 @@ fn anthropic_multimodal_body() -> serde_json::Value {
 }
 
 fn shards_available() -> bool {
-    let dir = std::env::var("NEURE_MAGE_VL_SHARD_DIR")
+    let dir = std::env::var("NEURON_MAGE_VL_SHARD_DIR")
         .unwrap_or_else(|_| DEFAULT_SHARD_DIR.to_string());
     std::path::Path::new(&dir)
         .join("model-00001-of-00002.safetensors")
@@ -50,21 +50,21 @@ fn shards_available() -> bool {
 /// actual axum router.
 #[tokio::test]
 async fn mage_vl_full_wire_image_anthropic_messages() {
-    if std::env::var("NEURE_MAGE_VL_E2E").as_deref() != Ok("1") && !shards_available() {
-        eprintln!("skipping: mage-vl shards not present and NEURE_MAGE_VL_E2E != 1");
+    if std::env::var("NEURON_MAGE_VL_E2E").as_deref() != Ok("1") && !shards_available() {
+        eprintln!("skipping: mage-vl shards not present and NEURON_MAGE_VL_E2E != 1");
         return;
     }
 
     // Safety: single dedicated test binary; env is set before any
     // tokio worker threads spawn inside ServerState::new.
     unsafe {
-        std::env::set_var("NEURE_LLM_RUNTIME", "mage_vl");
-        if std::env::var("NEURE_MAGE_VL_SHARD_DIR").is_err() {
-            std::env::set_var("NEURE_MAGE_VL_SHARD_DIR", DEFAULT_SHARD_DIR);
+        std::env::set_var("NEURON_LLM_RUNTIME", "mage_vl");
+        if std::env::var("NEURON_MAGE_VL_SHARD_DIR").is_err() {
+            std::env::set_var("NEURON_MAGE_VL_SHARD_DIR", DEFAULT_SHARD_DIR);
         }
     }
 
-    let app = neure_lib::server::create_router(neure_lib::config::NeureConfig::default());
+    let app = neuron_lib::server::create_router(neuron_lib::config::NeuronConfig::default());
 
     let req = Request::builder()
         .method("POST")

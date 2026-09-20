@@ -604,7 +604,7 @@ mod tests {
         // mistaken for progress.
         assert!(parse_hf_progress_line("").is_none());
         assert!(parse_hf_progress_line(
-            "/home/user/.neure/models/llm/qwen3"
+            "/home/user/.neuron/models/llm/qwen3"
         )
         .is_none());
         assert!(parse_hf_progress_line(

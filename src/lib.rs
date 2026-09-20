@@ -21,8 +21,8 @@ pub use asr::{AsrImpl, AsrRuntime, AsrRuntimeRegistry, Transcription};
 
 #[cfg(feature = "candle")]
 pub use asr::whisper::WhisperAsrRuntime;
-pub use config::{DeviceSelection, NeureConfig};
-pub use embedded::{health, run_embedded, NeureEmbedConfig, NeureHandle, NeureHealth};
+pub use config::{DeviceSelection, NeuronConfig};
+pub use embedded::{health, run_embedded, NeuronEmbedConfig, NeuronHandle, NeuronHealth};
 pub use models::EngineType;
 pub use embedding::{
     base64_encode, EmbeddingData, EmbeddingImpl, EmbeddingInput,
@@ -34,7 +34,7 @@ pub use embedding::{
 pub use embedding::MiniLmL6V2EmbeddingRuntime;
 pub use llm::{
     ChatChunk, ChatMessage, ChatRequest, ChatResponse, ChatResult, Choice, DeltaMessage,
-    LlmImpl, LlmRuntime, LlmRuntimeRegistry, ModelInfo, NeureError,
+    LlmImpl, LlmRuntime, LlmRuntimeRegistry, ModelInfo, NeuronError,
     RegistryKey,
 };
 
@@ -76,6 +76,6 @@ pub use vision::CandleYoloRuntime;
 
 pub use vision::{OrtModelConfig, OrtSession, OrtVisionRuntime};
 
-pub type Result<T> = std::result::Result<T, NeureError>;
+pub type Result<T> = std::result::Result<T, NeuronError>;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

@@ -1,7 +1,7 @@
 //! Vendor tree for the Mage-VL port (`microsoft/Mage-VL`).
 //!
 //! Mage-VL is a codec-native streaming VLM (Mage-ViT encoder +
-//! Qwen3-4B decoder). Neure consumes it in two stages:
+//! Qwen3-4B decoder). Neuron consumes it in two stages:
 //!
 //! 1. **StreamMind gate** (`gate.rs`) — event-gated streaming: a
 //!    lightweight Mamba+Qwen3 classifier scores each rolling codec

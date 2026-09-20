@@ -5,7 +5,7 @@ use tokio::sync::Mutex as AsyncMutex;
 
 use super::{Chronos2Runtime, RegisteredChronos2, StubChronos2Runtime};
 use crate::config::{DeviceSelection, ResourceTracker};
-use crate::llm::NeureError;
+use crate::llm::NeuronError;
 
 pub struct Chronos2Registry {
     pub registered: Vec<RegisteredChronos2>,
@@ -41,19 +41,19 @@ impl Chronos2Registry {
         model_id: String,
         device: DeviceSelection,
         required_memory_bytes: u64,
-    ) -> Result<(), NeureError> {
+    ) -> Result<(), NeuronError> {
         let mut res = self.resources.lock().unwrap();
         if !res.can_load(required_memory_bytes, &device) {
             let available = match &device {
                 DeviceSelection::Cpu | DeviceSelection::Auto => res.available_cpu_bytes(),
                 _ => res.available_gpu_bytes(),
             };
-            return Err(NeureError::new(format!(
+            return Err(NeuronError::new(format!(
                 "InsufficientResources: model={model_id}, required={required_memory_bytes}, available={available}"
             )));
         }
         res.allocate(required_memory_bytes, &device)
-            .map_err(NeureError::new)?;
+            .map_err(NeuronError::new)?;
         self.registered.push(RegisteredChronos2 {
             model_id,
             device,
@@ -63,7 +63,7 @@ impl Chronos2Registry {
     }
 
     /// Resolve a runtime for the given model id. v0 path:
-    /// when `NEURE_CHRONOS2_MODEL_PATH/<id>` exists on disk,
+    /// when `NEURON_CHRONOS2_MODEL_PATH/<id>` exists on disk,
     /// the candle runtime loads it. Otherwise we fall back to
     /// the stub so the 503 path stays observable for unit
     /// tests / dev environments that don't ship a checkpoint.
@@ -87,7 +87,7 @@ impl Chronos2Registry {
             {
                 match tokio::task::spawn_blocking({
                     let p = path.clone();
-                    move || crate::chronos2::candle_runtime::CandleChronos2Runtime::load(&p, crate::config::NeureConfig::default_device())
+                    move || crate::chronos2::candle_runtime::CandleChronos2Runtime::load(&p, crate::config::NeuronConfig::default_device())
                 })
                 .await
                 {

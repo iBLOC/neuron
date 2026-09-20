@@ -15,7 +15,7 @@
 set -e
 
 MODEL_NAME="${1:-amazon/chronos-t5-small}"
-MODEL_DIR="$HOME/.neure/models/chronos2/$(basename $MODEL_NAME)"
+MODEL_DIR="$HOME/.neuron/models/chronos2/$(basename $MODEL_NAME)"
 
 echo "Downloading Chronos2 model: $MODEL_NAME"
 echo "Target directory: $MODEL_DIR"

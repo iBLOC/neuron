@@ -129,19 +129,19 @@ pub struct DeltaMessage {
     pub content: Option<String>,
 }
 
-pub type ChatResult<T> = Result<T, NeureError>;
+pub type ChatResult<T> = Result<T, NeuronError>;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NeureError {
+pub struct NeuronError {
     pub message: String,
     pub error_type: String,
 }
 
-impl NeureError {
+impl NeuronError {
     pub fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
-            error_type: "neure_error".to_string(),
+            error_type: "neuron_error".to_string(),
         }
     }
 
@@ -167,13 +167,13 @@ impl NeureError {
     }
 }
 
-impl std::fmt::Display for NeureError {
+impl std::fmt::Display for NeuronError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}: {}", self.error_type, self.message)
     }
 }
 
-impl std::error::Error for NeureError {}
+impl std::error::Error for NeuronError {}
 
 /// Identifies which engine backend runs this LLM model.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -426,33 +426,33 @@ mod tests {
     }
 
     #[test]
-    fn test_neure_error_default_constructor() {
-        let err = NeureError::new("oops");
+    fn test_neuron_error_default_constructor() {
+        let err = NeuronError::new("oops");
         assert_eq!(err.message, "oops");
-        assert_eq!(err.error_type, "neure_error");
+        assert_eq!(err.error_type, "neuron_error");
     }
 
     #[test]
-    fn test_neure_error_chat_completion_error_code() {
-        let err = NeureError::invalid_input("invalid request");
+    fn test_neuron_error_chat_completion_error_code() {
+        let err = NeuronError::invalid_input("invalid request");
         assert_eq!(err.message, "invalid request");
         assert_eq!(err.error_type, "invalid_request_error");
     }
 
     #[test]
-    fn test_neure_error_not_initialized_uses_correct_type() {
-        let err = NeureError::not_initialized("runtime not set up");
+    fn test_neuron_error_not_initialized_uses_correct_type() {
+        let err = NeuronError::not_initialized("runtime not set up");
         assert_eq!(err.message, "runtime not set up");
         assert_eq!(err.error_type, "not_initialized");
     }
 
     #[test]
-    fn test_neure_error_serializes_to_openai_shape() {
-        let err = NeureError::new("something went wrong");
+    fn test_neuron_error_serializes_to_openai_shape() {
+        let err = NeuronError::new("something went wrong");
         let value = serde_json::to_value(&err).unwrap();
 
         assert_eq!(value.get("message").and_then(|v| v.as_str()), Some("something went wrong"));
-        assert_eq!(value.get("error_type").and_then(|v| v.as_str()), Some("neure_error"));
+        assert_eq!(value.get("error_type").and_then(|v| v.as_str()), Some("neuron_error"));
     }
 
     #[test]

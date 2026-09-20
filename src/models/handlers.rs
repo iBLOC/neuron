@@ -72,7 +72,7 @@ pub async fn list_models(
                 "id": e.id,
                 "object": "model",
                 "created": chrono::Utc::now().timestamp(),
-                "owned_by": "neure",
+                "owned_by": "neuron",
                 "engine": e.engine,
                 "engine_impl": e.engine_impl,
                 "capabilities": e.capabilities,

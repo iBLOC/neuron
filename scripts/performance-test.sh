@@ -1,5 +1,5 @@
 #!/bin/bash
-# Performance testing script for neure
+# Performance testing script for neuron
 #
 # Usage:
 #   ./scripts/performance-test.sh [options]
@@ -55,7 +55,7 @@ if [ -z "$FEATURES" ]; then
 fi
 
 echo "=========================================="
-echo "Neure Performance Test Suite"
+echo "Neuron Performance Test Suite"
 echo "=========================================="
 echo ""
 echo "Features: $FEATURES"

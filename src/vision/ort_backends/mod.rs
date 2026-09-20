@@ -8,9 +8,9 @@
 //!
 //! ## Why these don't depend on `ort` or `tract` directly
 //!
-//! neure itself stays executor-agnostic. Adding a hard dep on `ort`
+//! neuron itself stays executor-agnostic. Adding a hard dep on `ort`
 //! upstream is blocked by [ort 2.0.0-rc.12's vitis.rs compile bug];
-//! adding `tract` as a dep would force every neure user to pay for it.
+//! adding `tract` as a dep would force every neuron user to pay for it.
 //!
 //! Instead, this directory documents the plug-in contract and provides
 //! ready-to-copy code. Users add the executor to *their* crate and

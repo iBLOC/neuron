@@ -1,4 +1,4 @@
-//! Vision module for neure.
+//! Vision module for neuron.
 //!
 //! Provides the [`VisionRuntime`] trait for image-in / structured-output inference
 //! (object detection, classification, segmentation, pose estimation).

@@ -7,8 +7,8 @@ use super::{
     VisionImpl, VisionRequest, VisionResponse, VisionRuntime,
     RegisteredVision, VisionRegistryKey,
 };
-use crate::config::{DeviceSelection, NeureConfig, ResourceTracker};
-use crate::llm::{ChatResult, ModelInfo, NeureError};
+use crate::config::{DeviceSelection, NeuronConfig, ResourceTracker};
+use crate::llm::{ChatResult, ModelInfo, NeuronError};
 
 #[cfg(feature = "candle")]
 use crate::CandleYoloRuntime;
@@ -32,7 +32,7 @@ impl Clone for VisionRuntimeRegistry {
 }
 
 impl VisionRuntimeRegistry {
-    pub fn new(_config: Arc<NeureConfig>) -> Self {
+    pub fn new(_config: Arc<NeuronConfig>) -> Self {
         Self {
             registered: Vec::new(),
             loaded: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
@@ -46,19 +46,19 @@ impl VisionRuntimeRegistry {
         impl_id: VisionImpl,
         device: DeviceSelection,
         required_memory_bytes: u64,
-    ) -> Result<(), NeureError> {
+    ) -> Result<(), NeuronError> {
         let mut res = self.resources.lock().unwrap();
         if !res.can_load(required_memory_bytes, &device) {
             let available = match &device {
                 DeviceSelection::Cpu | DeviceSelection::Auto => res.available_cpu_bytes(),
                 _ => res.available_gpu_bytes(),
             };
-            return Err(NeureError::new(format!(
+            return Err(NeuronError::new(format!(
                 "InsufficientResources: model={model_id}, required={required_memory_bytes}, available={available}"
             )));
         }
         res.allocate(required_memory_bytes, &device)
-            .map_err(NeureError::new)?;
+            .map_err(NeuronError::new)?;
 
         self.registered.push(RegisteredVision {
             model_id,
@@ -69,12 +69,12 @@ impl VisionRuntimeRegistry {
         Ok(())
     }
 
-    pub async fn runtime_for(&self, model_id: &str) -> Result<Arc<dyn VisionRuntime>, NeureError> {
+    pub async fn runtime_for(&self, model_id: &str) -> Result<Arc<dyn VisionRuntime>, NeuronError> {
         let entry = self
             .registered
             .iter()
             .find(|r| r.model_id == model_id)
-            .ok_or_else(|| NeureError::new(format!("ModelNotRegistered: {model_id}")))?;
+            .ok_or_else(|| NeuronError::new(format!("ModelNotRegistered: {model_id}")))?;
 
         let key = VisionRegistryKey {
             model_id: entry.model_id.clone(),
@@ -93,13 +93,13 @@ impl VisionRuntimeRegistry {
                 let loaded_box: Box<dyn VisionRuntime> = CandleYoloRuntime::load(&entry.model_id, &entry.device)
                     .await
                     .map_err(|e| {
-                        NeureError::new(format!("CandleYoloRuntime load failed: {e}"))
+                        NeuronError::new(format!("CandleYoloRuntime load failed: {e}"))
                     })?;
                 Arc::from(loaded_box)
             }
             #[cfg(feature = "candle")]
             VisionImpl::CandleRtDetr | VisionImpl::CandleDetr => {
-                return Err(NeureError::not_implemented(format!(
+                return Err(NeuronError::not_implemented(format!(
                     "{:?} backend: architecture not yet wired (v1.0 only CandleYoloRuntime is implemented)",
                     entry.impl_id
                 )));
@@ -111,12 +111,12 @@ impl VisionRuntimeRegistry {
                 )
                 .await
                 .map_err(|e| {
-                    NeureError::new(format!("OrtVisionRuntime load failed: {e}"))
+                    NeuronError::new(format!("OrtVisionRuntime load failed: {e}"))
                 })?;
                 Arc::from(loaded_box)
             }
             VisionImpl::Ultralytics => {
-                return Err(NeureError::not_implemented(
+                return Err(NeuronError::not_implemented(
                     "ultralytics backend: requires `ultralytics` Python package".to_string(),
                 ));
             }
@@ -138,7 +138,7 @@ impl VisionRuntimeRegistry {
                     Ok(handle) => match handle.block_on(async { self.runtime_for(&id).await }) {
                         Ok(rt) => rt,
                         Err(e) => {
-                            eprintln!("[neure] vision: failed to load default runtime for {id}: {e}");
+                            eprintln!("[neuron] vision: failed to load default runtime for {id}: {e}");
                             Arc::new(UnavailableVisionRuntime)
                         }
                     },
@@ -151,7 +151,7 @@ impl VisionRuntimeRegistry {
 }
 
 /// Fallback runtime returned when no vision model is registered. Every call
-/// returns `NeureError::not_initialized`. Same pattern as the other capabilities'
+/// returns `NeuronError::not_initialized`. Same pattern as the other capabilities'
 /// `Unavailable*Runtime` stubs.
 struct UnavailableVisionRuntime;
 
@@ -161,10 +161,10 @@ impl VisionRuntime for UnavailableVisionRuntime {
     where
         Self: Sized,
     {
-        Err(NeureError::new("NoRegisteredModel: register at least one Vision model"))
+        Err(NeuronError::new("NoRegisteredModel: register at least one Vision model"))
     }
     async fn run(&self, _req: VisionRequest) -> ChatResult<VisionResponse> {
-        Err(NeureError::new("NoRegisteredModel: register at least one Vision model"))
+        Err(NeuronError::new("NoRegisteredModel: register at least one Vision model"))
     }
     fn list_models(&self) -> Vec<ModelInfo> {
         vec![]
@@ -181,7 +181,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_runtime_for_unregistered_returns_error() {
-        let config = Arc::new(NeureConfig::new());
+        let config = Arc::new(NeuronConfig::new());
         let reg = VisionRuntimeRegistry::new(config);
         let result = reg.runtime_for("nonexistent").await;
         assert!(result.is_err());
@@ -191,7 +191,7 @@ mod tests {
 
     #[test]
     fn test_default_runtime_returns_unavailable_when_no_registered() {
-        let config = Arc::new(NeureConfig::new());
+        let config = Arc::new(NeuronConfig::new());
         let reg = VisionRuntimeRegistry::new(config);
         let rt = reg.default_runtime();
         assert_eq!(rt.name(), "unavailable");

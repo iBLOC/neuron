@@ -1,7 +1,7 @@
 {
-  "name": "neure-docs",
+  "name": "neuron-docs",
   "version": "0.1.0",
-  "description": "neure documentation site",
+  "description": "neuron documentation site",
   "private": true,
   "type": "module",
   "scripts": {

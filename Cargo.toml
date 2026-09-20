@@ -1,17 +1,17 @@
 [package]
-name = "neure"
+name = "neuron"
 version = "0.1.0"
 edition = "2024"
-description = "Neure - Neural Inference Runtime (LLM/TTS/ASR/Rerank/Embedding/Vision) — OpenAI- and Anthropic-compatible inference engine for embedding into Rust hosts"
-authors = ["Neure Team"]
+description = "Neuron - Neural Inference Runtime (LLM/TTS/ASR/Rerank/Embedding/Vision) — OpenAI- and Anthropic-compatible inference engine for embedding into Rust hosts"
+authors = ["Neuron Team"]
 license = "Apache-2.0"
-repository = "https://github.com/ibloc/neure"
-homepage = "https://github.com/ibloc/neure"
+repository = "https://github.com/ibloc/neuron"
+homepage = "https://github.com/ibloc/neuron"
 keywords = ["rust", "inference", "openai", "llm", "tts", "asr", "rerank", "embedding", "vision"]
 categories = ["api-bindings", "command-line-utilities", "machine-learning"]
 
 [lib]
-name = "neure_lib"
+name = "neuron_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [dependencies]

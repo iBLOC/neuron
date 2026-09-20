@@ -1,7 +1,7 @@
 //! Real-model smoke test for the BGE rerank runtime.
 //!
 //! Spins up the embedded server, loads `BAAI/bge-reranker-base` from
-//! `$NEURE_RERANK_MODEL_PATH` (default: `/tmp/neure-smoke/models/rerank/bge-reranker-base`),
+//! `$NEURON_RERANK_MODEL_PATH` (default: `/tmp/neuron-smoke/models/rerank/bge-reranker-base`),
 //! and exercises the `/v1/rerank` endpoint with three checks:
 //!
 //! 1. **Real scores**: send a query with one clearly-relevant document
@@ -14,18 +14,18 @@
 //!
 //! Run with:
 //! ```bash
-//! NEURE_RERANK_RUNTIME=bge cargo run --example real_model_rerank_smoke --features candle
+//! NEURON_RERANK_RUNTIME=bge cargo run --example real_model_rerank_smoke --features candle
 //! ```
 //!
-//! Set `NEURE_RERANK_MODEL_PATH` to override the default model location.
-//! Set `NEURE_PORT=0` (default) to bind to a random free port.
+//! Set `NEURON_RERANK_MODEL_PATH` to override the default model location.
+//! Set `NEURON_PORT=0` (default) to bind to a random free port.
 
-use neure_lib::{run_embedded, NeureConfig, NeureEmbedConfig};
+use neuron_lib::{run_embedded, NeuronConfig, NeuronEmbedConfig};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let model_path = std::env::var("NEURE_RERANK_MODEL_PATH").unwrap_or_else(|_| {
-        "/tmp/neure-smoke/models/rerank/bge-reranker-base".to_string()
+    let model_path = std::env::var("NEURON_RERANK_MODEL_PATH").unwrap_or_else(|_| {
+        "/tmp/neuron-smoke/models/rerank/bge-reranker-base".to_string()
     });
     eprintln!("[smoke] loading rerank model from {model_path}");
     if !std::path::Path::new(&model_path).join("model.safetensors").exists() {
@@ -36,13 +36,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(2);
     }
 
-    let port: u16 = std::env::var("NEURE_PORT")
+    let port: u16 = std::env::var("NEURON_PORT")
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
-    let cfg = NeureEmbedConfig {
+    let cfg = NeuronEmbedConfig {
         port,
-        config: NeureConfig::new(),
+        config: NeuronConfig::new(),
     };
     let handle = run_embedded(cfg).await?;
     let port = handle.addr.port();

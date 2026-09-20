@@ -14,7 +14,7 @@ mod integration {
     fn model_dir() -> Option<PathBuf> {
         let dir = dirs::home_dir()
             .unwrap_or_default()
-            .join(".neure/models/chronos2/chronos-bolt-small");
+            .join(".neuron/models/chronos2/chronos-bolt-small");
         if dir.exists() {
             Some(dir)
         } else {
@@ -25,19 +25,19 @@ mod integration {
     #[tokio::test]
     async fn test_chronos2_load_and_forecast() {
         let Some(dir) = model_dir() else {
-            eprintln!("Skipping test: chronos-bolt-small not found at ~/.neure/models/chronos2/chronos-bolt-small");
+            eprintln!("Skipping test: chronos-bolt-small not found at ~/.neuron/models/chronos2/chronos-bolt-small");
             return;
         };
 
         let device = candle_core::Device::Cpu;
-        let rt = neure_lib::chronos2::CandleChronos2Runtime::load(&dir, device)
+        let rt = neuron_lib::chronos2::CandleChronos2Runtime::load(&dir, device)
             .expect("failed to load model");
 
-        let request = neure_lib::chronos2::ForecastRequest {
+        let request = neuron_lib::chronos2::ForecastRequest {
             model: "chronos-bolt-small".into(),
             series: vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0],
             horizon: 5,
-            method: neure_lib::chronos2::ForecastMethod::Mean,
+            method: neuron_lib::chronos2::ForecastMethod::Mean,
         };
 
         let response = rt.forecast(request).await.expect("forecast failed");
@@ -57,7 +57,7 @@ mod integration {
         };
 
         let device = candle_core::Device::Cpu;
-        let rt = neure_lib::chronos2::CandleChronos2Runtime::load(&dir, device)
+        let rt = neuron_lib::chronos2::CandleChronos2Runtime::load(&dir, device)
             .expect("failed to load model");
 
         let series_list = vec![
@@ -66,7 +66,7 @@ mod integration {
             vec![100.0, 200.0, 300.0, 400.0, 500.0],
         ];
 
-        let results = rt.forecast_batch(&series_list, 3, neure_lib::chronos2::ForecastMethod::Median)
+        let results = rt.forecast_batch(&series_list, 3, neuron_lib::chronos2::ForecastMethod::Median)
             .await
             .expect("batch forecast failed");
 
@@ -85,14 +85,14 @@ mod integration {
         };
 
         let device = candle_core::Device::Cpu;
-        let rt = neure_lib::chronos2::CandleChronos2Runtime::load(&dir, device)
+        let rt = neuron_lib::chronos2::CandleChronos2Runtime::load(&dir, device)
             .expect("failed to load model");
 
-        let request = neure_lib::chronos2::ForecastRequest {
+        let request = neuron_lib::chronos2::ForecastRequest {
             model: "chronos-bolt-small".into(),
             series: vec![1.0, 2.0, 3.0, 4.0, 5.0],
             horizon: 3,
-            method: neure_lib::chronos2::ForecastMethod::Mean,
+            method: neuron_lib::chronos2::ForecastMethod::Mean,
         };
 
         let response = rt.forecast(request).await.expect("forecast failed");

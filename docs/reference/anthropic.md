@@ -4,7 +4,7 @@ title: Anthropic Messages v1
 
 # Anthropic Messages v1
 
-neure supports the [Anthropic Messages API](https://docs.anthropic.com/en/api/messages) at `/v1/messages`. The wire format is byte-for-byte compatible with the Anthropic SDK, including vision, tool_use, cache_control, extended thinking, and streaming SSE.
+neuron supports the [Anthropic Messages API](https://docs.anthropic.com/en/api/messages) at `/v1/messages`. The wire format is byte-for-byte compatible with the Anthropic SDK, including vision, tool_use, cache_control, extended thinking, and streaming SSE.
 
 ## Endpoint
 
@@ -240,7 +240,7 @@ The model must be a vision-language model (VLM) registered in the LLM registry. 
 
 ## Differences from the Anthropic hosted API
 
-neure's implementation is a **subset** of Anthropic's full API. Currently supported:
+neuron's implementation is a **subset** of Anthropic's full API. Currently supported:
 
 - ✅ Text + image messages
 - ✅ Tool use (function calling)
@@ -263,7 +263,7 @@ neure's implementation is a **subset** of Anthropic's full API. Currently suppor
 import anthropic
 
 client = anthropic.Anthropic(
-    base_url="http://localhost:8085",  # neure endpoint
+    base_url="http://localhost:8085",  # neuron endpoint
     api_key="not-required",
 )
 
@@ -309,4 +309,4 @@ console.log(message.content[0].text);
 
 - [OpenAI-compatible API](/reference/api) — full `/v1/*` reference
 - [Capabilities](/concepts/capabilities) — LLM engine selection
-- [Environment Variables](/reference/env-vars) — full `NEURE_*` matrix
+- [Environment Variables](/reference/env-vars) — full `NEURON_*` matrix

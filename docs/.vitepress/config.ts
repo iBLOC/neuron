@@ -1,7 +1,7 @@
 import { defineConfig } from 'vitepress'
 
 export default defineConfig({
-  title: 'neure',
+  title: 'neuron',
   description: 'Apache-2.0 Rust inference runtime for LLM / TTS / ASR / Rerank / Embedding / Vision — OpenAI- and Anthropic-compatible',
   lang: 'en-US',
   cleanUrls: true,
@@ -18,13 +18,13 @@ export default defineConfig({
 
   head: [
     ['meta', { name: 'theme-color', content: '#1f6feb' }],
-    ['meta', { property: 'og:title', content: 'neure — Neural Inference Runtime' }],
+    ['meta', { property: 'og:title', content: 'neuron — Neural Inference Runtime' }],
     ['meta', { property: 'og:description', content: 'Apache-2.0 Rust inference runtime. LLM / TTS / ASR / Rerank / Embedding / Vision. OpenAI + Anthropic compatible. Library-only, embed into any Rust host.' }],
     ['meta', { property: 'og:type', content: 'website' }],
   ],
 
   themeConfig: {
-    siteTitle: 'neure',
+    siteTitle: 'neuron',
 
     nav: [
       { text: 'Guide', link: '/guide/intro' },
@@ -44,7 +44,7 @@ export default defineConfig({
         {
           text: 'Introduction',
           items: [
-            { text: 'What is neure?', link: '/guide/intro' },
+            { text: 'What is neuron?', link: '/guide/intro' },
             { text: 'Quick Start', link: '/guide/quick-start' },
           ],
         },
@@ -66,7 +66,7 @@ export default defineConfig({
         {
           text: 'How-to Guides',
           items: [
-            { text: 'Embed neure into a Rust Host', link: '/howto/embed-into-host' },
+            { text: 'Embed neuron into a Rust Host', link: '/howto/embed-into-host' },
             { text: 'Multi-source Model Registry', link: '/howto/multi-source-registry' },
             { text: 'Vision Tasks (detect/classify/segment/pose)', link: '/howto/vision-tasks' },
             { text: 'LoRA Adapter Registration', link: '/howto/lora-adapters' },
@@ -87,12 +87,12 @@ export default defineConfig({
     },
 
     socialLinks: [
-      { icon: 'github', link: 'https://github.com/iBLOC/neure-rs' },
+      { icon: 'github', link: 'https://github.com/ibloc/neuron' },
     ],
 
     footer: {
       message: 'Released under the Apache License 2.0',
-      copyright: `Copyright © 2026 Neure Contributors`,
+      copyright: `Copyright © 2026 Neuron Contributors`,
     },
 
     editLink: {
@@ -130,7 +130,7 @@ export default defineConfig({
   },
 
   editLink: {
-    pattern: 'https://github.com/iBLOC/neure-rs/edit/main/docs/:path',
+    pattern: 'https://github.com/ibloc/neuron/edit/main/docs/:path',
     text: 'Edit this page on GitHub',
   },
 })

@@ -5,7 +5,7 @@
 //! `forward_pass` below) → NMS postprocessing → response shape.
 //!
 //! v1.0: detection only (YOLOv8 detection head). The forward-pass body
-//! loads weights from a directory pointed to by `NEURE_VISION_MODEL_PATH`
+//! loads weights from a directory pointed to by `NEURON_VISION_MODEL_PATH`
 //! when the architecture is implemented. Until then, `detect` returns
 //! `not_implemented` for the forward pass and the postprocessing /
 //! response shape work end-to-end.
@@ -29,7 +29,7 @@ use super::{
     VisionResponse, VisionRuntime, VisionTask,
 };
 use crate::config::DeviceSelection;
-use crate::llm::{ChatResult, ModelInfo, NeureError};
+use crate::llm::{ChatResult, ModelInfo, NeuronError};
 
 const INPUT_SIZE: u32 = 640;
 
@@ -52,7 +52,7 @@ pub struct CandleYoloRuntime {
 
 impl CandleYoloRuntime {
     pub fn new(model_id: &str, device: &DeviceSelection) -> Self {
-        let model_path = std::env::var("NEURE_VISION_MODEL_PATH")
+        let model_path = crate::config::env_var_result("VISION_MODEL_PATH")
             .ok()
             .map(std::path::PathBuf::from);
         #[cfg(feature = "candle")]
@@ -95,9 +95,9 @@ impl CandleYoloRuntime {
     /// Decode an image from bytes (PNG / JPEG / WebP) into an RGB u8 buffer.
     ///
     /// Uses the `image` crate (already a transitive dep via candle).
-    fn decode_image(bytes: &[u8]) -> Result<(Vec<u8>, u32, u32), NeureError> {
+    fn decode_image(bytes: &[u8]) -> Result<(Vec<u8>, u32, u32), NeuronError> {
         let img = image::load_from_memory(bytes).map_err(|e| {
-            NeureError::invalid_input(format!("failed to decode image: {e}"))
+            NeuronError::invalid_input(format!("failed to decode image: {e}"))
         })?;
         let rgb = img.to_rgb8();
         let (w, h) = rgb.dimensions();
@@ -109,13 +109,13 @@ impl CandleYoloRuntime {
     /// For URL sources, downloads via reqwest (sync via `tokio::task::spawn_blocking`).
     /// For Base64 sources, decodes inline. For FileId, returns an error
     /// (file storage backend is host-specific and not in v1.0 scope).
-    async fn fetch_image_bytes(source: &VisionImageSource) -> Result<(Vec<u8>, &'static str), NeureError> {
+    async fn fetch_image_bytes(source: &VisionImageSource) -> Result<(Vec<u8>, &'static str), NeuronError> {
         match source {
             VisionImageSource::Base64 { media_type, data } => {
                 use base64::Engine as _;
                 let bytes = base64::engine::general_purpose::STANDARD
                     .decode(data)
-                    .map_err(|e| NeureError::invalid_input(format!("invalid base64: {e}")))?;
+                    .map_err(|e| NeuronError::invalid_input(format!("invalid base64: {e}")))?;
                 let fmt = if media_type.contains("png") { "png" }
                           else if media_type.contains("jpeg") || media_type.contains("jpg") { "jpeg" }
                           else if media_type.contains("webp") { "webp" }
@@ -128,14 +128,14 @@ impl CandleYoloRuntime {
                     // data URL: data:<mediatype>;base64,<data>
                     let parts: Vec<&str> = url.splitn(2, ',').collect();
                     if parts.len() != 2 {
-                        return Err(NeureError::invalid_input("invalid data URL"));
+                        return Err(NeuronError::invalid_input("invalid data URL"));
                     }
                     let header = parts[0];
                     let data = parts[1];
                     use base64::Engine as _;
                     let bytes = base64::engine::general_purpose::STANDARD
                         .decode(data)
-                        .map_err(|e| NeureError::invalid_input(format!("invalid data URL base64: {e}")))?;
+                        .map_err(|e| NeuronError::invalid_input(format!("invalid data URL base64: {e}")))?;
                     let fmt = if header.contains("png") { "png" }
                               else if header.contains("jpeg") || header.contains("jpg") { "jpeg" }
                               else if header.contains("webp") { "webp" }
@@ -145,16 +145,16 @@ impl CandleYoloRuntime {
                     // HTTP URL — download via reqwest
                     let client = reqwest::Client::new();
                     let resp = client.get(url).send().await.map_err(|e| {
-                        NeureError::invalid_input(format!("failed to download image: {e}"))
+                        NeuronError::invalid_input(format!("failed to download image: {e}"))
                     })?;
                     let bytes = resp.bytes().await.map_err(|e| {
-                        NeureError::invalid_input(format!("failed to read image bytes: {e}"))
+                        NeuronError::invalid_input(format!("failed to read image bytes: {e}"))
                     })?;
                     Ok((bytes.to_vec(), "remote"))
                 }
             }
             VisionImageSource::FileId { .. } => {
-                Err(NeureError::not_implemented(
+                Err(NeuronError::not_implemented(
                     "file_id image source requires a host-supplied storage backend".to_string(),
                 ))
             }
@@ -169,7 +169,7 @@ impl CandleYoloRuntime {
     /// v1.0 uses a deterministic pseudo-architecture when no real
     /// weights are available; the shape and pipeline are correct.
     #[cfg(feature = "candle")]
-    fn forward_pass(&self, letterboxed: &[u8]) -> Result<Vec<RawDetection>, NeureError> {
+    fn forward_pass(&self, letterboxed: &[u8]) -> Result<Vec<RawDetection>, NeuronError> {
         use candle_core::{Device, Tensor};
         use super::yolov8_arch::Yolov8Forward;
 
@@ -179,7 +179,7 @@ impl CandleYoloRuntime {
         };
 
         if letterboxed.len() != (INPUT_SIZE * INPUT_SIZE * 3) as usize {
-            return Err(NeureError::invalid_input(format!(
+            return Err(NeuronError::invalid_input(format!(
                 "letterboxed image has {} bytes, expected {}",
                 letterboxed.len(),
                 INPUT_SIZE * INPUT_SIZE * 3
@@ -190,26 +190,26 @@ impl CandleYoloRuntime {
             (1, 3, INPUT_SIZE as usize, INPUT_SIZE as usize),
             &device,
         )
-        .map_err(|e| NeureError::invalid_input(format!("tensor build: {e}")))?;
+        .map_err(|e| NeuronError::invalid_input(format!("tensor build: {e}")))?;
 
         let yolo = Yolov8Forward::new(&device, 80)
-            .map_err(|e| NeureError::invalid_input(format!("YOLOv8 build: {e}")))?;
+            .map_err(|e| NeuronError::invalid_input(format!("YOLOv8 build: {e}")))?;
         yolo.forward(&input)
-            .map_err(|e| NeureError::invalid_input(format!("forward: {e}")))
+            .map_err(|e| NeuronError::invalid_input(format!("forward: {e}")))
     }
 
     /// Stub for feature-off builds.
     #[cfg(not(feature = "candle"))]
-    fn forward_pass(&self, _letterboxed: &[u8]) -> Result<Vec<RawDetection>, NeureError> {
+    fn forward_pass(&self, _letterboxed: &[u8]) -> Result<Vec<RawDetection>, NeuronError> {
         if let Some(path) = &self.model_path {
             if !Path::new(path).exists() {
-                return Err(NeureError::not_initialized(format!(
-                    "vision model not found at NEURE_VISION_MODEL_PATH={}",
+                return Err(NeuronError::not_initialized(format!(
+                    "vision model not found at NEURON_VISION_MODEL_PATH={}",
                     path.display()
                 )));
             }
         }
-        Err(NeureError::not_implemented(
+        Err(NeuronError::not_implemented(
             "YOLOv8 forward pass requires --features candle (currently disabled)".to_string(),
         ))
     }
@@ -219,15 +219,15 @@ impl CandleYoloRuntime {
     /// YOLOv8-cls uses the same CSPDarknet backbone + global average pool + linear head.
     /// Output is a 1-D tensor of length `num_classes`. Softmax is applied
     /// by the caller; this returns raw logits.
-    fn forward_classify(&self, _letterboxed: &[u8]) -> Result<Vec<f32>, NeureError> {
+    fn forward_classify(&self, _letterboxed: &[u8]) -> Result<Vec<f32>, NeuronError> {
         if let Some(path) = &self.model_path
             && !Path::new(path).exists() {
-                return Err(NeureError::not_initialized(format!(
-                    "vision classify model not found at NEURE_VISION_MODEL_PATH={}",
+                return Err(NeuronError::not_initialized(format!(
+                    "vision classify model not found at NEURON_VISION_MODEL_PATH={}",
                     path.display()
                 )));
             }
-        Err(NeureError::not_implemented(
+        Err(NeuronError::not_implemented(
             "YOLOv8 classify head not yet implemented; pipeline is in place"
                 .to_string(),
         ))
@@ -236,16 +236,16 @@ impl CandleYoloRuntime {
     /// Segmentation forward pass: returns one PNG-encoded mask per detection.
     /// YOLOv8-seg produces a prototype mask (32 channels of 160x160 features)
     /// that's combined with per-instance mask coefficients at decode time.
-    fn forward_segment_masks(&self, _letterboxed: &[u8]) -> Result<Vec<Vec<u8>>, NeureError> {
-        Err(NeureError::not_implemented(
+    fn forward_segment_masks(&self, _letterboxed: &[u8]) -> Result<Vec<Vec<u8>>, NeuronError> {
+        Err(NeuronError::not_implemented(
             "YOLOv8 seg head not yet implemented; pipeline is in place"
                 .to_string(),
         ))
     }
 
     /// Pose forward pass: returns 17 COCO keypoints (x, y, conf) per detection.
-    fn forward_pose_keypoints(&self, _letterboxed: &[u8]) -> Result<Vec<Vec<(f32, f32, f32)>>, NeureError> {
-        Err(NeureError::not_implemented(
+    fn forward_pose_keypoints(&self, _letterboxed: &[u8]) -> Result<Vec<Vec<(f32, f32, f32)>>, NeuronError> {
+        Err(NeuronError::not_implemented(
             "YOLOv8 pose head not yet implemented; pipeline is in place"
                 .to_string(),
         ))
@@ -324,7 +324,7 @@ impl VisionRuntime for CandleYoloRuntime {
     }
 
     fn list_models(&self) -> Vec<ModelInfo> {
-        let mut info = ModelInfo::new(self.model_id.clone(), "neure");
+        let mut info = ModelInfo::new(self.model_id.clone(), "neuron");
         info.capabilities = Some(vec![
             "vision".to_string(),
             "detect".to_string(),

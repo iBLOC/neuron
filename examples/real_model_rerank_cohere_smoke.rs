@@ -13,10 +13,10 @@
 //! account. Useful for CI on machines that should not hit external
 //! services.
 //!
-//! ## Real mode (requires `NEURE_COHERE_API_KEY`)
+//! ## Real mode (requires `NEURON_COHERE_API_KEY`)
 //!
 //! If the env var is set, the smoke instead points the runtime at
-//! `https://api.cohere.com/v1/rerank` (or `NEURE_COHERE_ENDPOINT` if
+//! `https://api.cohere.com/v1/rerank` (or `NEURON_COHERE_ENDPOINT` if
 //! set) and exercises the real API. Use this for a one-off check
 //! that your API key works end-to-end.
 //!
@@ -25,31 +25,31 @@
 //! cargo run --example real_model_rerank_cohere_smoke --features candle
 //!
 //! # Real Cohere (consumes credits):
-//! NEURE_COHERE_API_KEY=... cargo run --example real_model_rerank_cohere_smoke --features candle
+//! NEURON_COHERE_API_KEY=... cargo run --example real_model_rerank_cohere_smoke --features candle
 //! ```
 
 use std::time::Duration;
 
-use neure_lib::rerank::cohere::spawn_mock;
-use neure_lib::{run_embedded, NeureConfig, NeureEmbedConfig, RerankRequest};
+use neuron_lib::rerank::cohere::spawn_mock;
+use neuron_lib::{run_embedded, NeuronConfig, NeuronEmbedConfig, RerankRequest};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let real_mode = std::env::var("NEURE_COHERE_API_KEY")
+    let real_mode = std::env::var("NEURON_COHERE_API_KEY")
         .ok()
         .filter(|s| !s.is_empty())
         .is_some();
 
     let (endpoint, model) = if real_mode {
-        let endpoint = std::env::var("NEURE_COHERE_ENDPOINT")
+        let endpoint = std::env::var("NEURON_COHERE_ENDPOINT")
             .unwrap_or_else(|_| "https://api.cohere.com".to_string());
-        let model = std::env::var("NEURE_COHERE_MODEL")
+        let model = std::env::var("NEURON_COHERE_MODEL")
             .unwrap_or_else(|_| "rerank-english-v3.0".to_string());
         eprintln!("[smoke] REAL mode — endpoint={endpoint}, model={model}");
         (endpoint, model)
     } else {
         let endpoint = spawn_mock(None, Some(true)).await;
-        eprintln!("[smoke] MOCK mode (no NEURE_COHERE_API_KEY) — endpoint={endpoint}");
+        eprintln!("[smoke] MOCK mode (no NEURON_COHERE_API_KEY) — endpoint={endpoint}");
         (endpoint, "rerank-english-v3.0".to_string())
     };
 
@@ -58,28 +58,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // (/v1/rerank -> CohereRerankRuntime.rerank -> wire out), which
     // a unit test using CohereRerankRuntime::rerank directly would
     // miss.
-    let port: u16 = std::env::var("NEURE_PORT")
+    let port: u16 = std::env::var("NEURON_PORT")
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
-    let cfg = NeureEmbedConfig {
+    let cfg = NeuronEmbedConfig {
         port,
-        config: NeureConfig::new(),
+        config: NeuronConfig::new(),
     };
     let handle = run_embedded(cfg).await?;
     let bind_port = handle.addr.port();
     eprintln!("[smoke] embedded server bound on 127.0.0.1:{bind_port}");
 
-    // The runtime reads NEURE_* env vars on load(), so set them now
+    // The runtime reads NEURON_* env vars on load(), so set them now
     // before exercising the endpoint. The HTTP handler instantiates
     // CohereRerankRuntime per-request via the runtime registry, so
     // each request re-reads the env. We mutate the process env via
     // std::env::set_var — fine for a single-process smoke test.
     unsafe {
-        std::env::set_var("NEURE_RERANK_RUNTIME", "cohere");
-        std::env::set_var("NEURE_COHERE_API_KEY", "smoke-test-key");
-        std::env::set_var("NEURE_COHERE_ENDPOINT", &endpoint);
-        std::env::set_var("NEURE_COHERE_MODEL", &model);
+        std::env::set_var("NEURON_RERANK_RUNTIME", "cohere");
+        std::env::set_var("NEURON_COHERE_API_KEY", "smoke-test-key");
+        std::env::set_var("NEURON_COHERE_ENDPOINT", &endpoint);
+        std::env::set_var("NEURON_COHERE_MODEL", &model);
     }
 
     let client = reqwest::Client::builder()

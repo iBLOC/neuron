@@ -23,7 +23,7 @@ pub struct ModelRegistration {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NeureConfig {
+pub struct NeuronConfig {
     pub port: u16,
     pub host: String,
     pub llm_model_path: Option<String>,
@@ -38,7 +38,7 @@ pub struct NeureConfig {
     /// One or more filesystem roots scanned for downloaded model
     /// weights. Models are searched in order; the first directory
     /// that contains a `{engine}/{id}/` subdirectory wins. Defaults
-    /// to a single entry `$HOME/.neure/models/`.
+    /// to a single entry `$HOME/.neuron/models/`.
     pub model_dirs: Vec<PathBuf>,
     /// Source id used when no per-engine or per-model override is
     /// set. Defaults to `"modelscope"`.
@@ -69,7 +69,7 @@ pub enum DeviceSelection {
     Vulkan,
 }
 
-impl NeureConfig {
+impl NeuronConfig {
     pub fn default_port() -> u16 {
         8083
     }
@@ -78,10 +78,36 @@ impl NeureConfig {
         "0.0.0.0".to_string()
     }
 
-    /// Default model directory: `$HOME/.neure/models/`.
+    /// Default model directory: `$HOME/.neuron/models/`.
+    ///
+    /// Deliberately does not touch the filesystem, so callers that want
+    /// a stable path (tests, path arithmetic) get one. Use
+    /// [`Self::resolved_model_dir`] when bootstrapping a config.
     pub fn default_model_dir() -> PathBuf {
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        PathBuf::from(home).join(".neure").join("models")
+        PathBuf::from(home).join(".neuron").join("models")
+    }
+
+    /// [`Self::default_model_dir`] plus a migration fallback: when the
+    /// new path is absent but the pre-rename `$HOME/.neure/models/`
+    /// exists, the old path is returned so an already-downloaded model
+    /// library survives the rename.
+    pub fn resolved_model_dir() -> PathBuf {
+        let current = Self::default_model_dir();
+        if current.is_dir() {
+            return current;
+        }
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        let legacy = PathBuf::from(home).join(".neure").join("models");
+        if legacy.is_dir() {
+            tracing::warn!(
+                legacy = %legacy.display(),
+                replacement = %current.display(),
+                "using the pre-rename model directory; move it to the new path to silence this",
+            );
+            return legacy;
+        }
+        current
     }
 
     /// Default candle device for inference. Returns CPU since
@@ -105,7 +131,7 @@ impl NeureConfig {
             default_tts_model: None,
             default_asr_model: None,
             default_rerank_model: None,
-            model_dirs: vec![Self::default_model_dir()],
+            model_dirs: vec![Self::resolved_model_dir()],
             default_source_id: "modelscope".to_string(),
             per_engine_source: HashMap::new(),
             per_model_source: HashMap::new(),
@@ -335,69 +361,135 @@ impl NeureConfig {
     }
 }
 
-fn apply_port_env(cfg: &mut NeureConfig, env: &HashMap<String, String>) {
-    // NEURE_PORT: parses as u16, invalid values fall back to the
+/// Current env-var prefix. Every public knob is read as
+/// `NEURON_<SUFFIX>`.
+const ENV_PREFIX: &str = "NEURON_";
+
+/// Prefix used before the neure → neuron rename. Still honored so
+/// deployed configs keep working; every fallback hit logs a warning.
+const LEGACY_ENV_PREFIX: &str = "NEURE_";
+
+/// Read an env var by suffix, preferring `NEURON_<suffix>` and falling
+/// back to the pre-rename `NEURE_<suffix>`.
+///
+/// `suffix` is the part after the prefix, e.g. `"LLM_MODEL_PATH"`.
+pub fn env_var(suffix: &str) -> Option<String> {
+    resolve_env(suffix, |key| std::env::var(key).ok())
+}
+
+/// [`env_var`] against a caller-supplied snapshot, such as the map
+/// handed to [`NeuronConfig::from_env_map`].
+pub fn env_map_get(env: &HashMap<String, String>, suffix: &str) -> Option<String> {
+    resolve_env(suffix, |key| env.get(key).cloned())
+}
+
+/// Result-returning counterpart of [`env_var`], so call sites that
+/// `match` or `if let Ok(..)` on `std::env::var` keep their shape. An
+/// unset var and a non-UTF-8 var are both reported as `NotPresent`.
+pub fn env_var_result(suffix: &str) -> Result<String, std::env::VarError> {
+    match resolve_env(suffix, |key| std::env::var(key).ok()) {
+        Some(v) => Ok(v),
+        None => Err(std::env::VarError::NotPresent),
+    }
+}
+
+fn resolve_env(suffix: &str, lookup: impl Fn(&str) -> Option<String>) -> Option<String> {
+    let current = format!("{ENV_PREFIX}{suffix}");
+    if let Some(v) = lookup(&current) {
+        return Some(v);
+    }
+    let legacy = format!("{LEGACY_ENV_PREFIX}{suffix}");
+    let v = lookup(&legacy)?;
+    tracing::warn!(
+        legacy = %legacy,
+        replacement = %current,
+        "env var uses the pre-rename name; update it, this fallback is temporary",
+    );
+    Some(v)
+}
+
+/// Strip either the current or the legacy prefix. Warns when the legacy
+/// one matched, mirroring [`resolve_env`].
+fn strip_env_prefix<'a>(key: &'a str, suffix: &str) -> Option<&'a str> {
+    let current = format!("{ENV_PREFIX}{suffix}");
+    if let Some(rest) = key.strip_prefix(&current) {
+        return Some(rest);
+    }
+    let legacy = format!("{LEGACY_ENV_PREFIX}{suffix}");
+    let rest = key.strip_prefix(&legacy)?;
+    tracing::warn!(
+        legacy = %key,
+        replacement = %format!("{current}{rest}"),
+        "env var uses the pre-rename name; update it, this fallback is temporary",
+    );
+    Some(rest)
+}
+
+fn apply_port_env(cfg: &mut NeuronConfig, env: &HashMap<String, String>) {
+    // NEURON_PORT: parses as u16, invalid values fall back to the
     // default rather than panicking — env var typos shouldn't
     // crash startup.
-    if let Some(v) = env.get("NEURE_PORT")
-        && let Ok(port) = v.parse::<u16>() {
-            cfg.port = port;
-        }
+    if let Some(v) = env_map_get(env, "PORT")
+        && let Ok(port) = v.parse::<u16>()
+    {
+        cfg.port = port;
+    }
 }
 
-fn apply_host_env(cfg: &mut NeureConfig, env: &HashMap<String, String>) {
-    // NEURE_HOST: any non-empty string wins. Empty values fall
-    // through to the default (0.0.0.0) so a stray `NEURE_HOST=`
+fn apply_host_env(cfg: &mut NeuronConfig, env: &HashMap<String, String>) {
+    // NEURON_HOST: any non-empty string wins. Empty values fall
+    // through to the default (0.0.0.0) so a stray `NEURON_HOST=`
     // shell export doesn't break bind.
-    if let Some(v) = env.get("NEURE_HOST")
-        && !v.is_empty() {
-            cfg.host = v.clone();
-        }
+    if let Some(v) = env_map_get(env, "HOST")
+        && !v.is_empty()
+    {
+        cfg.host = v;
+    }
 }
 
-fn apply_model_dirs_env(cfg: &mut NeureConfig, env: &HashMap<String, String>) {
-    // NEURE_MODEL_DIRS (multi-value, colon-separated) takes
-    // priority over NEURE_MODEL_DIR (single-value legacy).
-    if let Some(dirs) = env.get("NEURE_MODEL_DIRS") {
+fn apply_model_dirs_env(cfg: &mut NeuronConfig, env: &HashMap<String, String>) {
+    // NEURON_MODEL_DIRS (multi-value, colon-separated) takes
+    // priority over NEURON_MODEL_DIR (single-value legacy).
+    if let Some(dirs) = env_map_get(env, "MODEL_DIRS") {
         cfg.model_dirs = dirs
             .split(':')
             .filter(|s| !s.is_empty())
             .map(PathBuf::from)
             .collect();
-    } else if let Some(dir) = env.get("NEURE_MODEL_DIR") {
+    } else if let Some(dir) = env_map_get(env, "MODEL_DIR") {
         cfg.model_dirs = vec![PathBuf::from(dir)];
     }
 }
 
-fn apply_default_source_env(cfg: &mut NeureConfig, env: &HashMap<String, String>) {
-    if let Some(v) = env.get("NEURE_DEFAULT_SOURCE") {
-        cfg.default_source_id = v.clone();
+fn apply_default_source_env(cfg: &mut NeuronConfig, env: &HashMap<String, String>) {
+    if let Some(v) = env_map_get(env, "DEFAULT_SOURCE") {
+        cfg.default_source_id = v;
     }
 }
 
-fn apply_per_engine_sources_env(cfg: &mut NeureConfig, env: &HashMap<String, String>) {
+fn apply_per_engine_sources_env(cfg: &mut NeuronConfig, env: &HashMap<String, String>) {
     let engine_map: &[(EngineType, &str)] = &[
-        (EngineType::Llm, "NEURE_LLM_SOURCE"),
-        (EngineType::Tts, "NEURE_TTS_SOURCE"),
-        (EngineType::Asr, "NEURE_ASR_SOURCE"),
-        (EngineType::Rerank, "NEURE_RERANK_SOURCE"),
+        (EngineType::Llm, "LLM_SOURCE"),
+        (EngineType::Tts, "TTS_SOURCE"),
+        (EngineType::Asr, "ASR_SOURCE"),
+        (EngineType::Rerank, "RERANK_SOURCE"),
     ];
-    for (engine, var) in engine_map {
-        if let Some(v) = env.get(*var) {
-            cfg.per_engine_source.insert(*engine, v.clone());
+    for (engine, suffix) in engine_map {
+        if let Some(v) = env_map_get(env, suffix) {
+            cfg.per_engine_source.insert(*engine, v);
         }
     }
 }
 
-fn apply_per_model_sources_env(cfg: &mut NeureConfig, env: &HashMap<String, String>) {
-    // Per-model: NEURE_MODEL_SOURCE_<ENGINE>_<ID_UPPER>.
-    // For example, NEURE_MODEL_SOURCE_LLM_QWEN2_5_0_5B=qwen2-5-0-5b → "llm/qwen2-5-0-5b"
+fn apply_per_model_sources_env(cfg: &mut NeuronConfig, env: &HashMap<String, String>) {
+    // Per-model: NEURON_MODEL_SOURCE_<ENGINE>_<ID_UPPER>.
+    // For example, NEURON_MODEL_SOURCE_LLM_QWEN2_5_0_5B=qwen2-5-0-5b → "llm/qwen2-5-0-5b"
     // (We keep underscores as hyphens in the model_id portion.
     // A trailing dot-separated version like `qwen2.5-0.5b` is not
     // representable in env-var form; users can call `with_model_source`
     // directly for those.)
     for (k, v) in env {
-        if let Some(rest) = k.strip_prefix("NEURE_MODEL_SOURCE_") {
+        if let Some(rest) = strip_env_prefix(k, "MODEL_SOURCE_") {
             let lower = rest.to_lowercase();
             if let Some((engine, model_id)) = lower.split_once('_') {
                 let engine_typed = match engine {
@@ -417,18 +509,19 @@ fn apply_per_model_sources_env(cfg: &mut NeureConfig, env: &HashMap<String, Stri
     }
 }
 
-fn apply_source_endpoints_env(cfg: &mut NeureConfig, env: &HashMap<String, String>) {
-    // Source endpoints: NEURE_SOURCE_<ID>_ENDPOINT.
+fn apply_source_endpoints_env(cfg: &mut NeuronConfig, env: &HashMap<String, String>) {
+    // Source endpoints: NEURON_SOURCE_<ID>_ENDPOINT.
     for (k, v) in env {
-        if let Some(rest) = k.strip_prefix("NEURE_SOURCE_")
-            && let Some(source_id) = rest.strip_suffix("_ENDPOINT") {
-                let id_lower = source_id.to_lowercase();
-                cfg.source_endpoints.insert(id_lower, v.clone());
-            }
+        if let Some(rest) = strip_env_prefix(k, "SOURCE_")
+            && let Some(source_id) = rest.strip_suffix("_ENDPOINT")
+        {
+            let id_lower = source_id.to_lowercase();
+            cfg.source_endpoints.insert(id_lower, v.clone());
+        }
     }
 }
 
-impl Default for NeureConfig {
+impl Default for NeuronConfig {
     fn default() -> Self {
         Self::new()
     }
@@ -544,26 +637,26 @@ mod tests {
     use std::env;
 
     #[test]
-    fn test_neure_config_default_port_8083() {
-        let config = NeureConfig::default();
+    fn test_neuron_config_default_port_8083() {
+        let config = NeuronConfig::default();
         assert_eq!(config.port, 8083);
     }
 
     #[test]
-    fn test_neure_config_default_host_0_0_0_0() {
-        let config = NeureConfig::default();
+    fn test_neuron_config_default_host_0_0_0_0() {
+        let config = NeuronConfig::default();
         assert_eq!(config.host, "0.0.0.0");
     }
 
     #[test]
-    fn test_neure_config_default_device_auto() {
-        let config = NeureConfig::default();
+    fn test_neuron_config_default_device_auto() {
+        let config = NeuronConfig::default();
         assert_eq!(config.device, DeviceSelection::Auto);
     }
 
     #[test]
-    fn test_neure_config_serialize_roundtrip() {
-        let config = NeureConfig {
+    fn test_neuron_config_serialize_roundtrip() {
+        let config = NeuronConfig {
             port: 9000,
             host: "127.0.0.1".to_string(),
             llm_model_path: Some("/models/llm".to_string()),
@@ -584,7 +677,7 @@ mod tests {
         };
 
         let json = serde_json::to_string(&config).unwrap();
-        let parsed: NeureConfig = serde_json::from_str(&json).unwrap();
+        let parsed: NeuronConfig = serde_json::from_str(&json).unwrap();
 
         assert_eq!(parsed.port, 9000);
         assert_eq!(parsed.host, "127.0.0.1");
@@ -598,8 +691,8 @@ mod tests {
     }
 
     #[test]
-    fn test_neure_config_builder_pattern() {
-        let config = NeureConfig::new()
+    fn test_neuron_config_builder_pattern() {
+        let config = NeuronConfig::new()
             .with_port(9090)
             .with_device(DeviceSelection::Apple)
             .with_llm_model("qwen3-0.6b");
@@ -610,8 +703,8 @@ mod tests {
     }
 
     #[test]
-    fn test_neure_config_with_tts_asr_rerank_model_builders() {
-        let config = NeureConfig::new()
+    fn test_neuron_config_with_tts_asr_rerank_model_builders() {
+        let config = NeuronConfig::new()
             .with_tts_model("voxcpm-0.5b")
             .with_asr_model("whisper-base")
             .with_rerank_model("bge-reranker-base");
@@ -626,24 +719,24 @@ mod tests {
     }
 
     #[test]
-    fn test_neure_config_default_validate_returns_ok() {
-        let c = NeureConfig::new();
+    fn test_neuron_config_default_validate_returns_ok() {
+        let c = NeuronConfig::new();
         assert!(c.validate().is_ok());
     }
 
     #[test]
-    fn test_neure_config_validate_after_from_env_map_returns_ok() {
+    fn test_neuron_config_validate_after_from_env_map_returns_ok() {
         let mut env = HashMap::new();
-        env.insert("NEURE_PORT".to_string(), "9999".to_string());
-        env.insert("NEURE_HOST".to_string(), "127.0.0.1".to_string());
-        let c = NeureConfig::from_env_map(&env);
+        env.insert("NEURON_PORT".to_string(), "9999".to_string());
+        env.insert("NEURON_HOST".to_string(), "127.0.0.1".to_string());
+        let c = NeuronConfig::from_env_map(&env);
         assert!(c.validate().is_ok());
     }
 
     #[test]
-    fn test_neure_config_with_model_builders_accept_string_and_str() {
+    fn test_neuron_config_with_model_builders_accept_string_and_str() {
         let owned = String::from("qwen3-0.6b");
-        let config = NeureConfig::new()
+        let config = NeuronConfig::new()
             .with_llm_model("qwen3-0.6b")
             .with_tts_model(String::from("voxcpm-0.5b"))
             .with_asr_model(owned.as_str())
@@ -661,7 +754,7 @@ mod tests {
 
     #[test]
     fn test_with_model_dir_appends_to_vec() {
-        let c = NeureConfig::new()
+        let c = NeuronConfig::new()
             .with_model_dir("/opt/models")
             .with_model_dir("/home/user/models");
         assert_eq!(c.model_dirs.len(), 3); // 1 default + 2 added
@@ -671,13 +764,13 @@ mod tests {
 
     #[test]
     fn test_with_default_source_overrides() {
-        let c = NeureConfig::new().with_default_source("modelscope");
+        let c = NeuronConfig::new().with_default_source("modelscope");
         assert_eq!(c.default_source_id, "modelscope");
     }
 
     #[test]
     fn test_with_engine_source_adds_to_map() {
-        let c = NeureConfig::new()
+        let c = NeuronConfig::new()
             .with_engine_source(EngineType::Llm, "modelscope")
             .with_engine_source(EngineType::Tts, "huggingface");
         assert_eq!(
@@ -694,7 +787,7 @@ mod tests {
     #[test]
     fn test_with_model_source_uses_engine_id_key() {
         let c =
-            NeureConfig::new().with_model_source(EngineType::Llm, "qwen2.5-0.5b", "private-hub");
+            NeuronConfig::new().with_model_source(EngineType::Llm, "qwen2.5-0.5b", "private-hub");
         assert_eq!(
             c.per_model_source.get("llm/qwen2.5-0.5b").unwrap(),
             "private-hub"
@@ -703,7 +796,7 @@ mod tests {
 
     #[test]
     fn test_with_source_endpoint_stores_in_map() {
-        let c = NeureConfig::new().with_source_endpoint("huggingface", "https://hf-mirror.com");
+        let c = NeuronConfig::new().with_source_endpoint("huggingface", "https://hf-mirror.com");
         assert_eq!(
             c.source_endpoints.get("huggingface").unwrap(),
             "https://hf-mirror.com"
@@ -711,20 +804,20 @@ mod tests {
     }
 
     #[test]
-    fn test_from_env_parses_neure_model_dirs_multi_value() {
+    fn test_from_env_parses_neuron_model_dirs_multi_value() {
         let mut env = HashMap::new();
-        env.insert("NEURE_MODEL_DIRS".to_string(), "/a:/b:/c".to_string());
-        let c = NeureConfig::from_env_map(&env);
+        env.insert("NEURON_MODEL_DIRS".to_string(), "/a:/b:/c".to_string());
+        let c = NeuronConfig::from_env_map(&env);
         assert_eq!(c.model_dirs.len(), 3);
         assert_eq!(c.model_dirs[0].to_str().unwrap(), "/a");
         assert_eq!(c.model_dirs[2].to_str().unwrap(), "/c");
     }
 
     #[test]
-    fn test_from_env_parses_neure_model_dir_legacy_single() {
+    fn test_from_env_parses_neuron_model_dir_legacy_single() {
         let mut env = HashMap::new();
-        env.insert("NEURE_MODEL_DIR".to_string(), "/single".to_string());
-        let c = NeureConfig::from_env_map(&env);
+        env.insert("NEURON_MODEL_DIR".to_string(), "/single".to_string());
+        let c = NeuronConfig::from_env_map(&env);
         assert_eq!(c.model_dirs.len(), 1);
         assert_eq!(c.model_dirs[0].to_str().unwrap(), "/single");
     }
@@ -732,9 +825,9 @@ mod tests {
     #[test]
     fn test_from_env_model_dirs_takes_priority_over_legacy_model_dir() {
         let mut env = HashMap::new();
-        env.insert("NEURE_MODEL_DIRS".to_string(), "/multi".to_string());
-        env.insert("NEURE_MODEL_DIR".to_string(), "/single".to_string());
-        let c = NeureConfig::from_env_map(&env);
+        env.insert("NEURON_MODEL_DIRS".to_string(), "/multi".to_string());
+        env.insert("NEURON_MODEL_DIR".to_string(), "/single".to_string());
+        let c = NeuronConfig::from_env_map(&env);
         assert_eq!(c.model_dirs.len(), 1);
         assert_eq!(c.model_dirs[0].to_str().unwrap(), "/multi");
     }
@@ -742,9 +835,9 @@ mod tests {
     #[test]
     fn test_from_env_parses_per_engine_sources() {
         let mut env = HashMap::new();
-        env.insert("NEURE_LLM_SOURCE".to_string(), "modelscope".to_string());
-        env.insert("NEURE_TTS_SOURCE".to_string(), "private-tts".to_string());
-        let c = NeureConfig::from_env_map(&env);
+        env.insert("NEURON_LLM_SOURCE".to_string(), "modelscope".to_string());
+        env.insert("NEURON_TTS_SOURCE".to_string(), "private-tts".to_string());
+        let c = NeuronConfig::from_env_map(&env);
         assert_eq!(
             c.per_engine_source.get(&EngineType::Llm).unwrap(),
             "modelscope"
@@ -760,10 +853,10 @@ mod tests {
     fn test_from_env_parses_source_endpoint() {
         let mut env = HashMap::new();
         env.insert(
-            "NEURE_SOURCE_HUGGINGFACE_ENDPOINT".to_string(),
+            "NEURON_SOURCE_HUGGINGFACE_ENDPOINT".to_string(),
             "https://hf-mirror.com".to_string(),
         );
-        let c = NeureConfig::from_env_map(&env);
+        let c = NeuronConfig::from_env_map(&env);
         assert_eq!(
             c.source_endpoints.get("huggingface").unwrap(),
             "https://hf-mirror.com"
@@ -771,57 +864,119 @@ mod tests {
     }
 
     #[test]
-    fn test_from_env_parses_neure_port() {
+    fn test_from_env_parses_neuron_port() {
         let mut env = HashMap::new();
-        env.insert("NEURE_PORT".to_string(), "9999".to_string());
-        let c = NeureConfig::from_env_map(&env);
+        env.insert("NEURON_PORT".to_string(), "9999".to_string());
+        let c = NeuronConfig::from_env_map(&env);
         assert_eq!(c.port, 9999);
     }
 
     #[test]
-    fn test_from_env_parses_neure_port_invalid_value_keeps_default() {
+    fn test_from_env_parses_neuron_port_invalid_value_keeps_default() {
         let mut env = HashMap::new();
-        env.insert("NEURE_PORT".to_string(), "not-a-number".to_string());
-        let c = NeureConfig::from_env_map(&env);
-        assert_eq!(c.port, NeureConfig::default_port());
+        env.insert("NEURON_PORT".to_string(), "not-a-number".to_string());
+        let c = NeuronConfig::from_env_map(&env);
+        assert_eq!(c.port, NeuronConfig::default_port());
     }
 
     #[test]
-    fn test_from_env_parses_neure_host() {
+    fn test_from_env_parses_neuron_host() {
         let mut env = HashMap::new();
-        env.insert("NEURE_HOST".to_string(), "127.0.0.1".to_string());
-        let c = NeureConfig::from_env_map(&env);
+        env.insert("NEURON_HOST".to_string(), "127.0.0.1".to_string());
+        let c = NeuronConfig::from_env_map(&env);
         assert_eq!(c.host, "127.0.0.1");
     }
 
     #[test]
-    fn test_from_env_parses_neure_host_empty_string_keeps_default() {
+    fn test_from_env_parses_neuron_host_empty_string_keeps_default() {
         let mut env = HashMap::new();
-        env.insert("NEURE_HOST".to_string(), "".to_string());
-        let c = NeureConfig::from_env_map(&env);
-        assert_eq!(c.host, NeureConfig::default_host());
+        env.insert("NEURON_HOST".to_string(), "".to_string());
+        let c = NeuronConfig::from_env_map(&env);
+        assert_eq!(c.host, NeuronConfig::default_host());
     }
 
     #[test]
-    fn test_default_model_dir_ends_with_neure_models() {
-        let c = NeureConfig::new();
-        assert!(c.model_dirs[0].ends_with(".neure/models"));
+    fn test_default_model_dir_ends_with_neuron_models() {
+        // Asserts the pure path helper; `NeuronConfig::new` layers the
+        // legacy fallback on top and is covered separately.
+        assert!(NeuronConfig::default_model_dir().ends_with(".neuron/models"));
+    }
+
+    #[test]
+    fn test_env_map_get_prefers_current_name_over_legacy() {
+        let mut env = HashMap::new();
+        env.insert("NEURON_PORT".to_string(), "1111".to_string());
+        env.insert("NEURE_PORT".to_string(), "2222".to_string());
+        assert_eq!(env_map_get(&env, "PORT").unwrap(), "1111");
+    }
+
+    #[test]
+    fn test_env_map_get_falls_back_to_legacy_name() {
+        let mut env = HashMap::new();
+        env.insert("NEURE_PORT".to_string(), "2222".to_string());
+        assert_eq!(env_map_get(&env, "PORT").unwrap(), "2222");
+    }
+
+    #[test]
+    fn test_env_map_get_returns_none_when_neither_name_is_set() {
+        assert!(env_map_get(&HashMap::new(), "PORT").is_none());
+    }
+
+    #[test]
+    fn test_from_env_map_accepts_legacy_port() {
+        let mut env = HashMap::new();
+        env.insert("NEURE_PORT".to_string(), "9999".to_string());
+        assert_eq!(NeuronConfig::from_env_map(&env).port, 9999);
+    }
+
+    #[test]
+    fn test_from_env_map_accepts_legacy_model_dirs() {
+        let mut env = HashMap::new();
+        env.insert("NEURE_MODEL_DIRS".to_string(), "/a:/b".to_string());
+        let c = NeuronConfig::from_env_map(&env);
+        assert_eq!(c.model_dirs.len(), 2);
+        assert_eq!(c.model_dirs[0].to_str().unwrap(), "/a");
+    }
+
+    #[test]
+    fn test_from_env_map_accepts_legacy_per_engine_source() {
+        let mut env = HashMap::new();
+        env.insert("NEURE_LLM_SOURCE".to_string(), "hf-mirror".to_string());
+        let c = NeuronConfig::from_env_map(&env);
+        assert_eq!(
+            c.per_engine_source.get(&EngineType::Llm).unwrap(),
+            "hf-mirror"
+        );
+    }
+
+    #[test]
+    fn test_from_env_map_accepts_legacy_source_endpoint() {
+        let mut env = HashMap::new();
+        env.insert(
+            "NEURE_SOURCE_HUGGINGFACE_ENDPOINT".to_string(),
+            "https://hf-mirror.com".to_string(),
+        );
+        let c = NeuronConfig::from_env_map(&env);
+        assert_eq!(
+            c.source_endpoints.get("huggingface").unwrap(),
+            "https://hf-mirror.com"
+        );
     }
 
     #[test]
     fn test_ensure_dir_nonexistent_path_returns_does_not_exist_error() {
-        let dir = std::env::temp_dir().join("neure-test-does-not-exist-12345");
-        let result = ensure_dir(&dir, "NEURE_TEST_RESOLVE_VAR");
+        let dir = std::env::temp_dir().join("neuron-test-does-not-exist-12345");
+        let result = ensure_dir(&dir, "NEURON_TEST_RESOLVE_VAR");
         let err = result.err().unwrap();
         assert!(err.contains("does not exist"));
-        assert!(err.contains("NEURE_TEST_RESOLVE_VAR"));
+        assert!(err.contains("NEURON_TEST_RESOLVE_VAR"));
     }
 
     #[test]
     fn test_ensure_dir_file_not_directory_returns_not_a_directory_error() {
-        let path = std::env::temp_dir().join("neure-test-not-a-dir.txt");
+        let path = std::env::temp_dir().join("neuron-test-not-a-dir.txt");
         std::fs::write(&path, b"not a dir").unwrap();
-        let result = ensure_dir(&path, "NEURE_TEST_RESOLVE_VAR");
+        let result = ensure_dir(&path, "NEURON_TEST_RESOLVE_VAR");
         std::fs::remove_file(&path).ok();
         let err = result.err().unwrap();
         assert!(err.contains("is not a directory"));
@@ -830,7 +985,7 @@ mod tests {
     #[test]
     fn test_ensure_dir_existing_dir_returns_ok() {
         let dir = std::env::temp_dir();
-        let result = ensure_dir(&dir, "NEURE_TEST_RESOLVE_VAR");
+        let result = ensure_dir(&dir, "NEURON_TEST_RESOLVE_VAR");
         assert!(result.is_ok());
     }
 

@@ -4,7 +4,7 @@ title: OpenAI-compatible API Reference
 
 # OpenAI-compatible API Reference
 
-Every `/v1/*` endpoint in neure is **byte-for-byte compatible** with OpenAI's wire format. Any client that works with OpenAI / vLLM / ollama / llama.cpp server will work with neure unchanged.
+Every `/v1/*` endpoint in neuron is **byte-for-byte compatible** with OpenAI's wire format. Any client that works with OpenAI / vLLM / ollama / llama.cpp server will work with neuron unchanged.
 
 ## Routes
 
@@ -49,7 +49,7 @@ POST /v1/rerank
 
 OpenAI Rerank API. Models: `bge-reranker-base` (default, candle), `mxbai-rerank-base-v2`, `jina-reranker-base-v2`, `cohere` (HTTP proxy).
 
-### Vision (neure-specific)
+### Vision (neuron-specific)
 
 ```
 POST /v1/vision/detect
@@ -58,9 +58,9 @@ POST /v1/vision/segment
 POST /v1/vision/pose
 ```
 
-No OpenAI equivalent — neure-specific. See [Vision Tasks](/howto/vision-tasks) for full request/response shapes.
+No OpenAI equivalent — neuron-specific. See [Vision Tasks](/howto/vision-tasks) for full request/response shapes.
 
-### LoRA management (neure-specific)
+### LoRA management (neuron-specific)
 
 ```
 POST   /v1/vision/lora/register
@@ -68,7 +68,7 @@ GET    /v1/vision/lora/list
 POST   /v1/vision/lora/unregister
 ```
 
-### Models (neure-specific)
+### Models (neuron-specific)
 
 ```
 GET    /v1/models                  (list available models)
@@ -267,6 +267,6 @@ Errors follow OpenAI's error envelope shape:
 ## Next steps
 
 - [Anthropic Messages v1](/reference/anthropic) — full `/v1/messages` documentation
-- [Environment Variables](/reference/env-vars) — full `NEURE_*` matrix
-- [Vision Tasks How-to](/howto/vision-tasks) — neure-specific vision endpoints
+- [Environment Variables](/reference/env-vars) — full `NEURON_*` matrix
+- [Vision Tasks How-to](/howto/vision-tasks) — neuron-specific vision endpoints
 - [ServerState Fields](/reference/server-state) — runtime registry surface

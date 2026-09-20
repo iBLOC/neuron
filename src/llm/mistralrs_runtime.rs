@@ -1,23 +1,23 @@
-//! `MistralRsLlmRuntime` — neure adapter for [`mistralrs`] (EricLBuehler/mistral.rs).
+//! `MistralRsLlmRuntime` — neuron adapter for [`mistralrs`] (EricLBuehler/mistral.rs).
 //!
-//! Wraps the upstream `ModelBuilder` + `Model` API to satisfy neure's
-//! [`LlmRuntime`](super::LlmRuntime) trait. This gives neure instant access to
+//! Wraps the upstream `ModelBuilder` + `Model` API to satisfy neuron's
+//! [`LlmRuntime`](super::LlmRuntime) trait. This gives neuron instant access to
 //! 40+ model families (Qwen, Llama, Mistral, DeepSeek, GLM, Granite, GPT-OSS,
 //! Gemma 4 multimodal, Qwen 3-VL, Phi 4 multimodal, etc.) plus built-in
 //! PagedAttention, prefix caching, KV cache, and per-token streaming — without
-//! neure needing to maintain per-family dispatch logic.
+//! neuron needing to maintain per-family dispatch logic.
 //!
 //! **Model identifier convention**: `model_id` must be a HuggingFace repo id
 //! (e.g. `"Qwen/Qwen3-4B"`) or a local path that `hf_hub` can resolve. The
 //! runtime does NOT manage local weight files; mistral.rs handles downloads
 //! via its built-in `hf_hub` integration.
 //!
-//! **ISQ (in-situ quantization)**: controlled by `NEURE_MISTRALRS_ISQ`
+//! **ISQ (in-situ quantization)**: controlled by `NEURON_MISTRALRS_ISQ`
 //! env var. Accepts `q4_0`, `q8_0`, or `none`. Default is Q4 for safe CPU/Metal
 //! operation. On CUDA, mistral.rs's `with_auto_isq` selects the best format
 //! for the detected hardware.
 //!
-//! **License**: mistral.rs is MIT. Compatible with neure's Apache-2.0 (permissive
+//! **License**: mistral.rs is MIT. Compatible with neuron's Apache-2.0 (permissive
 //! upstream can be combined with permissive downstream).
 
 use std::sync::Arc;
@@ -31,11 +31,11 @@ use tracing::{info, warn};
 
 use super::{
     ChatChunk, ChatMessage, ChatRequest, ChatResponse, ChunkChoice, DeltaMessage, LlmRuntime,
-    ModelInfo, NeureError,
+    ModelInfo, NeuronError,
 };
 use crate::config::DeviceSelection;
 
-type ChatResult<T> = Result<T, NeureError>;
+type ChatResult<T> = Result<T, NeuronError>;
 
 /// Lazily-loaded mistral.rs Model wrapped in a single Arc.
 ///
@@ -59,8 +59,8 @@ impl MistralRsLlmRuntime {
         let id = model_id.to_string();
         let builder = ModelBuilder::new(&id).with_logging();
 
-        // ISQ resolution: NEURE_MISTRALRS_ISQ env var overrides default Q4.
-        let builder = match std::env::var("NEURE_MISTRALRS_ISQ").ok().as_deref() {
+        // ISQ resolution: NEURON_MISTRALRS_ISQ env var overrides default Q4.
+        let builder = match crate::config::env_var("MISTRALRS_ISQ").as_deref() {
             Some("none") | Some("off") | Some("None") | Some("") => {
                 builder // disable ISQ; load at native precision
             }
@@ -70,11 +70,11 @@ impl MistralRsLlmRuntime {
         };
 
         let model = builder.build().await.map_err(|e| {
-            NeureError::not_initialized(format!(
+            NeuronError::not_initialized(format!(
                 "mistralrs load failed for model '{id}': {e}. \
                  Verify the model id is a valid HuggingFace repo (e.g. 'Qwen/Qwen3-4B'). \
                  For local paths, ensure config.json + tokenizer.json + safetensors are present. \
-                 Set NEURE_MISTRALRS_ISQ=none to disable in-situ quantization."
+                 Set NEURON_MISTRALRS_ISQ=none to disable in-situ quantization."
             ))
         })?;
 
@@ -104,7 +104,7 @@ impl LlmRuntime for MistralRsLlmRuntime {
             .model
             .send_chat_request(messages)
             .await
-            .map_err(|e| NeureError::new(format!("mistralrs chat failed: {e}")))?;
+            .map_err(|e| NeuronError::new(format!("mistralrs chat failed: {e}")))?;
         chat_completion_to_response(&req, resp)
     }
 
@@ -241,7 +241,7 @@ impl crate::engine::LlmRuntime for MistralRsLlmRuntime {
         -> crate::llm::ChatResult<crate::canonical::CanonicalLlmResponse>
     {
         let chat_req = crate::llm::translators::canonical_to_chat_request(&req)
-            .map_err(|e| NeureError::new(e))?;
+            .map_err(|e| NeuronError::new(e))?;
         let chat_resp = self.chat(chat_req).await?;
         Ok(crate::llm::translators::chat_response_to_canonical(&req.model, chat_resp))
     }
@@ -250,7 +250,7 @@ impl crate::engine::LlmRuntime for MistralRsLlmRuntime {
         -> crate::llm::ChatResult<BoxStream<'static, crate::canonical::CanonicalLlmStreamEvent>>
     {
         let chat_req = crate::llm::translators::canonical_to_chat_request(&req)
-            .map_err(|e| NeureError::new(e))?;
+            .map_err(|e| NeuronError::new(e))?;
         let stream = self.chat_stream(chat_req).await?;
         use futures_util::StreamExt;
         Ok(Box::pin(stream.filter_map(|chunk| async move {
@@ -290,7 +290,7 @@ impl crate::engine::LlmRuntime for MistralRsLlmRuntime {
     fn name(&self) -> &str { "mistralrs" }
 }
 
-/// Translate neure's OpenAI-shaped `ChatRequest.messages` into
+/// Translate neuron's OpenAI-shaped `ChatRequest.messages` into
 /// mistral.rs's `TextMessages` builder. Unknown roles map to a 400-style error.
 fn req_to_text_messages(req: &ChatRequest) -> ChatResult<TextMessages> {
     let mut msgs = TextMessages::new();
@@ -312,15 +312,15 @@ fn req_to_text_messages(req: &ChatRequest) -> ChatResult<TextMessages> {
     Ok(msgs)
 }
 
-/// Convert mistral.rs's non-streaming `ChatCompletionResponse` into neure's
-/// OpenAI-shaped `ChatResponse`. neure uses `i64` for token counts (matches
+/// Convert mistral.rs's non-streaming `ChatCompletionResponse` into neuron's
+/// OpenAI-shaped `ChatResponse`. neuron uses `i64` for token counts (matches
 /// OpenAI JSON); mistral.rs uses `usize` — cast is always non-negative.
 fn chat_completion_to_response(
     req: &ChatRequest,
     resp: ChatCompletionResponse,
 ) -> ChatResult<ChatResponse> {
     let choice = resp.choices.into_iter().next().ok_or_else(|| {
-        NeureError::new("mistralrs returned ChatCompletionResponse with no choices")
+        NeuronError::new("mistralrs returned ChatCompletionResponse with no choices")
     })?;
 
     Ok(ChatResponse {

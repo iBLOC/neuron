@@ -10,7 +10,7 @@
 //! `"Represent this sentence to search relevant passages: "` BEFORE
 //! tokenization. Documents are passed through unchanged.
 //!
-//! Enable with: `NEURE_RERANK_RUNTIME=mxbai` and set `NEURE_RERANK_MODEL_PATH`
+//! Enable with: `NEURON_RERANK_RUNTIME=mxbai` and set `NEURON_RERANK_MODEL_PATH`
 //! to a directory containing config.json, tokenizer.json, and model.safetensors.
 
 use std::path::PathBuf;
@@ -24,7 +24,7 @@ use candle_transformers::models::qwen2::{Config as Qwen2Config, Model as Qwen2Mo
 use tokenizers::Tokenizer;
 
 use crate::config::{ensure_dir, DeviceSelection};
-use crate::llm::{ChatResult, ModelInfo, NeureError};
+use crate::llm::{ChatResult, ModelInfo, NeuronError};
 
 use super::{RerankRequest, RerankResponse, RerankResult, RerankRuntime, RerankUsage};
 
@@ -57,18 +57,18 @@ impl MxbaiRerankRuntime {
     }
 
     fn resolve_model_path(model: &str) -> Result<PathBuf, String> {
-        let path = match std::env::var("NEURE_RERANK_MODEL_PATH") {
+        let path = match crate::config::env_var_result("RERANK_MODEL_PATH") {
             Ok(p) => PathBuf::from(p),
             Err(_) => {
                 return Err(format!(
-                    "MxbaiRerankRuntime: set NEURE_RERANK_MODEL_PATH to a directory containing \
+                    "MxbaiRerankRuntime: set NEURON_RERANK_MODEL_PATH to a directory containing \
                      config.json + tokenizer.json + *.safetensors for model '{}'. \
                      Download mixedbread-ai/mxbai-rerank-base-v2 from HuggingFace and set the path.",
                     model
                 ));
             }
         };
-        ensure_dir(&path, "NEURE_RERANK_MODEL_PATH")?;
+        ensure_dir(&path, "NEURON_RERANK_MODEL_PATH")?;
         let config_path = path.join("config.json");
         let tokenizer_path = path.join("tokenizer.json");
         let has_weights = std::fs::read_dir(&path)
@@ -203,30 +203,30 @@ impl RerankRuntime for MxbaiRerankRuntime {
     where
         Self: Sized,
     {
-        let path = Self::resolve_model_path(model).map_err(NeureError::not_implemented)?;
-        let dev = Self::map_device(device).map_err(NeureError::not_implemented)?;
+        let path = Self::resolve_model_path(model).map_err(NeuronError::not_implemented)?;
+        let dev = Self::map_device(device).map_err(NeuronError::not_implemented)?;
 
         let config_path = path.join("config.json");
         let config_data = std::fs::read_to_string(&config_path)
-            .map_err(|e| NeureError::not_implemented(format!("read config.json: {}", e)))?;
+            .map_err(|e| NeuronError::not_implemented(format!("read config.json: {}", e)))?;
         let config: Qwen2Config = serde_json::from_str(&config_data)
-            .map_err(|e| NeureError::not_implemented(format!("parse Qwen2Config: {}", e)))?;
+            .map_err(|e| NeuronError::not_implemented(format!("parse Qwen2Config: {}", e)))?;
 
         let tokenizer_path = path.join("tokenizer.json");
         let tokenizer = Tokenizer::from_file(&tokenizer_path)
-            .map_err(|e| NeureError::not_implemented(format!("load tokenizer: {}", e)))?;
+            .map_err(|e| NeuronError::not_implemented(format!("load tokenizer: {}", e)))?;
 
         let safetensors_path = path.join("model.safetensors");
         let vb = unsafe {
             VarBuilder::from_mmaped_safetensors(&[&safetensors_path], DType::F32, &dev)
         }
-        .map_err(|e| NeureError::not_implemented(format!("load safetensors: {}", e)))?;
+        .map_err(|e| NeuronError::not_implemented(format!("load safetensors: {}", e)))?;
 
         // Qwen2 backbone: weights are stored under the "model" prefix
         // in mxbai's safetensors. Build a sub-VarBuilder for it.
         let model_vb = vb.pp("model");
         let mut qwen = Qwen2Model::new(&config, model_vb)
-            .map_err(|e| NeureError::not_implemented(format!("build Qwen2 model: {}", e)))?;
+            .map_err(|e| NeuronError::not_implemented(format!("build Qwen2 model: {}", e)))?;
         // Clear any pre-existing KV cache from a previous load.
         qwen.clear_kv_cache();
 
@@ -235,7 +235,7 @@ impl RerankRuntime for MxbaiRerankRuntime {
         let classifier = match linear(config.hidden_size, 1, vb.pp("classifier")) {
             Ok(c) => c,
             Err(_) => linear(config.hidden_size, 1, vb.pp("score")).map_err(|e| {
-                NeureError::not_implemented(format!(
+                NeuronError::not_implemented(format!(
                     "build classifier (tried 'classifier' and 'score' prefixes): {e}"
                 ))
             })?,
@@ -253,7 +253,7 @@ impl RerankRuntime for MxbaiRerankRuntime {
 
     async fn rerank(&self, req: RerankRequest) -> ChatResult<RerankResponse> {
         if req.documents.is_empty() {
-            return Err(NeureError::invalid_input("documents cannot be empty"));
+            return Err(NeuronError::invalid_input("documents cannot be empty"));
         }
 
         // Hold the lock for the entire forward loop. All forward
@@ -261,7 +261,7 @@ impl RerankRuntime for MxbaiRerankRuntime {
         // alive — keeping the model Send/Sync safe.
         let mut guard = self.inner.lock().unwrap();
         let loaded = guard.as_mut().ok_or_else(|| {
-            NeureError::not_initialized("MxbaiRerankRuntime not loaded. Call load() first.")
+            NeuronError::not_initialized("MxbaiRerankRuntime not loaded. Call load() first.")
         })?;
         let LoadedModel {
             model,
@@ -276,7 +276,7 @@ impl RerankRuntime for MxbaiRerankRuntime {
             // Clear KV cache between docs to prevent cross-doc attention bleed.
             model.clear_kv_cache();
             let score = Self::score_pair(model, classifier, tokenizer, device, &req.query, doc)
-                .map_err(NeureError::not_implemented)?;
+                .map_err(NeuronError::not_implemented)?;
             results.push(RerankResult {
                 index: i,
                 relevance_score: score,
@@ -305,7 +305,7 @@ impl RerankRuntime for MxbaiRerankRuntime {
     }
 
     fn list_models(&self) -> Vec<ModelInfo> {
-        let mut info = ModelInfo::new("mxbai-rerank-base-v2", "neure-mxbai");
+        let mut info = ModelInfo::new("mxbai-rerank-base-v2", "neuron-mxbai");
         info.capabilities = Some(vec!["rerank".to_string()]);
         vec![info]
     }
@@ -346,12 +346,12 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial]
     async fn test_mxbai_load_without_env_returns_not_implemented() {
-        unsafe { std::env::remove_var("NEURE_RERANK_MODEL_PATH") };
+        unsafe { std::env::remove_var("NEURON_RERANK_MODEL_PATH") };
         let result = MxbaiRerankRuntime::load("mxbai-rerank-base-v2", &DeviceSelection::Cpu).await;
         assert!(result.is_err());
         let err = result.err().unwrap();
         assert_eq!(err.error_type, "not_implemented");
-        assert!(err.message.contains("NEURE_RERANK_MODEL_PATH"));
+        assert!(err.message.contains("NEURON_RERANK_MODEL_PATH"));
     }
 
     #[tokio::test]

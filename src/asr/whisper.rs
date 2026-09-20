@@ -3,7 +3,7 @@
 //! Whisper (https://huggingface.co/openai/whisper-base) is OpenAI's multilingual
 //! speech recognition model. Supports transcription and translation.
 //!
-//! Enable with: `NEURE_ASR_RUNTIME=candle` and set `NEURE_ASR_MODEL_PATH` to a
+//! Enable with: `NEURON_ASR_RUNTIME=candle` and set `NEURON_ASR_MODEL_PATH` to a
 //! directory containing config.json + tokenizer.json + preprocessor_config.json + *.safetensors.
 //!
 //! Also requires `mel_filters.npz` or `mel_filters.safetensors` in the model directory
@@ -19,7 +19,7 @@ use candle_transformers::models::whisper::{self as m, audio, Config};
 use tokenizers::Tokenizer;
 
 use crate::config::{ensure_dir, DeviceSelection};
-use crate::llm::{ChatResult, NeureError};
+use crate::llm::{ChatResult, NeuronError};
 
 use super::{AsrRuntime, Transcription};
 
@@ -98,11 +98,11 @@ impl WhisperAsrRuntime {
     }
 
     fn resolve_model_path(model: &str) -> Result<PathBuf, String> {
-        let path = match std::env::var("NEURE_ASR_MODEL_PATH") {
+        let path = match crate::config::env_var_result("ASR_MODEL_PATH") {
             Ok(p) => PathBuf::from(p),
             Err(_) => {
                 return Err(format!(
-                    "WhisperAsrRuntime: set NEURE_ASR_MODEL_PATH to a directory containing \
+                    "WhisperAsrRuntime: set NEURON_ASR_MODEL_PATH to a directory containing \
                      config.json + tokenizer.json + *.safetensors + mel_filters.safetensors \
                      for Whisper model '{}' (e.g. openai/whisper-tiny). \
                      Download mel_filters from: \
@@ -111,7 +111,7 @@ impl WhisperAsrRuntime {
                 ));
             }
         };
-        ensure_dir(&path, "NEURE_ASR_MODEL_PATH")?;
+        ensure_dir(&path, "NEURON_ASR_MODEL_PATH")?;
         let config_path = path.join("config.json");
         let tokenizer_path = path.join("tokenizer.json");
         let has_weights = std::fs::read_dir(&path)
@@ -274,24 +274,24 @@ impl AsrRuntime for WhisperAsrRuntime {
     where
         Self: Sized,
     {
-        let path = Self::resolve_model_path(model).map_err(NeureError::not_implemented)?;
-        let dev = Self::map_device(device).map_err(NeureError::not_implemented)?;
+        let path = Self::resolve_model_path(model).map_err(NeuronError::not_implemented)?;
+        let dev = Self::map_device(device).map_err(NeuronError::not_implemented)?;
 
         let config_path = path.join("config.json");
         let config_data = std::fs::read_to_string(&config_path)
-            .map_err(|e| NeureError::not_implemented(format!("read config.json: {}", e)))?;
+            .map_err(|e| NeuronError::not_implemented(format!("read config.json: {}", e)))?;
         let config: Config = serde_json::from_str(&config_data)
-            .map_err(|e| NeureError::not_implemented(format!("parse config.json: {}", e)))?;
+            .map_err(|e| NeuronError::not_implemented(format!("parse config.json: {}", e)))?;
 
         let tokenizer_path = path.join("tokenizer.json");
         let tokenizer = Tokenizer::from_file(&tokenizer_path)
-            .map_err(|e| NeureError::not_implemented(format!("load tokenizer: {}", e)))?;
+            .map_err(|e| NeuronError::not_implemented(format!("load tokenizer: {}", e)))?;
 
         let mel_filters = Self::load_mel_filters(&path, config.num_mel_bins)
-            .map_err(|e| NeureError::not_implemented(format!("load mel_filters: {}", e)))?;
+            .map_err(|e| NeuronError::not_implemented(format!("load mel_filters: {}", e)))?;
 
         let safetensors_files: Vec<PathBuf> = std::fs::read_dir(&path)
-            .map_err(|e| NeureError::not_implemented(format!("read dir: {}", e)))?
+            .map_err(|e| NeuronError::not_implemented(format!("read dir: {}", e)))?
             .filter_map(|e| e.ok())
             .filter(|e| {
                 e.path()
@@ -303,7 +303,7 @@ impl AsrRuntime for WhisperAsrRuntime {
             .collect();
 
         if safetensors_files.is_empty() {
-            return Err(NeureError::not_implemented(
+            return Err(NeuronError::not_implemented(
                 "No safetensors files found".to_string(),
             ));
         }
@@ -314,10 +314,10 @@ impl AsrRuntime for WhisperAsrRuntime {
         let vb = unsafe {
             VarBuilder::from_mmaped_safetensors(safetensors_paths.as_slice(), DType::F32, &dev)
         }
-        .map_err(|e| NeureError::not_implemented(format!("load safetensors: {}", e)))?;
+        .map_err(|e| NeuronError::not_implemented(format!("load safetensors: {}", e)))?;
 
         let model = m::model::Whisper::load(&vb, config.clone())
-            .map_err(|e| NeureError::not_implemented(format!("build Whisper model: {}", e)))?;
+            .map_err(|e| NeuronError::not_implemented(format!("build Whisper model: {}", e)))?;
 
         let loaded = LoadedWhisper {
             model,
@@ -335,12 +335,12 @@ impl AsrRuntime for WhisperAsrRuntime {
 
     async fn transcribe(&self, audio: &[u8], _lang: Option<&str>) -> ChatResult<Transcription> {
         if audio.is_empty() {
-            return Err(NeureError::invalid_input("empty audio"));
+            return Err(NeuronError::invalid_input("empty audio"));
         }
         let looks_like_wav =
             audio.len() >= 12 && &audio[0..4] == b"RIFF" && &audio[8..12] == b"WAVE";
         if !looks_like_wav {
-            return Err(NeureError::invalid_input(
+            return Err(NeuronError::invalid_input(
                 "audio does not look like WAV (missing RIFF/WAVE header)",
             ));
         }
@@ -348,9 +348,9 @@ impl AsrRuntime for WhisperAsrRuntime {
         let (mut model, tokenizer, config, mel_filters, device) = {
             let inner = self.inner.lock().unwrap();
             let loaded = inner.as_ref().ok_or_else(|| {
-                NeureError::not_initialized(
+                NeuronError::not_initialized(
                     "WhisperAsrRuntime not loaded. Call load() first or check that \
-                     NEURE_ASR_RUNTIME=candle and NEURE_ASR_MODEL_PATH is valid."
+                     NEURON_ASR_RUNTIME=candle and NEURON_ASR_MODEL_PATH is valid."
                         .to_string(),
                 )
             })?;
@@ -358,7 +358,7 @@ impl AsrRuntime for WhisperAsrRuntime {
         };
 
         let (pcm_data, _sample_rate) = decode_wav(audio)
-            .map_err(|e| NeureError::invalid_input(format!("WAV decode: {}", e)))?;
+            .map_err(|e| NeuronError::invalid_input(format!("WAV decode: {}", e)))?;
 
         let mel_data = audio::pcm_to_mel(&config, &pcm_data, &mel_filters);
         let mel_len = mel_data.len();
@@ -367,12 +367,12 @@ impl AsrRuntime for WhisperAsrRuntime {
             (1, config.num_mel_bins, mel_len / config.num_mel_bins),
             &device,
         )
-        .map_err(|e| NeureError::not_implemented(format!("mel tensor: {}", e)))?;
+        .map_err(|e| NeuronError::not_implemented(format!("mel tensor: {}", e)))?;
 
         let audio_features = model
             .encoder
             .forward(&mel, true)
-            .map_err(|e| NeureError::not_implemented(format!("encoder: {}", e)))?;
+            .map_err(|e| NeuronError::not_implemented(format!("encoder: {}", e)))?;
 
         let sot_token = tokenizer
             .token_to_id("<|startoftranscript|>")
@@ -391,34 +391,34 @@ impl AsrRuntime for WhisperAsrRuntime {
 
         for _ in 0..MAX_TOKENS {
             let tokens_t = Tensor::new(tokens.as_slice(), &device)
-                .map_err(|e| NeureError::not_implemented(format!("tokens tensor: {}", e)))?;
+                .map_err(|e| NeuronError::not_implemented(format!("tokens tensor: {}", e)))?;
             let tokens_t = tokens_t
                 .unsqueeze(0)
-                .map_err(|e| NeureError::not_implemented(format!("unsqueeze: {}", e)))?;
+                .map_err(|e| NeuronError::not_implemented(format!("unsqueeze: {}", e)))?;
 
             let ys = model
                 .decoder
                 .forward(&tokens_t, &audio_features, tokens.len() == 3)
-                .map_err(|e| NeureError::not_implemented(format!("decoder: {}", e)))?;
+                .map_err(|e| NeuronError::not_implemented(format!("decoder: {}", e)))?;
 
-            let seq_len = ys.dim(1).map_err(|e| NeureError::not_implemented(format!("dim: {}", e)))?;
-            let last_hidden = ys.i((.., seq_len - 1..)).map_err(|e| NeureError::not_implemented(format!("index: {}", e)))?;
+            let seq_len = ys.dim(1).map_err(|e| NeuronError::not_implemented(format!("dim: {}", e)))?;
+            let last_hidden = ys.i((.., seq_len - 1..)).map_err(|e| NeuronError::not_implemented(format!("index: {}", e)))?;
             let logits = model
                 .decoder
                 .final_linear(&last_hidden)
-                .map_err(|e| NeureError::not_implemented(format!("final_linear: {}", e)))?;
+                .map_err(|e| NeuronError::not_implemented(format!("final_linear: {}", e)))?;
             let logits = logits
                 .squeeze(0)
-                .map_err(|e| NeureError::not_implemented(format!("squeeze: {}", e)))?;
+                .map_err(|e| NeuronError::not_implemented(format!("squeeze: {}", e)))?;
             let logits = logits
                 .squeeze(0)
-                .map_err(|e| NeureError::not_implemented(format!("squeeze2: {}", e)))?;
+                .map_err(|e| NeuronError::not_implemented(format!("squeeze2: {}", e)))?;
 
             let next_token = logits
                 .argmax(candle_core::D::Minus1)
-                .map_err(|e| NeureError::not_implemented(format!("argmax: {}", e)))?
+                .map_err(|e| NeuronError::not_implemented(format!("argmax: {}", e)))?
                 .to_scalar::<u32>()
-                .map_err(|e| NeureError::not_implemented(format!("to_scalar: {}", e)))?;
+                .map_err(|e| NeuronError::not_implemented(format!("to_scalar: {}", e)))?;
 
             tokens.push(next_token);
 
@@ -429,7 +429,7 @@ impl AsrRuntime for WhisperAsrRuntime {
 
         let text = tokenizer
             .decode(&tokens, true)
-            .map_err(|e| NeureError::not_implemented(format!("decode: {}", e)))?;
+            .map_err(|e| NeuronError::not_implemented(format!("decode: {}", e)))?;
 
         Ok(Transcription {
             text,
@@ -450,13 +450,13 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn test_resolve_model_path_without_env_returns_useful_error() {
-        unsafe { std::env::remove_var("NEURE_ASR_MODEL_PATH") };
+        unsafe { std::env::remove_var("NEURON_ASR_MODEL_PATH") };
         let result = WhisperAsrRuntime::resolve_model_path("whisper-base");
         assert!(result.is_err());
         let err = result.err().unwrap();
         assert!(
-            err.contains("NEURE_ASR_MODEL_PATH"),
-            "Error should mention NEURE_ASR_MODEL_PATH, got: {}",
+            err.contains("NEURON_ASR_MODEL_PATH"),
+            "Error should mention NEURON_ASR_MODEL_PATH, got: {}",
             err
         );
     }
@@ -465,7 +465,7 @@ mod tests {
     #[serial_test::serial]
     fn test_resolve_model_path_with_valid_env_path_returns_ok() {
         let dir = std::env::temp_dir().join(format!(
-            "neure-whisper-resolve-ok-{}",
+            "neuron-whisper-resolve-ok-{}",
             uuid::Uuid::new_v4()
         ));
         std::fs::create_dir_all(&dir).expect("create temp dir");
@@ -473,11 +473,11 @@ mod tests {
         std::fs::write(dir.join("tokenizer.json"), b"{}").expect("write tokenizer");
         std::fs::write(dir.join("model.safetensors"), b"fake").expect("write weights");
         std::fs::write(dir.join("mel_filters.safetensors"), b"fake").expect("write mel");
-        unsafe { std::env::set_var("NEURE_ASR_MODEL_PATH", &dir) };
+        unsafe { std::env::set_var("NEURON_ASR_MODEL_PATH", &dir) };
 
         let result = WhisperAsrRuntime::resolve_model_path("whisper-base");
         let _ = std::fs::remove_dir_all(&dir);
-        unsafe { std::env::remove_var("NEURE_ASR_MODEL_PATH") };
+        unsafe { std::env::remove_var("NEURON_ASR_MODEL_PATH") };
 
         assert!(result.is_ok(), "expected Ok, got: {result:?}");
         assert_eq!(result.unwrap(), dir);
@@ -492,11 +492,11 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial]
     async fn test_whisper_load_without_path_returns_useful_error() {
-        unsafe { std::env::remove_var("NEURE_ASR_MODEL_PATH") };
+        unsafe { std::env::remove_var("NEURON_ASR_MODEL_PATH") };
         let result = WhisperAsrRuntime::load("whisper-base", &DeviceSelection::Cpu).await;
         assert!(result.is_err());
         let err = result.err().unwrap();
-        assert!(err.message.contains("NEURE_ASR_MODEL_PATH"));
+        assert!(err.message.contains("NEURON_ASR_MODEL_PATH"));
     }
 
     #[tokio::test]

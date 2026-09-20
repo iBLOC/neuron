@@ -3,8 +3,8 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 
-use super::{NeureError, RegisteredRerank, RerankImpl, RerankRegistryKey, RerankRequest, RerankResponse};
-use crate::config::{DeviceSelection, NeureConfig, ResourceTracker};
+use super::{NeuronError, RegisteredRerank, RerankImpl, RerankRegistryKey, RerankRequest, RerankResponse};
+use crate::config::{DeviceSelection, NeuronConfig, ResourceTracker};
 use crate::llm::ModelInfo;
 use crate::rerank::RerankRuntime;
 
@@ -25,7 +25,7 @@ impl Clone for RerankRuntimeRegistry {
 }
 
 impl RerankRuntimeRegistry {
-    pub fn new(_config: Arc<NeureConfig>) -> Self {
+    pub fn new(_config: Arc<NeuronConfig>) -> Self {
         Self {
             registered: Vec::new(),
             loaded: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
@@ -39,19 +39,19 @@ impl RerankRuntimeRegistry {
         impl_id: RerankImpl,
         device: DeviceSelection,
         required_memory_bytes: u64,
-    ) -> Result<(), NeureError> {
+    ) -> Result<(), NeuronError> {
         let mut res = self.resources.lock().unwrap();
         if !res.can_load(required_memory_bytes, &device) {
             let available = match &device {
                 DeviceSelection::Cpu | DeviceSelection::Auto => res.available_cpu_bytes(),
                 _ => res.available_gpu_bytes(),
             };
-            return Err(NeureError::new(format!(
+            return Err(NeuronError::new(format!(
                 "InsufficientResources: model={model_id}, required={required_memory_bytes}, available={available}"
             )));
         }
         res.allocate(required_memory_bytes, &device)
-            .map_err(NeureError::new)?;
+            .map_err(NeuronError::new)?;
 
         self.registered.push(RegisteredRerank {
             model_id,
@@ -62,13 +62,13 @@ impl RerankRuntimeRegistry {
         Ok(())
     }
 
-    pub async fn runtime_for(&self, model_id: &str) -> Result<Arc<dyn RerankRuntime>, NeureError> {
+    pub async fn runtime_for(&self, model_id: &str) -> Result<Arc<dyn RerankRuntime>, NeuronError> {
         let entry = self
             .registered
             .iter()
             .find(|r| r.model_id == model_id)
             .ok_or_else(|| {
-                NeureError::new(format!("ModelNotRegistered: {model_id}"))
+                NeuronError::new(format!("ModelNotRegistered: {model_id}"))
             })?;
 
         let key = RerankRegistryKey {
@@ -88,7 +88,7 @@ impl RerankRuntimeRegistry {
                 let loaded = super::CandleRerankRuntime::load(&entry.model_id, &entry.device)
                     .await
                     .map_err(|e| {
-                        NeureError::new(format!("BgeRerankRuntime load failed: {e}"))
+                        NeuronError::new(format!("BgeRerankRuntime load failed: {e}"))
                     })?;
                 Arc::from(loaded)
             }
@@ -97,7 +97,7 @@ impl RerankRuntimeRegistry {
                 let loaded: Box<dyn RerankRuntime> = super::MxbaiRerankRuntime::load(&entry.model_id, &entry.device)
                     .await
                     .map_err(|e| {
-                        NeureError::new(format!("MxbaiRerankRuntime load failed: {e}"))
+                        NeuronError::new(format!("MxbaiRerankRuntime load failed: {e}"))
                     })?;
                 Arc::from(loaded)
             }
@@ -106,7 +106,7 @@ impl RerankRuntimeRegistry {
                 let loaded = super::JinaRerankRuntime::load(&entry.model_id, &entry.device)
                     .await
                     .map_err(|e| {
-                        NeureError::new(format!("JinaRerankRuntime load failed: {e}"))
+                        NeuronError::new(format!("JinaRerankRuntime load failed: {e}"))
                     })?;
                 Arc::from(loaded)
             }
@@ -114,7 +114,7 @@ impl RerankRuntimeRegistry {
                 let loaded = super::CohereRerankRuntime::load(&entry.model_id, &entry.device)
                     .await
                     .map_err(|e| {
-                        NeureError::new(format!("CohereRerankRuntime load failed: {e}"))
+                        NeuronError::new(format!("CohereRerankRuntime load failed: {e}"))
                     })?;
                 Arc::from(loaded)
             }
@@ -136,7 +136,7 @@ impl RerankRuntimeRegistry {
                     Ok(handle) => match handle.block_on(async { self.runtime_for(&id).await }) {
                         Ok(rt) => rt,
                         Err(e) => {
-                            eprintln!("[neure] rerank: failed to load default runtime for {id}: {e}");
+                            eprintln!("[neuron] rerank: failed to load default runtime for {id}: {e}");
                             Arc::new(UnavailableRerankRuntime)
                         }
                     },
@@ -156,10 +156,10 @@ impl RerankRuntime for UnavailableRerankRuntime {
     where
         Self: Sized,
     {
-        Err(NeureError::new("NoRegisteredModel: register at least one Rerank model"))
+        Err(NeuronError::new("NoRegisteredModel: register at least one Rerank model"))
     }
     async fn rerank(&self, _req: RerankRequest) -> crate::llm::ChatResult<RerankResponse> {
-        Err(NeureError::new("NoRegisteredModel: register at least one Rerank model"))
+        Err(NeuronError::new("NoRegisteredModel: register at least one Rerank model"))
     }
     fn list_models(&self) -> Vec<ModelInfo> {
         vec![]
