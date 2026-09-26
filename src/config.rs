@@ -83,8 +83,14 @@ impl NeuronConfig {
     /// Deliberately does not touch the filesystem, so callers that want
     /// a stable path (tests, path arithmetic) get one. Use
     /// [`Self::resolved_model_dir`] when bootstrapping a config.
+    ///
+    /// `HOME` is not set for GUI-launched processes on Windows, so fall
+    /// back to `USERPROFILE` before giving up and returning a
+    /// cwd-relative path (which would silently strand the model library).
     pub fn default_model_dir() -> PathBuf {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        let home = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .unwrap_or_else(|_| ".".to_string());
         PathBuf::from(home).join(".neuron").join("models")
     }
 
@@ -97,7 +103,9 @@ impl NeuronConfig {
         if current.is_dir() {
             return current;
         }
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        let home = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .unwrap_or_else(|_| ".".to_string());
         let legacy = PathBuf::from(home).join(".neure").join("models");
         if legacy.is_dir() {
             tracing::warn!(
@@ -344,6 +352,7 @@ impl NeuronConfig {
         let mut cfg = Self::new();
         apply_port_env(&mut cfg, env);
         apply_host_env(&mut cfg, env);
+        apply_device_env(&mut cfg, env);
         apply_model_dirs_env(&mut cfg, env);
         apply_default_source_env(&mut cfg, env);
         apply_per_engine_sources_env(&mut cfg, env);
@@ -444,6 +453,19 @@ fn apply_host_env(cfg: &mut NeuronConfig, env: &HashMap<String, String>) {
         && !v.is_empty()
     {
         cfg.host = v;
+    }
+}
+
+fn apply_device_env(cfg: &mut NeuronConfig, env: &HashMap<String, String>) {
+    // NEURON_DEVICE: accepts cpu | cuda | apple | vulkan. Unknown
+    // values fall through to the default (`Auto`) — an env-var typo
+    // shouldn't crash startup; a startup-time warning is logged in
+    // ServerState when the resolved value isn't recognised by the
+    // candle backend.
+    if let Some(v) = env_map_get(env, "DEVICE")
+        && let Ok(d) = serde_json::from_str::<DeviceSelection>(&format!("\"{v}\""))
+    {
+        cfg.device = d;
     }
 }
 

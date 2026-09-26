@@ -32,6 +32,7 @@ pub struct ServerState {
     pub embedding_registry: Arc<crate::embedding::EmbeddingRuntimeRegistry>,
     pub vision_registry: Arc<crate::vision::VisionRuntimeRegistry>,
     pub chronos2_registry: Arc<crate::chronos2::Chronos2Registry>,
+    pub decision_registry: Arc<crate::decision::DecisionRuntimeRegistry>,
 
     // -- Runtime registration locks (for dynamic model loading) --
     // These wrap the registries above to allow &mut self registration at runtime.
@@ -43,6 +44,7 @@ pub struct ServerState {
     pub(crate) embedding_registry_lock: Arc<Mutex<crate::embedding::EmbeddingRuntimeRegistry>>,
     pub(crate) vision_registry_lock: Arc<Mutex<crate::vision::VisionRuntimeRegistry>>,
     pub(crate) chronos2_registry_lock: Arc<Mutex<crate::chronos2::Chronos2Registry>>,
+    pub(crate) decision_registry_lock: Arc<Mutex<crate::decision::DecisionRuntimeRegistry>>,
 
     // -- LoRA adapter registry (dynamic detection class extension) --
     pub vision_lora_registry: Arc<crate::vision::LoraRegistry>,
@@ -54,6 +56,7 @@ pub struct ServerState {
     pub rerank: Arc<dyn crate::rerank::RerankRuntime>,
     pub embedding: Arc<dyn crate::embedding::EmbeddingRuntime>,
     pub vision: Arc<dyn crate::vision::VisionRuntime>,
+    pub decision: Arc<dyn crate::decision::DecisionRuntime>,
 
     // -- Engine registries (Phase 1, lazy-populated) --
     pub engines: Arc<crate::engine::registry::CapabilityRegistries>,
@@ -94,9 +97,11 @@ impl ServerState {
                     let model_id = crate::config::env_var_result("LLM_DEFAULT_MODEL")
                         .unwrap_or_else(|_| "qwen3-0.6b".to_string());
                     if let Err(e) = llm_registry.register(
-                        model_id.clone(), LlmImpl::Candle, device, 2_000_000_000,
+                        model_id.clone(), LlmImpl::Candle, device.clone(), 8_000_000_000,
                     ) {
-                        eprintln!("[neuron] Candle LLM register failed: {e}");
+                        eprintln!("[neuron] Candle LLM register failed for model={model_id:?} device={device:?}: {e}");
+                    } else {
+                        eprintln!("[neuron] Candle LLM registered model={model_id:?} device={device:?}");
                     }
                 }
                 #[cfg(not(feature = "candle"))]
@@ -127,7 +132,7 @@ impl ServerState {
                         model_id.clone(),
                         LlmImpl::MistralRs,
                         device.clone(),
-                        2_000_000_000,
+                        8_000_000_000,
                     ) {
                         eprintln!(
                             "[neuron] MistralRs LLM register failed: {e}"
@@ -201,9 +206,56 @@ impl ServerState {
             }
         }
 
+        // Auto-register downloaded models found under `model_dirs` so a
+        // model pulled via /v1/models/pull (or dropped in by hand) is
+        // servable without env configuration. Only backends compiled
+        // into this build can serve; candle is the default feature set.
+        // Entries already registered via env/config are left untouched,
+        // and loading stays lazy (weights resolve on first request).
+        #[cfg(feature = "candle")]
+        {
+            let known: std::collections::HashSet<String> =
+                llm_registry.list_registered().into_iter().collect();
+            for dir in &config.model_dirs {
+                let Ok(entries) = std::fs::read_dir(dir.join("llm")) else {
+                    continue;
+                };
+                for entry in entries.flatten() {
+                    let id = entry.file_name().to_string_lossy().to_string();
+                    if known.contains(&id) || !entry.path().join("model.safetensors").exists() {
+                        continue;
+                    }
+                    match llm_registry.register(
+                        id.clone(),
+                        LlmImpl::Candle,
+                        device.clone(),
+                        8_000_000_000,
+                    ) {
+                        Ok(()) => eprintln!(
+                            "[neuron] auto-registered downloaded llm model={id:?} (candle)"
+                        ),
+                        Err(e) => {
+                            eprintln!("[neuron] auto-register failed for {id:?}: {e}")
+                        }
+                    }
+                }
+            }
+        }
+
         let llm_shortcut = llm_registry.default_runtime();
 
         // ---- TTS registry -------------------------------------------------
+        //
+        // Model id naming convention:
+        //   - `NEURON_TTS_RUNTIME=voxcpm` registers `"voxcpm-model"` (legacy
+        //     abstract id kept for backward compat with hosts that hard-coded
+        //     the id).
+        //   - Future VoxCPM1.5 / VoxCPM2 should be registered under their
+        //     catalog id (`"voxcpm1.5"`, `"voxcpm2"`) via the config-driven
+        //     `config.registrations` loop below — not under `"voxcpm-model"`.
+        //   - `/v1/audio/speech` defaults `model` to `"echo-tts"` (which is
+        //     unregistered), so omitting `model` continues to fall through to
+        //     `state.tts` shortcut — no behavior regression there.
         let mut tts_registry = crate::tts::TtsRuntimeRegistry::new(config_arc.clone());
         let tts_runtime_env = crate::config::env_var("TTS_RUNTIME");
         match tts_runtime_env.as_deref() {
@@ -255,6 +307,32 @@ impl ServerState {
                 #[cfg(not(feature = "candle"))]
                 {
                     eprintln!("[neuron] NEURON_ASR_RUNTIME=whisper but candle feature not enabled");
+                }
+            }
+            // Own-ONNX SenseVoice: fp32 graph on tract (~1.5 GB budget).
+            Some("tract") => {
+                #[cfg(feature = "tract")]
+                {
+                    let _ = asr_registry.register(
+                        "sensevoice-small".into(), crate::asr::AsrImpl::Tract, device, 1_500_000_000,
+                    );
+                }
+                #[cfg(not(feature = "tract"))]
+                {
+                    eprintln!("[neuron] NEURON_ASR_RUNTIME=tract but tract feature not enabled");
+                }
+            }
+            // sherpa-onnx SenseVoice: int8 or fp32 graph via onnxruntime.
+            Some("sherpa") => {
+                #[cfg(feature = "sherpa")]
+                {
+                    let _ = asr_registry.register(
+                        "sensevoice-small".into(), crate::asr::AsrImpl::Sherpa, device, 800_000_000,
+                    );
+                }
+                #[cfg(not(feature = "sherpa"))]
+                {
+                    eprintln!("[neuron] NEURON_ASR_RUNTIME=sherpa but sherpa feature not enabled");
                 }
             }
             _ => {}
@@ -342,6 +420,83 @@ impl ServerState {
             }
         }
         let rerank_shortcut = rerank_registry.default_runtime();
+
+        // ---- Decision registry -------------------------------------------
+        // `mut` is only exercised when the `tract` feature provides an impl to
+        // register; without it the registry stays empty and the shortcut is
+        // the unavailable stub.
+        #[allow(unused_mut)]
+        let mut decision_registry =
+            crate::decision::DecisionRuntimeRegistry::new(config_arc.clone());
+        let decision_runtime_env = crate::config::env_var("DECISION_RUNTIME");
+        if let Some(engine) = decision_runtime_env.as_deref() {
+            #[cfg(feature = "tract")]
+            {
+                match crate::decision::DecisionImpl::parse(engine) {
+                    Ok(impl_id) => {
+                        let model_id = crate::config::env_var_result("DECISION_MODEL_ID")
+                            .unwrap_or_else(|_| "laya".to_string());
+                        let model_path =
+                            crate::decision::tract_session::resolve_model_dir(&model_id)
+                                .map(|p| p.display().to_string())
+                                .unwrap_or_default();
+                        // Nominal footprint of the int8-prepped graph; a config
+                        // registration can report an exact number.
+                        if let Err(e) = decision_registry.register(
+                            model_id,
+                            impl_id,
+                            device,
+                            500_000_000,
+                            model_path,
+                        ) {
+                            eprintln!("[neuron] NEURON_DECISION_RUNTIME={engine}: {e}");
+                        }
+                    }
+                    Err(e) => eprintln!("[neuron] NEURON_DECISION_RUNTIME={engine}: {e}"),
+                }
+            }
+            #[cfg(not(feature = "tract"))]
+            {
+                eprintln!(
+                    "[neuron] NEURON_DECISION_RUNTIME={engine} but the tract feature is not enabled"
+                );
+            }
+        }
+
+        for reg in &config.registrations {
+            if reg.capability == EngineType::Decision {
+                #[cfg(feature = "tract")]
+                {
+                    match crate::decision::DecisionImpl::parse(&reg.engine) {
+                        Ok(impl_id) => {
+                            let model_path =
+                                crate::decision::tract_session::resolve_model_dir(&reg.model_id)
+                                    .map(|p| p.display().to_string())
+                                    .unwrap_or_default();
+                            let _ = decision_registry.register(
+                                reg.model_id.clone(),
+                                impl_id,
+                                reg.device,
+                                reg.required_memory_bytes,
+                                model_path,
+                            );
+                        }
+                        Err(e) => eprintln!(
+                            "[neuron] config.registrations: unknown Decision engine impl {:?} for model {:?}: {e}",
+                            reg.engine, reg.model_id
+                        ),
+                    }
+                }
+                #[cfg(not(feature = "tract"))]
+                {
+                    eprintln!(
+                        "[neuron] config.registrations: model {:?} needs the tract feature",
+                        reg.model_id
+                    );
+                }
+            }
+        }
+        let decision_shortcut = decision_registry.default_runtime();
 
         // ---- Embedding registry -------------------------------------------
         let mut embedding_registry = crate::embedding::EmbeddingRuntimeRegistry::new(config_arc.clone());
@@ -489,6 +644,7 @@ impl ServerState {
         let rerank_registry_lock = Arc::new(Mutex::new(rerank_registry.clone()));
         let embedding_registry_lock = Arc::new(Mutex::new(embedding_registry.clone()));
         let vision_registry_lock = Arc::new(Mutex::new(vision_registry.clone()));
+        let decision_registry_lock = Arc::new(Mutex::new(decision_registry.clone()));
 
         Self {
             llm_registry: Arc::new(llm_registry),
@@ -497,6 +653,7 @@ impl ServerState {
             rerank_registry: Arc::new(rerank_registry),
             embedding_registry: Arc::new(embedding_registry),
             vision_registry: Arc::new(vision_registry),
+            decision_registry: Arc::new(decision_registry),
             vision_lora_registry,
             chronos2_registry,
             llm_registry_lock,
@@ -506,12 +663,14 @@ impl ServerState {
             embedding_registry_lock,
             vision_registry_lock,
             chronos2_registry_lock,
+            decision_registry_lock,
             llm: llm_shortcut,
             tts: tts_shortcut,
             asr: asr_shortcut,
             rerank: rerank_shortcut,
             embedding: embedding_shortcut,
             vision: vision_shortcut,
+            decision: decision_shortcut,
             engines: Arc::new(engines),
             adapters: {
                 let adapters = Arc::new(crate::adapter::registry::AdapterRegistry::new());
@@ -585,6 +744,24 @@ impl ServerState {
             });
         }
 
+        // Sourced from the registry rather than the `state.decision` shortcut:
+        // the shortcut is a lazy-load handle whose `list_models` can only see
+        // an already-loaded graph, and loading one here would make a listing
+        // call pay for a 300 MB model load.
+        {
+            let reg = self.decision_registry_lock.lock().await;
+            for model in reg.list_models() {
+                models.push(ModelInfo {
+                    id: format!("decision/{}", model.id),
+                    object: "model".to_string(),
+                    created: now,
+                    owned_by: model.owned_by,
+                    capabilities: Some(vec!["decision".to_string()]),
+                    is_default: None,
+                });
+            }
+        }
+
         models
     }
 
@@ -637,9 +814,30 @@ impl ServerState {
                 let mut reg = self.chronos2_registry_lock.lock().await;
                 reg.register(model_id, device, required_memory_bytes)?;
             }
+            "decision" => {
+                #[cfg(feature = "tract")]
+                {
+                    let mut reg = self.decision_registry_lock.lock().await;
+                    let impl_id = crate::decision::DecisionImpl::parse(&engine)
+                        .map_err(|e| {
+                            crate::llm::NeuronError::new(format!("Invalid Decision engine: {e}"))
+                        })?;
+                    let model_path = crate::decision::tract_session::resolve_model_dir(&model_id)
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_default();
+                    reg.register(model_id, impl_id, device, required_memory_bytes, model_path)?;
+                }
+                #[cfg(not(feature = "tract"))]
+                {
+                    let _ = (model_id, engine, device, required_memory_bytes);
+                    return Err(crate::llm::NeuronError::new(
+                        "Decision registration requires the `tract` feature",
+                    ));
+                }
+            }
             _ => {
                 return Err(crate::llm::NeuronError::new(format!(
-                    "Unknown capability: {}. Valid: llm, tts, asr, rerank, embedding, vision, chronos2",
+                    "Unknown capability: {}. Valid: llm, tts, asr, rerank, embedding, vision, chronos2, decision",
                     capability
                 )));
             }

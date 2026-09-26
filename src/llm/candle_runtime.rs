@@ -81,6 +81,43 @@ struct LoadedModel {
     tokenizer: Tokenizer,
     eos_token_id: u32,
     device: Device,
+    /// Held for the Llama path so `chat` can rebuild the KV cache
+    /// from scratch at the start of every request — candle's
+    /// `llama::Cache` carries the position offset from the
+    /// previous request's decode loop and the next call would
+    /// otherwise panic on a broadcast mismatch. `None` for the
+    /// non-Llama architectures (their caches are model-internal
+    /// or absent).
+    llama_cfg: Option<llama::Config>,
+    /// Storage dtype the weights were materialised in. The Llama KV
+    /// cache has to be rebuilt with this same dtype, and keeping the
+    /// checkpoint's native dtype (rather than always upcasting to
+    /// `F32`) is what lets a 2B model fit in RAM on a 16 GB host.
+    dtype: DType,
+}
+
+/// Storage dtype used to materialise Llama-family weights.
+///
+/// `NEURON_LLM_DTYPE` accepts `f32` (default — the historical
+/// behaviour), `bf16` and `f16`. Anything unrecognised falls back to
+/// `f32` with a warning rather than failing the load: a typo in an
+/// env var should not take a whole model down.
+fn resolve_weight_dtype() -> DType {
+    match crate::config::env_var("LLM_DTYPE").as_deref() {
+        Some(raw) => match raw.trim().to_ascii_lowercase().as_str() {
+            "f32" | "float32" | "fp32" => DType::F32,
+            "bf16" | "bfloat16" => DType::BF16,
+            "f16" | "float16" | "fp16" | "half" => DType::F16,
+            other => {
+                eprintln!(
+                    "[neuron] NEURON_LLM_DTYPE={other:?} not recognised \
+                     (want f32 | bf16 | f16); falling back to f32"
+                );
+                DType::F32
+            }
+        },
+        None => DType::F32,
+    }
 }
 
 impl CandleLlmRuntime {
@@ -104,20 +141,34 @@ impl CandleLlmRuntime {
     }
 
     pub fn resolve_model_path(model: &str) -> Result<PathBuf, String> {
-        let _ = model;
-        let path = match crate::config::env_var_result("LLM_MODEL_PATH") {
-            Ok(p) => PathBuf::from(p),
-            Err(_) => {
-                return Err(format!(
-                    "CandleLlmRuntime: set NEURON_LLM_MODEL_PATH to a directory containing \
-                     config.json + tokenizer.json + *.safetensors. \
-                     Download a Qwen model from HuggingFace and set the path. \
-                     Requested model: '{}'",
-                    model
-                ));
+        if let Ok(p) = crate::config::env_var_result("LLM_MODEL_PATH") {
+            let path = PathBuf::from(p);
+            ensure_dir(&path, "NEURON_LLM_MODEL_PATH")?;
+            return Ok(path);
+        }
+
+        // No explicit env override: look the model up by id in the model
+        // library that /v1/models/pull populates
+        // (`~/.neuron/models/llm/<id>`), so any downloaded model is
+        // servable without extra configuration.
+        let root = crate::config::NeuronConfig::resolved_model_dir();
+        let candidates = [root.join("llm").join(model), root.join(model)];
+        for candidate in &candidates {
+            if candidate.is_dir() {
+                return Self::validate_model_dir(candidate);
             }
-        };
-        ensure_dir(&path, "NEURON_LLM_MODEL_PATH")?;
+        }
+        Err(format!(
+            "CandleLlmRuntime: model '{model}' not found under {} (set NEURON_LLM_MODEL_PATH \
+             to a directory containing config.json + tokenizer.json + *.safetensors)",
+            root.display()
+        ))
+    }
+
+    /// Verify a directory holds a servable model (config + tokenizer +
+    /// at least one .safetensors shard) and return it.
+    fn validate_model_dir(path: &std::path::Path) -> Result<PathBuf, String> {
+        let path = path.to_path_buf();
         let config_path = path.join("config.json");
         let tokenizer_path = path.join("tokenizer.json");
         let has_weights = std::fs::read_dir(&path)
@@ -186,6 +237,31 @@ impl CandleLlmRuntime {
         }
     }
 
+    /// Rebuild the Llama KV cache so a generation starts from a clean
+    /// position axis.
+    ///
+    /// candle's `llama::Cache` is stateful — its `k_v` tensors carry the
+    /// position offset of the previous request's decode loop — so
+    /// reusing one across requests triggers a `cannot broadcast [N, N] to
+    /// [1, H, N, D]` panic on the next forward pass. Every generation
+    /// entry point must therefore reset it first, which is why this is a
+    /// shared helper rather than inlined at each call site: `chat` and
+    /// `chat_stream` previously diverged here, and the streaming path
+    /// failed silently (empty SSE body) whenever it ran after a non-
+    /// streaming request.
+    ///
+    /// Non-Llama architectures use model-internal caches (or none) and
+    /// need no reset.
+    fn reset_llama_cache(m: &mut LoadedModel) -> Result<(), NeuronError> {
+        if let (CausalModel::Llama { model: _, cache }, Some(cfg)) =
+            (&mut m.model, m.llama_cfg.as_ref())
+        {
+            *cache = llama::Cache::new(true, m.dtype, cfg, &m.device)
+                .map_err(|e| NeuronError::not_implemented(format!("rebuild Llama cache: {e}")))?;
+        }
+        Ok(())
+    }
+
     fn render_chatml_prompt(messages: &[ChatMessage]) -> String {
         let mut out = String::new();
         for msg in messages {
@@ -200,6 +276,35 @@ impl CandleLlmRuntime {
     // SentencePiece uses U+2581 (▁) to mark word boundaries; replace with a space.
     fn decode_token_for_stream(token: &str) -> String {
         token.replace('\u{2581}', " ")
+    }
+
+    /// Append `token` to `generated`, re-decode the whole sequence, and
+    /// return the byte offset the caller has already emitted alongside the
+    /// text that is new since then.
+    ///
+    /// The vocabulary string for a single id is raw byte-level BPE — `Ġ`
+    /// for a space, `Ċ` for a newline — which is not user-visible text, so
+    /// it must never be sent to a client. Decoding the accumulated ids
+    /// instead is what makes the streaming body match the non-streaming one
+    /// byte for byte.
+    fn decode_new_suffix(
+        tokenizer: &Tokenizer,
+        generated: &mut Vec<u32>,
+        text_so_far: &mut String,
+        token: u32,
+    ) -> (usize, String) {
+        generated.push(token);
+        let old_len = text_so_far.len();
+        *text_so_far = match tokenizer.decode(generated, true) {
+            Ok(s) => s,
+            Err(_) => {
+                // Degrade to the vocab string rather than dropping the token.
+                let raw = tokenizer.id_to_token(token).unwrap_or_default();
+                format!("{text_so_far}{}", Self::decode_token_for_stream(&raw))
+            }
+        };
+        let suffix = text_so_far.get(old_len..).unwrap_or_default().to_string();
+        (old_len, suffix)
     }
 
     /// Sample a token id from `logits` with temperature-scaled softmax and
@@ -393,8 +498,15 @@ impl super::LlmRuntime for CandleLlmRuntime {
         let safetensors_paths: Vec<&std::path::Path> =
             safetensors_files.iter().map(|p| p.as_path()).collect();
 
+        // `bf16` halves peak weight memory versus the f32 default, which
+        // is the difference between fitting and paging out on a 16 GB host.
+        let weight_dtype = resolve_weight_dtype();
+        eprintln!(
+            "[neuron] CandleLlmRuntime: weights dtype = {weight_dtype:?} (NEURON_LLM_DTYPE=f32|bf16|f16)"
+        );
+
         let vb = unsafe {
-            VarBuilder::from_mmaped_safetensors(safetensors_paths.as_slice(), DType::F32, &dev)
+            VarBuilder::from_mmaped_safetensors(safetensors_paths.as_slice(), weight_dtype, &dev)
         }
         .map_err(|e| NeuronError::not_implemented(format!("load weights: {e}")))?;
 
@@ -430,7 +542,7 @@ impl super::LlmRuntime for CandleLlmRuntime {
                     .map_err(|e| NeuronError::not_implemented(format!("build Llama: {e}")))?;
                 let cache = llama::Cache::new(
                     true,
-                    DType::F32,
+                    weight_dtype,
                     &inner,
                     &dev,
                 )
@@ -474,7 +586,11 @@ impl super::LlmRuntime for CandleLlmRuntime {
             CausalArch::ChatGlm(_) => 150_021u32,
         };
 
-        let loaded = LoadedModel { model, tokenizer, eos_token_id, device: dev };
+        let llama_cfg = match &arch {
+            CausalArch::Llama(cfg) => Some(llama::LlamaConfig::clone(cfg).into_config(use_flash_attn)),
+            _ => None,
+        };
+        let loaded = LoadedModel { model, tokenizer, eos_token_id, device: dev, llama_cfg, dtype: weight_dtype };
         let runtime = CandleLlmRuntime::new();
         *runtime.inner.lock().unwrap() = Some(loaded);
 
@@ -489,6 +605,15 @@ impl super::LlmRuntime for CandleLlmRuntime {
             })?;
             (m.tokenizer.clone(), m.eos_token_id)
         };
+
+        // Reset the Llama KV cache at the start of every generation.
+        {
+            let mut inner = self.inner.lock().unwrap();
+            let m = inner.as_mut().ok_or_else(|| {
+                NeuronError::not_initialized("CandleLlmRuntime not loaded. Call load() first.")
+            })?;
+            Self::reset_llama_cache(m)?;
+        }
 
         let prompt = Self::render_chatml_prompt(&req.messages);
         let encoding = tokenizer
@@ -510,13 +635,27 @@ impl super::LlmRuntime for CandleLlmRuntime {
             &m.device,
         )
         .map_err(|e| NeuronError::not_implemented(format!("build input tensor: {e}")))?;
+        eprintln!(
+            "[debug] candle chat: prompt_tokens={}, device={:?}",
+            prompt_token_ids.len(),
+            m.device
+        );
 
         let logits = m
             .model
             .forward(&input_tensor, 0)
             .map_err(|e| NeuronError::not_implemented(format!("forward pass 1: {e}")))?;
+        eprintln!(
+            "[debug] candle chat: forward(1) logits dims = {} (prompt_len={})",
+            logits.dims().len(),
+            prompt_token_ids.len()
+        );
+        // Candle's Llama::forward returns `[batch, vocab]` (the
+        // last-token logits are already sliced), so a single `i(0)`
+        // is enough — no need for the 3-element `(0, dim(1)-1, ..)`
+        // tuple the chat loop used previously.
         let last_logits = logits
-            .i((0, logits.dim(1).map_err(|e| NeuronError::not_implemented(format!("logits dim: {e}")))? - 1, ..))
+            .i(0)
             .map_err(|e| NeuronError::not_implemented(format!("index last logits: {e}")))?;
         let mut next_token = last_logits
             .argmax(candle_core::D::Minus1)
@@ -525,11 +664,14 @@ impl super::LlmRuntime for CandleLlmRuntime {
             .map_err(|e| NeuronError::not_implemented(format!("to scalar: {e}")))?;
 
         let mut generated: Vec<u32> = Vec::with_capacity(max_new_tokens);
-        if next_token != eos_token_id {
+        // The prompt forward already yields the first generated token, so the
+        // loop below contributes at most `max_new_tokens - 1` more. `max_tokens`
+        // caps the total output; it is not additive with that first token.
+        if max_new_tokens > 0 && next_token != eos_token_id {
             generated.push(next_token);
         }
 
-        for offset in (prompt_token_ids.len() + 1)..(prompt_token_ids.len() + 1 + max_new_tokens) {
+        for offset in (prompt_token_ids.len() + 1)..(prompt_token_ids.len() + max_new_tokens) {
             if next_token == eos_token_id {
                 break;
             }
@@ -543,8 +685,11 @@ impl super::LlmRuntime for CandleLlmRuntime {
                 .model
                 .forward(&next_input, offset)
                 .map_err(|e| NeuronError::not_implemented(format!("forward pass {}: {}", offset, e)))?;
+            // Same single-batch indexing: candle Llama::forward
+            // returns `[batch, vocab]` even for the single-token
+            // step.
             let last_logits = logits
-                .i((0, 0, ..))
+                .i(0)
                 .map_err(|e| NeuronError::not_implemented(format!("index last: {e}")))?;
             next_token = last_logits
                 .argmax(candle_core::D::Minus1)
@@ -649,6 +794,26 @@ impl super::LlmRuntime for CandleLlmRuntime {
                 }
             };
 
+            // Same reset `chat()` performs: the Llama KV cache is
+            // stateful, so a stream that follows a non-stream request
+            // would otherwise fail its first forward and yield a 200
+            // with a completely empty SSE body.
+            if let Err(e) = Self::reset_llama_cache(m) {
+                eprintln!("[candle chat_stream] cache reset failed: {e}");
+                let _ = tx.blocking_send(super::ChatChunk {
+                    id: id.clone(),
+                    object: object.clone(),
+                    created,
+                    model: model_id.clone(),
+                    choices: vec![super::ChunkChoice {
+                        index: 0,
+                        delta: DeltaMessage { role: None, content: None },
+                        finish_reason: Some("length".to_string()),
+                    }],
+                });
+                return;
+            }
+
             let _ = tx.blocking_send(super::ChatChunk {
                 id: id.clone(),
                 object: object.clone(),
@@ -670,23 +835,41 @@ impl super::LlmRuntime for CandleLlmRuntime {
                 &m.device,
             ) {
                 Ok(t) => t,
-                Err(_) => return,
+                Err(e) => {
+                    // The stream's Item type is `ChatChunk`, not
+                    // `Result<_, _>`, so a failure here can only end the
+                    // stream. Log it: a silent empty SSE body is
+                    // indistinguishable from a server that generated
+                    // nothing, and cost hours to diagnose once already.
+                    eprintln!("[candle chat_stream] input tensor failed: {e}");
+                    return;
+                }
             };
             let logits = match m.model.forward(&input, 0) {
                 Ok(t) => t,
-                Err(_) => return,
+                Err(e) => {
+                    eprintln!("[candle chat_stream] prompt forward failed: {e}");
+                    return;
+                }
             };
-            let dim = match logits.dim(1) {
-                Ok(d) => d,
-                Err(_) => return,
-            };
-            let last = match logits.i((0, dim - 1, ..)) {
+            // candle's Llama::forward returns `[batch, vocab]` — the
+            // last-token logits are already sliced — so a single `i(0)`
+            // is enough. The 3-tuple `(0, dim(1)-1, ..)` form this loop
+            // used previously panicked with "index out of bounds: the
+            // len is 2 but the index is 2" against a 2-D tensor.
+            let last = match logits.i(0) {
                 Ok(t) => t,
-                Err(_) => return,
+                Err(e) => {
+                    eprintln!("[candle chat_stream] index prompt logits: {e}");
+                    return;
+                }
             };
             let logits_vec: Vec<f32> = match last.to_vec1() {
                 Ok(v) => v,
-                Err(_) => return,
+                Err(e) => {
+                    eprintln!("[candle chat_stream] read prompt logits: {e}");
+                    return;
+                }
             };
             let mut next_token =
                 Self::sample_token_from_logits(
@@ -695,15 +878,15 @@ impl super::LlmRuntime for CandleLlmRuntime {
             let mut finished = next_token == eos_token_id;
             let mut count: usize = 0;
             let mut text_so_far = String::new();
+            let mut generated: Vec<u32> = Vec::new();
 
             if !finished {
-                let token_text = m
-                    .tokenizer
-                    .id_to_token(next_token)
-                    .unwrap_or_default();
-                let decoded = Self::decode_token_for_stream(&token_text);
-                let old_len = text_so_far.len();
-                text_so_far.push_str(&decoded);
+                let (old_len, decoded) = Self::decode_new_suffix(
+                    &m.tokenizer,
+                    &mut generated,
+                    &mut text_so_far,
+                    next_token,
+                );
 
                 if let Some(prefix_len) = Self::check_stop_suffix(&text_so_far, &stop_seqs) {
                     let emit_len = prefix_len.saturating_sub(old_len);
@@ -763,13 +946,20 @@ impl super::LlmRuntime for CandleLlmRuntime {
                     Ok(t) => t,
                     Err(_) => return,
                 };
-                let last = match logits.i((0, 0, ..)) {
+                // Same `[batch, vocab]` shape as the prompt forward.
+                let last = match logits.i(0) {
                     Ok(t) => t,
-                    Err(_) => return,
+                    Err(e) => {
+                        eprintln!("[candle chat_stream] index step logits: {e}");
+                        return;
+                    }
                 };
                 let logits_vec: Vec<f32> = match last.to_vec1() {
                     Ok(v) => v,
-                    Err(_) => return,
+                    Err(e) => {
+                        eprintln!("[candle chat_stream] read step logits: {e}");
+                        return;
+                    }
                 };
                 next_token =
                     Self::sample_token_from_logits(
@@ -779,13 +969,12 @@ impl super::LlmRuntime for CandleLlmRuntime {
                 if next_token == eos_token_id {
                     finished = true;
                 } else {
-                    let token_text = m
-                        .tokenizer
-                        .id_to_token(next_token)
-                        .unwrap_or_default();
-                    let decoded = Self::decode_token_for_stream(&token_text);
-                    let old_len = text_so_far.len();
-                    text_so_far.push_str(&decoded);
+                    let (old_len, decoded) = Self::decode_new_suffix(
+                        &m.tokenizer,
+                        &mut generated,
+                        &mut text_so_far,
+                        next_token,
+                    );
 
                     if let Some(prefix_len) = Self::check_stop_suffix(&text_so_far, &stop_seqs) {
                         let emit_len = prefix_len.saturating_sub(old_len);

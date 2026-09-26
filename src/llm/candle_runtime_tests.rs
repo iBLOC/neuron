@@ -230,10 +230,51 @@ fn test_check_stop_suffix_multibyte_utf8() {
 #[serial_test::serial]
 fn test_candle_load_without_env_returns_useful_error() {
     unsafe { std::env::remove_var("NEURON_LLM_MODEL_PATH") };
+    // Isolate from the developer's real model library: point HOME and
+    // USERPROFILE at an empty temp dir so the model-library fallback in
+    // resolve_model_path finds nothing for the requested id.
+    let temp = std::env::temp_dir().join(format!("neuron-load-test-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&temp);
+    std::fs::create_dir_all(&temp).unwrap();
+    unsafe {
+        std::env::set_var("HOME", &temp);
+        std::env::set_var("USERPROFILE", &temp);
+    }
     let resolved = CandleLlmRuntime::resolve_model_path("qwen3-0.6b");
+    let _ = std::fs::remove_dir_all(&temp);
     assert!(resolved.is_err());
     let err_msg = resolved.err().unwrap();
-    assert!(err_msg.contains("NEURON_LLM_MODEL_PATH"), "got: {err_msg}");
+    assert!(
+        err_msg.contains("not found under") || err_msg.contains("NEURON_LLM_MODEL_PATH"),
+        "got: {err_msg}"
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn test_candle_load_resolves_model_from_library_by_id() {
+    unsafe { std::env::remove_var("NEURON_LLM_MODEL_PATH") };
+    // Fake a pulled model in the library: <home>/.neuron/models/llm/<id>/
+    // with the three required artefacts.
+    let temp = std::env::temp_dir().join(format!("neuron-lib-test-{}", std::process::id()));
+    let model_dir = temp.join(".neuron").join("models").join("llm").join("qwen3-0.6b");
+    std::fs::create_dir_all(&model_dir).unwrap();
+    std::fs::write(model_dir.join("config.json"), b"{}").unwrap();
+    std::fs::write(model_dir.join("tokenizer.json"), b"{}").unwrap();
+    std::fs::write(model_dir.join("model.safetensors"), b"stub").unwrap();
+    unsafe {
+        std::env::set_var("HOME", &temp);
+        std::env::set_var("USERPROFILE", &temp);
+    }
+    let resolved = CandleLlmRuntime::resolve_model_path("qwen3-0.6b");
+    let _ = std::fs::remove_dir_all(&temp);
+    let path = resolved.unwrap_or_else(|e| panic!("resolve failed: {e}"));
+    let last = path
+        .components()
+        .next_back()
+        .map(|c| c.as_os_str().to_string_lossy().to_string())
+        .unwrap_or_default();
+    assert_eq!(last, "qwen3-0.6b");
 }
 
 #[tokio::test]

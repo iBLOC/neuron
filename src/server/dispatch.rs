@@ -70,12 +70,21 @@ pub async fn adapter_dispatch_at(
             if capability == Capability::Llm {
                 match state.llm_registry.runtime_for(&model_id).await {
                     Ok(rt) => Arc::new(crate::engine::bridge::LlmRuntimeBridge::new(rt, &model_id)),
-                    Err(_) => {
+                    Err(e) => {
+                        eprintln!(
+                            "[neuron] llm fallback runtime_for({model_id:?}) failed: {e}"
+                        );
                         // Try the first registered model as default
                         if let Some(entry) = state.llm_registry.registered.first() {
                             match state.llm_registry.runtime_for(&entry.model_id).await {
                                 Ok(rt) => Arc::new(crate::engine::bridge::LlmRuntimeBridge::new(rt, &entry.model_id)),
-                                Err(_) => return Err(ApiError::NoEngineForModel(model_id)),
+                                Err(e2) => {
+                                    eprintln!(
+                                        "[neuron] llm fallback runtime_for(default {:?}) failed: {e2}",
+                                        entry.model_id
+                                    );
+                                    return Err(ApiError::NoEngineForModel(model_id));
+                                }
                             }
                         } else {
                             return Err(ApiError::NoEngineForModel(model_id));
