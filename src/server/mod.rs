@@ -21,10 +21,10 @@ mod state;
 
 pub use error::ServerError;
 pub use handlers::{
-    audio_speech, audio_transcriptions, chat_completions, embedding_handler, forecast, gate_score,
-    health_handler, info_handler, list_models, rerank, vision_classify, vision_detect,
+    audio_speech, audio_transcriptions, chat_completions, decisions, embedding_handler, forecast,
+    gate_score, health_handler, info_handler, list_models, rerank, vision_classify, vision_detect,
     vision_lora_list, vision_lora_register, vision_lora_unregister, vision_pose, vision_segment,
-    ChatCompletionsRequest, EmbeddingHttpRequest, ModelList, RerankHttpRequest,
+    ChatCompletionsRequest, DecisionHttpRequest, EmbeddingHttpRequest, ModelList, RerankHttpRequest,
     SpeechRequest, TranscriptionResponse,
 };
 pub use state::ServerState;
@@ -68,6 +68,7 @@ pub fn routes() -> Router<ServerState> {
         .route("/v1/audio/transcriptions", post(audio_transcriptions))
         .route("/v1/rerank", post(rerank))
         .route("/v1/embeddings", post(embedding_handler))
+        .route("/v1/decisions", post(decisions))
         .route("/v1/vision/detect", post(vision_detect))
         .route("/v1/vision/classify", post(vision_classify))
         .route("/v1/vision/segment", post(vision_segment))
@@ -92,7 +93,14 @@ pub fn routes() -> Router<ServerState> {
 /// tree without state-type gymnastics.
 pub fn create_router(config: NeuronConfig) -> Router {
     let state = ServerState::new(config);
-    routes().with_state(state)
+    // Permissive CORS: neuron is a local inference runtime consumed by
+    // browser UIs on other origins (shadow-desktop dev serves its UI from
+    // http://localhost:1420). Matches ollama's allow-all behaviour.
+    let cors = tower_http::cors::CorsLayer::new()
+        .allow_origin(tower_http::cors::Any)
+        .allow_methods(tower_http::cors::Any)
+        .allow_headers(tower_http::cors::Any);
+    routes().with_state(state).layer(cors)
 }
 
 #[cfg(test)]
