@@ -125,7 +125,6 @@ impl CandleLlmRuntime {
         Self { inner: Arc::new(Mutex::new(None)) }
     }
 
-    /// Detect the causal LM architecture from a model's `config.json`.
     /// Thin re-export of [`detect_arch`] so callers can keep using
     /// `CandleLlmRuntime::detect_arch(...)` for backward compatibility.
     pub fn detect_arch(model_dir: &std::path::Path) -> Result<(CausalArch, String), String> {
@@ -138,6 +137,28 @@ impl CandleLlmRuntime {
     /// backward compatibility.
     pub fn detect_model_type(model_dir: &std::path::Path) -> Result<String, String> {
         detect_model_type(model_dir)
+    }
+
+    /// The final-position logits row `[vocab]` from a forward result.
+    ///
+    /// Candle models differ in what `forward` returns: the vendored
+    /// Llama slices to `[batch, vocab]`, while upstream Qwen2/3 keep
+    /// every position `[batch, seq, vocab]`. Handle both — assuming
+    /// 2-D everywhere made every Qwen request fail with
+    /// "to scalar: unexpected rank" / empty streams.
+    fn last_position_logits(
+        logits: &candle_core::Tensor,
+    ) -> candle_core::Result<candle_core::Tensor> {
+        match logits.dims().len() {
+            2 => logits.i(0),
+            3 => {
+                let seq = logits.dim(1)?;
+                logits.i((0, seq - 1))
+            }
+            rank => Err(candle_core::Error::Msg(format!(
+                "unexpected logits rank {rank} (expected 2 or 3)"
+            ))),
+        }
     }
 
     pub fn resolve_model_path(model: &str) -> Result<PathBuf, String> {
@@ -650,13 +671,13 @@ impl super::LlmRuntime for CandleLlmRuntime {
             logits.dims().len(),
             prompt_token_ids.len()
         );
-        // Candle's Llama::forward returns `[batch, vocab]` (the
-        // last-token logits are already sliced), so a single `i(0)`
-        // is enough — no need for the 3-element `(0, dim(1)-1, ..)`
-        // tuple the chat loop used previously.
-        let last_logits = logits
-            .i(0)
-            .map_err(|e| NeuronError::not_implemented(format!("index last logits: {e}")))?;
+        // Candle models differ in what `forward` returns: the vendored
+        // Llama slices to `[batch, vocab]`, while upstream Qwen2/3 keep
+        // every position `[batch, seq, vocab]`. Reduce to the last
+        // position's row either way — assuming 2-D makes every Qwen
+        // request fail (argmax/to_scalar rank errors, empty streams).
+        let last_logits = Self::last_position_logits(&logits)
+            .map_err(|e| NeuronError::not_implemented(format!("last-position logits: {e}")))?;
         let mut next_token = last_logits
             .argmax(candle_core::D::Minus1)
             .map_err(|e| NeuronError::not_implemented(format!("argmax: {e}")))?
@@ -685,12 +706,9 @@ impl super::LlmRuntime for CandleLlmRuntime {
                 .model
                 .forward(&next_input, offset)
                 .map_err(|e| NeuronError::not_implemented(format!("forward pass {}: {}", offset, e)))?;
-            // Same single-batch indexing: candle Llama::forward
-            // returns `[batch, vocab]` even for the single-token
-            // step.
-            let last_logits = logits
-                .i(0)
-                .map_err(|e| NeuronError::not_implemented(format!("index last: {e}")))?;
+            // Same single-batch reduction as the prompt forward.
+            let last_logits = Self::last_position_logits(&logits)
+                .map_err(|e| NeuronError::not_implemented(format!("last-position logits: {e}")))?;
             next_token = last_logits
                 .argmax(candle_core::D::Minus1)
                 .map_err(|e| NeuronError::not_implemented(format!("argmax: {e}")))?
@@ -852,12 +870,10 @@ impl super::LlmRuntime for CandleLlmRuntime {
                     return;
                 }
             };
-            // candle's Llama::forward returns `[batch, vocab]` — the
-            // last-token logits are already sliced — so a single `i(0)`
-            // is enough. The 3-tuple `(0, dim(1)-1, ..)` form this loop
-            // used previously panicked with "index out of bounds: the
-            // len is 2 but the index is 2" against a 2-D tensor.
-            let last = match logits.i(0) {
+            // Reduce 2-D `[batch, vocab]` or 3-D `[batch, seq, vocab]`
+            // forward output to the last position's row (see
+            // last_position_logits).
+            let last = match Self::last_position_logits(&logits) {
                 Ok(t) => t,
                 Err(e) => {
                     eprintln!("[candle chat_stream] index prompt logits: {e}");
@@ -946,8 +962,8 @@ impl super::LlmRuntime for CandleLlmRuntime {
                     Ok(t) => t,
                     Err(_) => return,
                 };
-                // Same `[batch, vocab]` shape as the prompt forward.
-                let last = match logits.i(0) {
+                // Same reduction as the prompt forward.
+                let last = match Self::last_position_logits(&logits) {
                     Ok(t) => t,
                     Err(e) => {
                         eprintln!("[candle chat_stream] index step logits: {e}");
