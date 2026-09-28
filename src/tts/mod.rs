@@ -11,7 +11,18 @@ pub mod voxcpm;
 pub use voxcpm::VoxCpmTtsRuntime;
 
 #[cfg(feature = "voxcpm")]
+pub mod voxcpm2;
+
+#[cfg(feature = "voxcpm")]
+pub use voxcpm2::VoxCpm2TtsRuntime;
+
+#[cfg(feature = "voxcpm")]
 pub mod voxcpm_burn;
+
+/// Voice-clone reference-audio decoding shared by the HTTP handler and the
+/// VoxCPM2 runtime.
+#[cfg(any(feature = "candle", feature = "voxcpm"))]
+pub mod clone_audio;
 
 pub mod registry;
 pub use registry::TtsRuntimeRegistry;
@@ -22,7 +33,7 @@ use futures_util::stream::BoxStream;
 use serde::{Deserialize, Serialize};
 
 use crate::config::DeviceSelection;
-use crate::llm::ChatResult;
+use crate::llm::{ChatResult, NeuronError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -132,6 +143,22 @@ pub trait TtsRuntime: Send + Sync {
         Self: Sized;
 
     async fn synthesize(&self, text: &str, voice: Option<&str>) -> ChatResult<TtsAudio>;
+
+    /// Voice cloning from reference audio (VoxCPM2). `reference_audio` is
+    /// mono 16 kHz f32 samples in [-1, 1]; `prompt_text` is its transcript
+    /// when the reference is a continuation-style prompt. The default impl
+    /// rejects the call so callers get a clear 4xx instead of silent
+    /// zero-shot behavior from a runtime that cannot clone.
+    async fn synthesize_clone(
+        &self,
+        _text: &str,
+        _reference_audio: Option<&[f32]>,
+        _prompt_text: Option<&str>,
+    ) -> ChatResult<TtsAudio> {
+        Err(NeuronError::invalid_input(
+            "voice cloning is not supported by this TTS runtime (requires voxcpm2)",
+        ))
+    }
 
     /// Stream the synthesized audio as a series of byte chunks.
     /// The default implementation calls `synthesize()` and yields

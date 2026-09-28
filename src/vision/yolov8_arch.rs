@@ -26,7 +26,7 @@
 //! detections (one per scale).
 
 #[cfg(feature = "candle")]
-use candle_core::{DType, Device, IndexOp, Result, Tensor};
+use candle::{DType, Device, IndexOp, Result, Tensor};
 #[cfg(feature = "candle")]
 use candle_nn::{batch_norm, conv2d, BatchNorm, Conv2d, Module, ModuleT, VarBuilder, VarMap};
 
@@ -331,7 +331,7 @@ impl Yolov8Forward {
     /// required; that's a v1.1 follow-up.
     pub fn load_weights<P: AsRef<std::path::Path>>(&mut self, path: P) -> Result<usize> {
         self.varmap.load(path).map_err(|e| {
-            candle_core::Error::Msg(format!("varmap load: {e}"))
+            candle::Error::Msg(format!("varmap load: {e}"))
         })?;
         Ok(self.varmap.all_vars().len())
     }
@@ -439,7 +439,7 @@ fn decode_yolov8_head(
     stride: usize,
     conf_thresh: f32,
     num_classes: u32,
-) -> candle_core::Result<Vec<crate::vision::candle_yolo::RawDetection>> {
+) -> candle::Result<Vec<crate::vision::candle_yolo::RawDetection>> {
     // Apply sigmoid to class logits
     let cls_probs = candle_nn::ops::sigmoid(cls_logits)?;
     let (reg_h, reg_w) = (reg_dist.dim(2)?, reg_dist.dim(3)?);
@@ -519,7 +519,7 @@ fn dfl_decode(
     y: usize,
     #[allow(unused_variables)] w: usize,
     base_offset: usize,
-) -> candle_core::Result<(f32, f32)> {
+) -> candle::Result<(f32, f32)> {
     // Extract 16 values at reg_dist[0, base_offset..base_offset+16, y, x]
     let mut bins = [0.0f32; 16];
     for i in 0..16 {
@@ -657,7 +657,7 @@ mod tests {
                     100.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
         // The dfl_decode function takes a tensor. Let's simulate by
         // building a small reg_dist tensor with one anchor's bins.
-        use candle_core::{DType, Device, Tensor};
+        use candle::{DType, Device, Tensor};
         let device = Device::Cpu;
         let mut data = vec![0.0f32; 64];
         for i in 0..16 {
@@ -673,7 +673,7 @@ mod tests {
         // When all bins are equal, the softmax is uniform, and the
         // weighted sum should be (0+1+...+15)/16 = 7.5.
         let bins = [1.0f32; 16];
-        use candle_core::{DType, Device, Tensor};
+        use candle::{DType, Device, Tensor};
         let device = Device::Cpu;
         let mut data = vec![0.0f32; 64];
         for i in 0..16 {

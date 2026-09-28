@@ -27,7 +27,7 @@
 
 use std::path::Path;
 
-use candle_core::{DType, Device, IndexOp, Result, Tensor, D};
+use candle::{DType, Device, IndexOp, Result, Tensor, D};
 use candle_nn::layer_norm;
 use candle_nn::Module as _;
 use candle_transformers::models::mamba::{Config as MambaConfig, MambaBlock, State};
@@ -106,7 +106,10 @@ impl ClsAttention {
         let (k_full, v_full) = if rep == 1 {
             (k, v)
         } else {
-            (k.repeat((0, rep, 1, 1))?, v.repeat((0, rep, 1, 1))?)
+            // `1` on dim 0 = "leave the batch dim alone" — a literal `0`
+            // narrows the dim to zero under candle >= 0.11's strict
+            // PyTorch repeat semantics (old candle treated 0 as a no-op).
+            (k.repeat((1, rep, 1, 1))?, v.repeat((1, rep, 1, 1))?)
         };
 
         let att = (q.matmul(&k_full.t()?)? / (self.head_dim as f64).sqrt())?;
@@ -243,7 +246,7 @@ impl StreamMindGate {
 
     pub fn load_safetensors(path: &Path, device: &Device) -> Result<Self> {
         let vb =
-            unsafe { candle_nn::VarBuilder::from_mmaped_safetensors(&[path], DType::F32, device)? };
+            unsafe { crate::candle_compat::from_mmaped_safetensors(&[path], DType::F32, device)? };
         Self::load(vb, StreamMindGateConfig::default())
     }
 
@@ -254,7 +257,7 @@ impl StreamMindGate {
     pub fn perception_tokens(&self, vision_tokens: &Tensor) -> Result<Tensor> {
         let (t, p, d) = vision_tokens.dims3()?;
         if d != self.cfg.d_model {
-            return Err(candle_core::Error::msg(format!(
+            return Err(candle::Error::msg(format!(
                 "gate expects d_model={}, got {d}",
                 self.cfg.d_model
             )));

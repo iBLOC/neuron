@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use candle_core::{DType, Device, Tensor};
+use candle::{DType, Device, Tensor};
 use candle_nn::VarBuilder;
 use candle_transformers::models::bert::{BertModel, Config as BertConfig};
 use tokenizers::{PaddingDirection, PaddingParams, PaddingStrategy, Tokenizer};
@@ -204,7 +204,7 @@ impl EmbeddingRuntime for MiniLmL6V2EmbeddingRuntime {
         let dtype = DType::F32;
         let weights_path = path.join("model.safetensors");
         let vb = unsafe {
-            VarBuilder::from_mmaped_safetensors(
+            crate::candle_compat::from_mmaped_safetensors(
                 &[weights_path],
                 dtype,
                 &device,

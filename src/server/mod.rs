@@ -295,6 +295,8 @@ mod tests {
             speed: 1.0,
             response_format: "mp3".into(),
             stream: false,
+            reference_audio: None,
+            prompt_text: None,
         };
         let resp = handlers::audio_speech(
             axum::extract::State(state),

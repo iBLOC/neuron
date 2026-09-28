@@ -9,7 +9,7 @@
 //! do with the vision / language model internals — splitting it out
 //! keeps the surface testable without spinning up a full model.
 
-use candle_core::{DType, Device, IndexOp, Result, Tensor};
+use candle::{DType, Device, IndexOp, Result, Tensor};
 
 use super::config::PlaceholderTokens;
 

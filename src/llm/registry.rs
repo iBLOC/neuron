@@ -121,25 +121,28 @@ impl LlmRuntimeRegistry {
         self.registered.iter().map(|r| r.model_id.clone()).collect()
     }
 
-    /// Return the first registered model, or an unavailable stub if
-    /// nothing is registered. The stub returns errors for every
-    /// method — callers must have at least one model registered to
-    /// get a functional runtime through this path.
+    /// Return a placeholder for the first registered model, or an
+    /// unavailable stub if nothing is registered.
+    ///
+    /// Why this returns a stub instead of loading the registered
+    /// model eagerly: the previous implementation called
+    /// `Handle::try_current().block_on(self.runtime_for(&id))` here,
+    /// which panics with "Cannot start a runtime from within a
+    /// runtime" when `ServerState::new` is invoked from inside a
+    /// tokio runtime (any host that uses `#[tokio::main]` + the
+    /// `run_embedded` async API, including all `examples/` smoke
+    /// harnesses). The actual lazy load happens on `runtime_for`'s
+    /// path, which is async and called by HTTP handlers — so the
+    /// public contract is preserved: any *registered* model id
+    /// still resolves to a working runtime via
+    /// `runtime_for(model).await`, and only the (already-broken)
+    /// "state.llm fallback for unregistered model ids" path
+    /// receives a stub. That path was always expected to fail; the
+    /// stub just makes the failure explicit instead of panicking on
+    /// startup.
     pub fn default_runtime(&self) -> Arc<dyn LlmRuntime> {
         match self.registered.first() {
-            Some(entry) => {
-                let id = entry.model_id.clone();
-                match tokio::runtime::Handle::try_current() {
-                    Ok(handle) => match handle.block_on(async { self.runtime_for(&id).await }) {
-                        Ok(rt) => rt,
-                        Err(e) => {
-                            eprintln!("[neuron] llm: failed to load default runtime for {id}: {e}");
-                            Arc::new(UnavailableLlmRuntime)
-                        }
-                    },
-                    Err(_) => Arc::new(UnavailableLlmRuntime),
-                }
-            }
+            Some(_) => Arc::new(UnavailableLlmRuntime),
             None => Arc::new(UnavailableLlmRuntime),
         }
     }

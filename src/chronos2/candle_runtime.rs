@@ -19,7 +19,7 @@
 
 use std::path::Path;
 
-use candle_core::{DType, Device, Tensor};
+use candle::{DType, Device, Tensor};
 use candle_nn::VarBuilder;
 use thiserror::Error;
 
@@ -115,7 +115,7 @@ pub enum CandleChronos2Error {
     #[error("runtime error: {0}")]
     Runtime(#[from] Chronos2Error),
     #[error("candle error: {0}")]
-    Candle(#[from] candle_core::Error),
+    Candle(#[from] candle::Error),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -160,7 +160,7 @@ impl CandleChronos2Runtime {
     ) -> Result<Self, CandleChronos2Error> {
         let safetensors_paths = vec![weights_path.clone()];
         let vb = unsafe {
-            VarBuilder::from_mmaped_safetensors(&safetensors_paths, DType::F32, &device)
+            crate::candle_compat::from_mmaped_safetensors(&safetensors_paths, DType::F32, &device)
         }
         .map_err(|e| {
             CandleChronos2Error::SafeTensors(format!(

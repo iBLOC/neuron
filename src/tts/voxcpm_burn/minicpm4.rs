@@ -40,6 +40,11 @@ pub struct MiniCPMConfig {
     pub scale_depth: f32,
     pub rope_theta: f32,
     pub kv_channels: Option<usize>,
+    /// VoxCPM2's residual acoustic LM runs without RoPE (`residual_lm_no_rope`
+    /// in the upstream config). Defaults to false so the 0.5B config parses
+    /// unchanged.
+    #[config(default = false)]
+    pub no_rope: bool,
 }
 
 impl MiniCPMConfig {
@@ -75,16 +80,22 @@ impl MiniCPMConfig {
             norm: MiniCPMRMSNorm {
                 inner: RmsNormConfig::new(self.hidden_size).init(device),
             },
-            rope_emb: MiniCPMLongRoPEconfig::new(
-                self.hidden_size,
-                self.num_attention_heads,
-                self.rope_theta,
-                self.rope_scaling.short_factor.clone(),
-                self.rope_scaling.long_factor.clone(),
-                self.max_position_embeddings,
-                self.rope_scaling.original_max_position_embeddings,
-            )
-            .init(device),
+            rope_emb: if self.no_rope {
+                None
+            } else {
+                Some(
+                    MiniCPMLongRoPEconfig::new(
+                        self.hidden_size,
+                        self.num_attention_heads,
+                        self.rope_theta,
+                        self.rope_scaling.short_factor.clone(),
+                        self.rope_scaling.long_factor.clone(),
+                        self.max_position_embeddings,
+                        self.rope_scaling.original_max_position_embeddings,
+                    )
+                    .init(device),
+                )
+            },
             kv_cache: kv_cache_config.map(|(batch_size, max_length)| {
                 StaticKVCache::new(
                     self.num_hidden_layers,
@@ -105,7 +116,7 @@ pub struct MiniCPMModel<B: Backend> {
     pub embed_tokens: Option<Embedding<B>>,
     pub layers: Vec<MiniCPMDecoderLayer<B>>,
     pub norm: MiniCPMRMSNorm<B>,
-    rope_emb: MiniCPMLongRoPE<B>,
+    rope_emb: Option<MiniCPMLongRoPE<B>>,
     pub kv_cache: Option<StaticKVCache<B>>,
 }
 
@@ -115,9 +126,11 @@ impl<B: Backend> MiniCPMModel<B> {
         inputs_embeds: Tensor<B, 3>,
         is_causal: bool,
     ) -> (Tensor<B, 3>, Vec<(Tensor<B, 4>, Tensor<B, 4>)>) {
-        let position_ids =
-            Tensor::arange(0..inputs_embeds.dims()[1] as i64, &inputs_embeds.device());
-        let position_emb = self.rope_emb.forward(position_ids.clone().unsqueeze());
+        let position_emb = self.rope_emb.as_ref().map(|rope| {
+            let position_ids =
+                Tensor::arange(0..inputs_embeds.dims()[1] as i64, &inputs_embeds.device());
+            rope.forward(position_ids.unsqueeze())
+        });
         let mut hidden_states = inputs_embeds;
 
         let mut next_decoder_cache = Vec::new();
@@ -134,14 +147,16 @@ impl<B: Backend> MiniCPMModel<B> {
         (hidden_states, next_decoder_cache)
     }
 
+    /// One decode step. `inputs_embeds` is `[batch, hidden]`; returns
+    /// `[batch, hidden]`.
     pub fn forward_step(
         &mut self,
         inputs_embeds: Tensor<B, 2>,
         position_id: usize,
     ) -> Tensor<B, 2> {
-        let position_emb = self
-            .rope_emb
-            .forward(Tensor::from_data([position_id], &inputs_embeds.device()));
+        let position_emb = self.rope_emb.as_ref().map(|rope| {
+            rope.forward(Tensor::from_data([position_id], &inputs_embeds.device()))
+        });
         let mut hidden_states = inputs_embeds;
 
         for (i, decoder_layer) in self.layers.iter().enumerate() {
@@ -218,7 +233,7 @@ impl<B: Backend> MiniCPMDecoderLayer<B> {
     pub fn forward(
         &self,
         hidden_states: Tensor<B, 3>,
-        position_emb: (Tensor<B, 2>, Tensor<B, 2>),
+        position_emb: Option<(Tensor<B, 2>, Tensor<B, 2>)>,
         is_causal: bool,
     ) -> (Tensor<B, 3>, Tensor<B, 4>, Tensor<B, 4>) {
         let residual = hidden_states.clone();
@@ -252,7 +267,7 @@ impl<B: Backend> MiniCPMDecoderLayer<B> {
     pub fn forward_step(
         &self,
         hidden_states: Tensor<B, 2>,
-        position_emb: (Tensor<B, 2>, Tensor<B, 2>),
+        position_emb: Option<(Tensor<B, 2>, Tensor<B, 2>)>,
         position_id: usize,
         kv_cache_index: usize,
         kv_cache: Option<&mut StaticKVCache<B>>,
@@ -344,7 +359,7 @@ impl<B: Backend> MiniCPMAttention<B> {
     pub fn forward(
         &self,
         hidden_states: Tensor<B, 3>,
-        position_emb: (Tensor<B, 2>, Tensor<B, 2>),
+        position_emb: Option<(Tensor<B, 2>, Tensor<B, 2>)>,
         is_causal: bool,
     ) -> (Tensor<B, 3>, Tensor<B, 4>, Tensor<B, 4>) {
         let [bsz, q_len, _] = hidden_states.dims();
@@ -363,9 +378,10 @@ impl<B: Backend> MiniCPMAttention<B> {
             .reshape([bsz, q_len, self.num_key_value_heads, self.head_dim])
             .swap_dims(1, 2);
 
-        let (cos, sin) = position_emb;
-        let (query_states, key_states) =
-            Self::apply_rotary_pos_emb(query_states, key_states, cos, sin);
+        let (query_states, key_states) = match position_emb {
+            Some((cos, sin)) => Self::apply_rotary_pos_emb(query_states, key_states, cos, sin),
+            None => (query_states, key_states),
+        };
 
         let attn_output = Self::scaled_dot_product_attention(
             query_states,
@@ -389,7 +405,7 @@ impl<B: Backend> MiniCPMAttention<B> {
     pub fn forward_step(
         &self,
         hidden_states: Tensor<B, 2>,
-        position_emb: (Tensor<B, 2>, Tensor<B, 2>),
+        position_emb: Option<(Tensor<B, 2>, Tensor<B, 2>)>,
         position_id: usize,
         kv_cache_index: usize,
         mut kv_cache: Option<&mut StaticKVCache<B>>,
@@ -409,9 +425,10 @@ impl<B: Backend> MiniCPMAttention<B> {
             .reshape([bsz, 1, self.num_key_value_heads, self.head_dim])
             .swap_dims(1, 2);
 
-        let (cos, sin) = position_emb;
-        let (query_states, key_states) =
-            Self::apply_rotary_pos_emb(query_states, key_states, cos, sin);
+        let (query_states, key_states) = match position_emb {
+            Some((cos, sin)) => Self::apply_rotary_pos_emb(query_states, key_states, cos, sin),
+            None => (query_states, key_states),
+        };
 
         kv_cache
             .as_mut()
@@ -437,7 +454,9 @@ impl<B: Backend> MiniCPMAttention<B> {
         let attn_output = attn_output.swap_dims(1, 2);
         let attn_output = attn_output.reshape([bsz, self.num_heads * self.head_dim]);
 
-        self.o_proj.forward(attn_output.unsqueeze())
+        // Returns [batch, hidden] — burn 0.21's `unsqueeze()` appends trailing
+        // dims, so the old front-insert trick no longer applies here.
+        self.o_proj.forward(attn_output)
     }
 
     pub fn scaled_dot_product_attention(
@@ -715,6 +734,14 @@ impl<B: Backend> StaticKVCache<B> {
         key: Tensor<B, 4>,
         value: Tensor<B, 4>,
     ) {
+        // key/value arrive as [batch, kv_heads, 1, head_dim]; reshape to the
+        // exact shape of the cache slice being written so burn's
+        // slice_assign never has to rely on rank alignment.
+        let [b, h, _one, d] = key.dims();
+        let key = key.reshape([1, 1, b, h, 1, d]);
+        let [b, h, _one, d] = value.dims();
+        let value = value.reshape([1, 1, b, h, 1, d]);
+
         self.kv_cache.inplace(|t| {
             let full = 0..usize::MAX;
             t.slice_assign(
@@ -726,7 +753,7 @@ impl<B: Backend> StaticKVCache<B> {
                     position_id..position_id + 1,
                     full,
                 ],
-                key.unsqueeze(),
+                key,
             )
         });
         self.kv_cache.inplace(|t| {
@@ -740,7 +767,7 @@ impl<B: Backend> StaticKVCache<B> {
                     position_id..position_id + 1,
                     full,
                 ],
-                value.unsqueeze(),
+                value,
             )
         });
     }
@@ -750,6 +777,9 @@ impl<B: Backend> StaticKVCache<B> {
         self.kv_cache = self.kv_cache.zeros_like();
 
         for i in 0..self.num_layers {
+            let [b, h, len, d] = kv_caches[i].0.dims();
+            let key = kv_caches[i].clone().0.reshape([1, 1, b, h, len, d]);
+            let value = kv_caches[i].clone().1.reshape([1, 1, b, h, len, d]);
             let full = 0..usize::MAX;
             self.kv_cache.inplace(|t| {
                 t.slice_assign(
@@ -761,7 +791,7 @@ impl<B: Backend> StaticKVCache<B> {
                         0..self.current_length,
                         full.clone(),
                     ],
-                    kv_caches[i].clone().0.unsqueeze(),
+                    key,
                 )
             });
             self.kv_cache.inplace(|t| {
@@ -774,7 +804,7 @@ impl<B: Backend> StaticKVCache<B> {
                         0..self.current_length,
                         full,
                     ],
-                    kv_caches[i].clone().1.unsqueeze(),
+                    value,
                 )
             });
         }

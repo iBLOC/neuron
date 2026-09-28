@@ -67,9 +67,7 @@ impl TtsRuntimeRegistry {
             .registered
             .iter()
             .find(|r| r.model_id == model_id)
-            .ok_or_else(|| {
-                NeuronError::new(format!("ModelNotRegistered: {model_id}"))
-            })?;
+            .ok_or_else(|| NeuronError::model_not_registered(model_id))?;
 
         let key = TtsRegistryKey {
             model_id: entry.model_id.clone(),
@@ -77,7 +75,7 @@ impl TtsRuntimeRegistry {
             device: entry.device,
         };
 
-        let loaded = self.loaded.lock().await;
+        let mut loaded = self.loaded.lock().await;
         if let Some(rt) = loaded.get(&key) {
             return Ok(rt.clone());
         }
@@ -87,11 +85,20 @@ impl TtsRuntimeRegistry {
         match entry.impl_id {
             #[cfg(feature = "voxcpm")]
             TtsImpl::Burn => {
-                let rt = super::VoxCpmTtsRuntime::load(&entry.model_id, &entry.device)
-                    .await
-                    .map_err(|e| {
-                        NeuronError::new(format!("VoxCpmTtsRuntime load failed: {e}"))
-                    })?;
+                // Both burn TTS runtimes share the `burn` engine impl;
+                // the catalog id picks the model generation.
+                let result = if entry.model_id == "voxcpm2" {
+                    super::VoxCpm2TtsRuntime::load(&entry.model_id, &entry.device).await
+                } else {
+                    super::VoxCpmTtsRuntime::load(&entry.model_id, &entry.device).await
+                };
+                // `load` returns a boxed trait object; the cache stores
+                // `Arc<dyn TtsRuntime>`. Coerce via `Arc::from` (the blanket
+                // `impl<T: ?Sized> From<Box<T>> for Arc<T>`).
+                let rt: Arc<dyn TtsRuntime> =
+                    Arc::from(result.map_err(|e| {
+                        NeuronError::new(format!("burn TTS load failed: {e}"))
+                    })?);
                 loaded.insert(key, rt.clone());
                 return Ok(rt);
             }

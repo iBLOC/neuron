@@ -17,7 +17,7 @@ use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Through
 use std::hint::black_box;
 
 #[cfg(feature = "candle")]
-use candle_core::{DType, Device, Tensor};
+use candle::{DType, Device, Tensor};
 
 #[cfg(feature = "candle")]
 fn bench_alloc_without_pool(c: &mut Criterion) {

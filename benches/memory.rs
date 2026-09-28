@@ -49,6 +49,19 @@ impl MemorySnapshot {
         s
     }
 
+    /// Capture a memory snapshot of *another* process by pid.
+    ///
+    /// The comparative benchmark drives ollama / llama.cpp / vLLM as
+    /// separate processes, so their footprint has to be sampled from
+    /// the outside rather than via `now()`. Returns all-zero fields
+    /// when the pid is gone or the platform can't inspect other
+    /// processes — callers render that as "n/a".
+    pub fn of_pid(pid: u32) -> Self {
+        let mut s = Self::default();
+        platform::read_pid(pid, &mut s);
+        s
+    }
+
     /// Compute the RSS delta between this snapshot and an earlier one.
     /// Returns 0 if earlier.rss > this.rss (memory was released).
     pub fn rss_delta_since(&self, earlier: &MemorySnapshot) -> i64 {
@@ -76,22 +89,7 @@ mod platform {
     use super::MemorySnapshot;
 
     pub fn read(s: &mut MemorySnapshot) {
-        // /proc/self/status: parse VmRSS, VmHWM, VmSize
-        if let Ok(content) = std::fs::read_to_string("/proc/self/status") {
-            for line in content.lines() {
-                let mut parts = line.split_whitespace();
-                let key = parts.next().unwrap_or("");
-                let value_str = parts.next().unwrap_or("0");
-                let value_kb: u64 = value_str.parse().unwrap_or(0);
-                let value_bytes = value_kb * 1024;
-                match key {
-                    "VmRSS:" => s.rss_bytes = value_bytes,
-                    "VmHWM:" => s.peak_rss_bytes = value_bytes,
-                    "VmSize:" => s.virtual_bytes = value_bytes,
-                    _ => {}
-                }
-            }
-        }
+        parse_status("/proc/self/status", s);
         // /proc/self/statm: cheap fallback for RSS if status is missing
         if s.rss_bytes == 0 {
             if let Ok(content) = std::fs::read_to_string("/proc/self/statm") {
@@ -103,6 +101,30 @@ mod platform {
                     if let Ok(rss_pages) = _resident.parse::<u64>() {
                         s.rss_bytes = rss_pages * 4096;
                     }
+                }
+            }
+        }
+    }
+
+    /// Read `/proc/<pid>/status` for another process. Same field
+    /// mapping as `read`; a dead pid simply yields zeros.
+    pub fn read_pid(pid: u32, s: &mut MemorySnapshot) {
+        parse_status(&format!("/proc/{pid}/status"), s);
+    }
+
+    fn parse_status(path: &str, s: &mut MemorySnapshot) {
+        if let Ok(content) = std::fs::read_to_string(path) {
+            for line in content.lines() {
+                let mut parts = line.split_whitespace();
+                let key = parts.next().unwrap_or("");
+                let value_str = parts.next().unwrap_or("0");
+                let value_kb: u64 = value_str.parse().unwrap_or(0);
+                let value_bytes = value_kb * 1024;
+                match key {
+                    "VmRSS:" => s.rss_bytes = value_bytes,
+                    "VmHWM:" => s.peak_rss_bytes = value_bytes,
+                    "VmSize:" => s.virtual_bytes = value_bytes,
+                    _ => {}
                 }
             }
         }
@@ -133,6 +155,13 @@ mod platform {
             }
         }
     }
+
+    /// Not implemented for foreign processes: `task_info` needs a
+    /// `task_t`, which for another pid requires `task_for_pid` and the
+    /// `com.apple.security.get-task-allow` entitlement. The Linux and
+    /// Windows paths cover the platforms the comparative benchmark
+    /// actually runs on; macOS reports "n/a".
+    pub fn read_pid(_pid: u32, _s: &mut MemorySnapshot) {}
 }
 
 #[cfg(target_os = "windows")]
@@ -158,6 +187,38 @@ mod platform {
             }
         }
     }
+
+    /// Open another process and read its counters. The comparative
+    /// benchmark uses this to measure ollama / llama.cpp / vLLM from
+    /// the outside, so every framework is a peer process measured the
+    /// same way.
+    pub fn read_pid(pid: u32, s: &mut MemorySnapshot) {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::ProcessStatus::{
+            K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS,
+        };
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_READ,
+        };
+        unsafe {
+            let handle = OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ,
+                0,
+                pid,
+            );
+            if handle.is_null() {
+                return;
+            }
+            let mut counters: PROCESS_MEMORY_COUNTERS = std::mem::zeroed();
+            let cb = std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
+            if K32GetProcessMemoryInfo(handle, &mut counters, cb) != 0 {
+                s.rss_bytes = counters.WorkingSetSize as u64;
+                s.peak_rss_bytes = counters.PeakWorkingSetSize as u64;
+                s.virtual_bytes = counters.PagefileUsage as u64;
+            }
+            CloseHandle(handle);
+        }
+    }
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
@@ -166,6 +227,9 @@ mod platform {
     /// Unsupported platform: return all zeros. Bench reports will show
     /// "n/a" for memory columns but latency still measures correctly.
     pub fn read(_s: &mut MemorySnapshot) {}
+
+    /// Same contract as `read` for foreign pids.
+    pub fn read_pid(_pid: u32, _s: &mut MemorySnapshot) {}
 }
 
 // ---- Public benchmark helper -------------------------------------------
@@ -220,6 +284,30 @@ mod tests {
         // We just verify the API works; values vary.
         let _ = s.rss_bytes;
         let _ = s.peak_rss_bytes;
+    }
+
+    #[test]
+    fn test_of_pid_self_matches_now() {
+        // Sampling our own pid through the foreign-process path must
+        // agree with the self path on platforms where both are
+        // implemented. macOS stubs `read_pid`, so it reports zeros --
+        // skip the comparison there.
+        #[cfg(not(target_os = "macos"))]
+        {
+            let me = std::process::id();
+            let via_pid = MemorySnapshot::of_pid(me);
+            let direct = MemorySnapshot::now();
+            assert!(via_pid.rss_bytes > 0, "of_pid(self) should see RSS");
+            assert_eq!(via_pid.rss_bytes, direct.rss_bytes);
+        }
+    }
+
+    #[test]
+    fn test_of_pid_unknown_pid_returns_zeros() {
+        // Pid 0xFFFF_FFFF cannot exist; the call must not panic and
+        // must report zeros so the bench renders "n/a".
+        let s = MemorySnapshot::of_pid(0xFFFF_FFFF);
+        assert_eq!(s.rss_bytes, 0);
     }
 
     #[test]

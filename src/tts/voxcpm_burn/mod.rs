@@ -5,6 +5,10 @@
 //! and audiovae.rs for the audio decoder.
 
 pub mod audiovae;
+pub mod audiovae_v2;
+pub mod audiovae_v2_stream;
 pub mod compat;
 pub mod minicpm4;
+pub mod voxcpm2_model;
 pub mod voxcpm_model;
+pub mod weights;

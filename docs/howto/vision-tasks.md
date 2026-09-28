@@ -37,6 +37,58 @@ curl -X POST http://localhost:8085/v1/vision/detect \
 | `lora_adapter` | — | string | — | Name of a registered LoRA adapter (see below) |
 | `max_detections` | — | integer | `100` | Cap on detections returned (detection only) |
 
+## StreamMind gate (Mage-VL)
+
+```
+POST /v1/vision/gate/score
+```
+
+The Mage-VL StreamMind event gate scores a rolling codec window and emits `p_speak ∈ [0, 1]`: the likelihood that the window contains a response-worthy event. Clients poll the gate and only invoke full VLM generation when `p_speak` crosses a threshold — this is how Mage-VL achieves sub-second response time on streamed video without invoking Qwen3-4B on every frame.
+
+### Request
+
+```bash
+curl -X POST http://localhost:8085/v1/vision/gate/score \
+  -H "Content-Type: application/json" \
+  -d '{
+    "segments": [
+      {
+        "start_ms": 0,
+        "end_ms": 500,
+        "perception_tokens": [[0.12, 0.45, ...], ...]   // MageViT tokens for the window
+      },
+      {
+        "start_ms": 500,
+        "end_ms": 1000,
+        "perception_tokens": [[0.32, 0.78, ...], ...]
+      }
+    ],
+    "threshold": 0.5
+  }'
+```
+
+| Field | Required | Type | Description |
+|---|---|---|---|
+| `segments` | ✅ | array | Ordered list of codec windows, each with `start_ms` / `end_ms` (window boundaries) + `perception_tokens` (MageViT output for the window). |
+| `threshold` | — | float (0–1) | Optional cutoff; segments above are flagged in the response as "fire generation". |
+
+### Response
+
+```json
+{
+  "scores": [
+    {"start_ms": 0,    "end_ms": 500,  "p_speak": 0.12, "fires": false},
+    {"start_ms": 500,  "end_ms": 1000, "p_speak": 0.74, "fires": true}
+  ],
+  "model": "streammind_gate",
+  "device": "cpu"
+}
+```
+
+The gate ships as `streammind_gate.safetensors` inside the `microsoft/Mage-VL` HF checkpoint. `MageVlRuntime` lazy-loads it on first gate request. Use `MageVlRuntime::reset_cache()` between concurrent streams to avoid KV-cache cross-talk (see the Mage-VL runtime docs in `src/mage_vl/runtime.rs`).
+
+Full Mage-VL text generation then goes through the standard routes — `POST /v1/chat/completions` with `model: "microsoft/Mage-VL"` and OpenAI-shaped `image_url` content, or `POST /v1/messages` for Anthropic Messages v1 shape. Both are backed by the same `MageVlRuntime` registered in `state.engines.llm` when `NEURON_LLM_RUNTIME=mage_vl`.
+
 ## Response: detection
 
 ```json

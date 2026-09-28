@@ -16,7 +16,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use candle_core::{DType, Device, Result, Tensor};
+use candle::{DType, Device, Result, Tensor};
 use futures_util::stream::{BoxStream, StreamExt};
 use tokenizers::Tokenizer;
 use tokio::sync::OnceCell;
@@ -349,7 +349,7 @@ async fn decode_image_block(
                 .map(|(_, b)| b)
                 .unwrap_or(data.as_str());
             let bytes = base64_decode(b64)
-                .map_err(|e| candle_core::Error::msg(format!("base64 decode: {e}")))?;
+                .map_err(|e| candle::Error::msg(format!("base64 decode: {e}")))?;
             let (pixels, grid) = preprocess_image_qwen(&bytes, device)?;
             Ok(Some((pixels, grid)))
         }
@@ -375,9 +375,9 @@ fn preprocess_image_qwen(bytes: &[u8], device: &Device) -> Result<(Tensor, Tenso
 
     let img = ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()
-        .map_err(|e| candle_core::Error::msg(format!("image sniff: {e}")))?
+        .map_err(|e| candle::Error::msg(format!("image sniff: {e}")))?
         .decode()
-        .map_err(|e| candle_core::Error::msg(format!("image decode: {e}")))?;
+        .map_err(|e| candle::Error::msg(format!("image decode: {e}")))?;
     let rgb = img.to_rgb8();
 
     let (raw_w, raw_h) = (rgb.width() as usize, rgb.height() as usize);

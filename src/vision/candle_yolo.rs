@@ -58,8 +58,8 @@ impl CandleYoloRuntime {
         #[cfg(feature = "candle")]
         let tensor_pool = crate::vision::memory_pool::TensorPool::new(
             match device {
-                DeviceSelection::Cpu | DeviceSelection::Auto => candle_core::Device::Cpu,
-                _ => candle_core::Device::Cpu,
+                DeviceSelection::Cpu | DeviceSelection::Auto => candle::Device::Cpu,
+                _ => candle::Device::Cpu,
             },
         );
         Self {
@@ -170,7 +170,7 @@ impl CandleYoloRuntime {
     /// weights are available; the shape and pipeline are correct.
     #[cfg(feature = "candle")]
     fn forward_pass(&self, letterboxed: &[u8]) -> Result<Vec<RawDetection>, NeuronError> {
-        use candle_core::{Device, Tensor};
+        use candle::{Device, Tensor};
         use super::yolov8_arch::Yolov8Forward;
 
         let device = match self.device {

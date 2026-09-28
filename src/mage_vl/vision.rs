@@ -14,7 +14,7 @@
 //! specific delta is the 3D rotary table (4:6:6 split on
 //! `head_dim//2`).
 
-use candle_core::{DType, Device, IndexOp, Module, Result, Tensor, D};
+use candle::{DType, Device, IndexOp, Module, Result, Tensor, D};
 use candle_nn::{Conv2d, Conv2dConfig, VarBuilder};
 
 use super::config::MageVlVisionConfig;
@@ -482,7 +482,7 @@ impl MageViT {
         dtype: DType,
         device: &Device,
     ) -> Result<Self> {
-        let vb = unsafe { VarBuilder::from_mmaped_safetensors(paths, dtype, device)? };
+        let vb = unsafe { crate::candle_compat::from_mmaped_safetensors(paths, dtype, device)? };
         Self::new(cfg, vb.pp("model"), device)
     }
 

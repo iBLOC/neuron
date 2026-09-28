@@ -250,9 +250,9 @@ impl ServerState {
         //   - `NEURON_TTS_RUNTIME=voxcpm` registers `"voxcpm-model"` (legacy
         //     abstract id kept for backward compat with hosts that hard-coded
         //     the id).
-        //   - Future VoxCPM1.5 / VoxCPM2 should be registered under their
-        //     catalog id (`"voxcpm1.5"`, `"voxcpm2"`) via the config-driven
-        //     `config.registrations` loop below — not under `"voxcpm-model"`.
+        //   - `NEURON_TTS_RUNTIME=voxcpm2` registers the catalog id
+        //     `"voxcpm2"` (48 kHz 2B model; loads the upstream checkpoints
+        //     directly). VoxCPM1.5, if ported, should follow the same rule.
         //   - `/v1/audio/speech` defaults `model` to `"echo-tts"` (which is
         //     unregistered), so omitting `model` continues to fall through to
         //     `state.tts` shortcut — no behavior regression there.
@@ -269,6 +269,19 @@ impl ServerState {
                 #[cfg(not(feature = "voxcpm"))]
                 {
                     eprintln!("[neuron] NEURON_TTS_RUNTIME=voxcpm but voxcpm feature not enabled");
+                }
+            }
+            Some("voxcpm2") => {
+                #[cfg(feature = "voxcpm")]
+                {
+                    // 2B params materialized as f32 ≈ 9.2 GB + activations.
+                    let _ = tts_registry.register(
+                        "voxcpm2".into(), crate::tts::TtsImpl::Burn, device.clone(), 10_000_000_000,
+                    );
+                }
+                #[cfg(not(feature = "voxcpm"))]
+                {
+                    eprintln!("[neuron] NEURON_TTS_RUNTIME=voxcpm2 but voxcpm feature not enabled");
                 }
             }
             _ => {}

@@ -1,10 +1,14 @@
 pub mod adapter;
 pub mod asr;
 pub mod api_error;
+pub mod bench;
 pub mod canonical;
+#[cfg(feature = "candle")]
+pub mod candle_compat;
 pub mod chronos2;
 pub mod capabilities;
 pub mod config;
+pub mod decision;
 pub mod embedded;
 pub mod embedding;
 pub mod engine;
@@ -21,7 +25,17 @@ pub use asr::{AsrImpl, AsrRuntime, AsrRuntimeRegistry, Transcription};
 
 #[cfg(feature = "candle")]
 pub use asr::whisper::WhisperAsrRuntime;
+#[cfg(feature = "tract")]
+pub use asr::sensevoice::TractSenseVoiceRuntime;
+#[cfg(feature = "sherpa")]
+pub use asr::sherpa::SherpaAsrRuntime;
 pub use config::{DeviceSelection, NeuronConfig};
+pub use decision::{
+    ActProbabilities, DecisionImpl, DecisionQuestion, DecisionRequest, DecisionResponse,
+    DecisionResult, DecisionRuntime, DecisionRuntimeRegistry, DecisionUsage, QuestionType,
+};
+#[cfg(feature = "tract")]
+pub use decision::tract_session::TractDecisionRuntime;
 pub use embedded::{health, run_embedded, NeuronEmbedConfig, NeuronHandle, NeuronHealth};
 pub use models::EngineType;
 pub use embedding::{

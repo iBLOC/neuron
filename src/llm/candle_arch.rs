@@ -282,3 +282,82 @@ pub fn detect_model_type(model_dir: &std::path::Path) -> Result<String, String> 
         .ok_or_else(|| "config.json missing 'model_type' field".to_string())
         .map(String::from)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Write a synthetic MiniCPM5-2B `config.json` mirroring the
+    /// real OpenBMB checkpoint (Standard `LlamaForCausalLM`,
+    /// 2026-09-07 release, 2.52B params, 42 layers, GQA 16Q/2KV,
+    /// 131K context, vocab 130560, rope_theta 5_000_000,
+    /// `tie_word_embeddings = false`) to a tempdir and confirm
+    /// `detect_arch` dispatches it through the `CausalArch::Llama`
+    /// variant without losing any structural field. The companion
+    /// catalog-side test in `src/capabilities/catalog.rs` only
+    /// verifies the catalog entry; this test is the candle-path
+    /// guarantee. Field values are mirrored verbatim from the HF
+    /// config.json at `huggingface:openbmb/MiniCPM5-2B` — keep
+    /// them in sync if OpenBMB revises the checkpoint.
+    #[test]
+    fn test_detect_arch_minicpm5_2b_dispatches_to_llama() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("config.json"),
+            r#"{
+                "architectures": ["LlamaForCausalLM"],
+                "model_type": "llama",
+                "hidden_size": 2048,
+                "intermediate_size": 6144,
+                "num_attention_heads": 16,
+                "num_hidden_layers": 42,
+                "num_key_value_heads": 2,
+                "head_dim": 128,
+                "max_position_embeddings": 131072,
+                "rms_norm_eps": 1e-06,
+                "rope_theta": 5000000,
+                "rope_scaling": null,
+                "tie_word_embeddings": false,
+                "torch_dtype": "bfloat16",
+                "vocab_size": 130560,
+                "bos_token_id": 0,
+                "eos_token_id": [1, 130073],
+                "use_cache": true
+            }"#,
+        )
+        .expect("write synthetic minicpm5-2b config.json");
+        let (arch, model_type) =
+            detect_arch(dir.path()).expect("detect_arch should accept Standard LlamaForCausalLM");
+        assert_eq!(
+            model_type, "llama",
+            "MiniCPM5-2B must dispatch through the Llama model_type"
+        );
+        match arch {
+            CausalArch::Llama(cfg) => {
+                assert_eq!(cfg.hidden_size, 2048);
+                assert_eq!(cfg.intermediate_size, 6144);
+                assert_eq!(cfg.num_attention_heads, 16);
+                // `num_key_value_heads` is Option<usize> in
+                // candle-transformers 0.10.2; GQA=2 means Some(2).
+                assert_eq!(cfg.num_key_value_heads, Some(2));
+                assert_eq!(cfg.num_hidden_layers, 42);
+                assert_eq!(cfg.max_position_embeddings, 131072);
+                assert_eq!(cfg.vocab_size, 130560);
+                assert_eq!(
+                    cfg.rope_theta, 5_000_000.0,
+                    "MiniCPM5-2B uses OpenBMB's rope_theta=5e6, not the Llama default 1e4"
+                );
+                assert_eq!(
+                    cfg.tie_word_embeddings,
+                    Some(false),
+                    "MiniCPM5-2B ships with tie_word_embeddings=false \
+                     (separate embed/output projection); candle-transformers \
+                     exposes this as Option<bool>"
+                );
+            }
+            other => panic!(
+                "expected CausalArch::Llama for minicpm5-2b, got {other:?}"
+            ),
+        }
+    }
+}

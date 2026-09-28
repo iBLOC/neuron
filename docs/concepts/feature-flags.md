@@ -19,6 +19,8 @@ neuron exposes its full feature set as Cargo features, so the host binary pays c
 | `litert` | `litert-lm` | — | On-device LLM via Google LiteRT-LM subprocess (Gemma 3) |
 | `asr-audio` | `symphonia`, `rubato` | — | MP3 / FLAC / OGG-Vorbis ASR decoding (otherwise WAV only) |
 | `mistralrs` | `mistralrs` + (re-uses candle) | — | LLM via mistral.rs engine (40+ model families) |
+| `tract` | `tract-onnx`, `ndarray`, `tokenizers`, `rustfft` | — | Pure-Rust ONNX inference (Laya `POST /v1/decisions` + own-ONNX SenseVoiceSmall ASR via `model.prepped.onnx`) |
+| `sherpa` | `sherpa-onnx` | — | `sherpa-onnx` official Rust binding (1.13.x). Downloads prebuilt static libs from GitHub releases at build time — no cmake / C++ toolchain on the host. Backs the sherpa-onnx ASR runtime on SenseVoiceSmall. |
 
 ## Build recipes
 

@@ -81,7 +81,9 @@ pub trait AsrRuntime: Send + Sync {
 }
 ```
 
-**Implementations**: `WhisperAsrRuntime` (candle-transformers). MP3 / FLAC / OGG-Vorbis via `symphonia` when `--features asr-audio` is enabled.
+**Implementations**: `WhisperAsrRuntime` (candle-transformers), `SherpaAsrRuntime` (official sherpa-onnx Rust binding, `--features sherpa`), `TractSenseVoiceRuntime` (own-ONNX SenseVoiceSmall via tract, `--features tract`). MP3 / FLAC / OGG-Vorbis via `symphonia` when `--features asr-audio` is enabled. The two SenseVoice engines run the same exported graph (`scripts/prep-sensevoice-onnx.py` strips the export's dynamic PE chain so tract can load it) and are compared in `benches/asr_speed.rs`.
+
+**Concrete constructors (benchmark + diagnostics)**: each of the two SenseVoice engines also exposes a sync `from_dir(model_id, &Path)` that returns the concrete runtime type, so the `asr_speed` benchmark and the prep-script's parity check can stay off `Box<dyn AsrRuntime>`. Both go through `AsrRuntime::load` for the OpenAI HTTP path.
 
 **Registry**: `AsrRuntimeRegistry`
 

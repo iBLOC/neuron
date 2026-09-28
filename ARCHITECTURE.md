@@ -1,6 +1,6 @@
 # Architecture
 
-`neuron` is a **library-only** Rust crate that exposes an OpenAI-compatible (and Anthropic Messages v1) HTTP API on top of three ML frameworks — **candle** (LLM, ASR, Rerank, Embedding, Vision), **burn** (TTS), and **litert_lm** (on-device LLM subprocess).
+`neuron` is a **library-only** Rust crate that exposes an OpenAI-compatible (and Anthropic Messages v1) HTTP API on top of three ML frameworks — **candle** (LLM, ASR, Rerank, Embedding, Vision, Mage-VL VLM, Chronos2 forecasting), **burn** (TTS), and **litert_lm** (on-device LLM subprocess). Decision scoring (Laya) sits outside those three: it runs on the pure-Rust **tract** ONNX executor behind the `tract` Cargo feature.
 
 ## High-level data flow
 
@@ -16,16 +16,19 @@
 │         ▼                                                            │
 │   Handler dispatches to runtime_for(model_id)                        │
 │         │                                                            │
-│         ├─→ LlmRuntimeRegistry  ─┬─→ CandleLlmRuntime      (Qwen/Llama/Phi/Mistral/ChatGLM)
+│         ├─→ LlmRuntimeRegistry  ─┬─→ CandleLlmRuntime      (Qwen/Llama/Phi/Mistral/ChatGLM/MiniCPM5)
 │         │                        ├─→ LitertLlmRuntime      (Gemma 3 via `lit` subprocess)
-│         │                        └─→ MistralRsLlmRuntime   (40+ families, PagedAttention, ISQ)
-│         ├─→ TtsRuntimeRegistry  ───→ VoxCpmTtsRuntime     (vendored burn model, .mpk weights)
+│         │                        ├─→ MistralRsLlmRuntime   (40+ families, PagedAttention, ISQ)
+│         │                        └─→ MageVlRuntime         (Microsoft Mage-VL — MageViT + Qwen3-4B + StreamMind gate)
+│         ├─→ TtsRuntimeRegistry  ───→ VoxCpmTtsRuntime     (vendored burn model, .mpk weights; voxcpm-0.5b loadable, voxcpm2 planned)
 │         ├─→ AsrRuntimeRegistry  ───→ WhisperAsrRuntime     (candle Whisper)
 │         ├─→ RerankRuntimeRegistry ──→ CandleRerankRuntime  (BGE / mxbai / jina / cohere)
 │         ├─→ EmbeddingRuntimeRegistry ─→ CandleEmbeddingRuntime (MiniLM BERT, batched, base64)
-│         └─→ VisionRuntime        ─┬─→ CandleYoloRuntime  (YOLOv8 / RT-DETR / DETR)
-│                                   ├─→ OrtVisionRuntime   (YOLOv8 / RT-DETR / DETR / RF-DETR / Florence-2)
-│                                   └─→ UltralyticsVisionRuntime (Grounding DINO)
+│         ├─→ VisionRuntime        ─┬─→ CandleYoloRuntime  (YOLOv8 / RT-DETR / DETR)
+│         │                        ├─→ OrtVisionRuntime   (YOLOv8 / RT-DETR / DETR / RF-DETR / Florence-2)
+│         │                        └─→ UltralyticsVisionRuntime (Grounding DINO)
+│         ├─→ Chronos2Registry   ────→ CandleChronos2Runtime (T5-style encoder + decoder + output head, vendored)
+│         └─→ DecisionRuntimeRegistry → TractDecisionRuntime (Laya int8 ONNX — options + act/escalate, calibrated confidence)
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -36,21 +39,32 @@ src/
 ├── lib.rs                       # Re-exports `neuron::{run_embedded, NeuronHandle, ...}`
 ├── embedded.rs                  # `run_embedded()` entry point — owns axum server lifetime
 ├── server/                      # axum Router + OpenAI/Anthropic shape handlers
-├── capabilities/                # Capability registries (LLM / TTS / ASR / Rerank / Embedding / Vision)
+├── capabilities/                # Capability registries (LLM / TTS / ASR / Rerank / Embedding / Vision / Chronos2 / Decision)
 ├── canonical/                   # Canonical request/response DTOs (OpenAI + Anthropic shapes)
 ├── adapter/                     # ApiAdapter dispatch (Anthropic /v1/messages, future OpenAI routes)
 ├── llm/                         # LLM runtimes (candle / litert_lm / mistralrs)
 │   └── vendor/                  # Vendored upstream model architectures
+├── mage_vl/                     # Mage-VL VLM runtime (MageViT + Qwen3-4B + StreamMind gate, neuron-native candle port)
 ├── tts/
 │   └── voxcpm_burn/             # Vendored VoxCpm (burn, .mpk weights; in-house, Apache-2.0)
 ├── asr/                         # Whisper ASR runtime + audio decode
 ├── rerank/                      # BGE / mxbai / jina (candle) + cohere (HTTP proxy)
 ├── embedding/                   # MiniLM BERT, batched + base64 encoding
 ├── vision/                      # YOLOv8 / RT-DETR / DETR / RF-DETR / Florence-2 / Grounding DINO
+│   ├── memory_pool.rs           # TensorPool (Sprint 4 Phase 1 — mobile memory optimization)
 │   └── ort_backends/            # Pluggable ONNX executors (ort / tract / onnxruntime)
-├── engine/                      # Engine trait glue
+├── decision/                    # Laya discriminative decision scoring (int8 ONNX via tract)
+│   ├── tract_session.rs         # Multi-input/multi-output tract session + shape-aware batching
+│   ├── prompt.rs                # Prompt grammar port (bit-exact vs upstream across 17 golden vectors)
+│   └── postprocess.rs           # Temperature calibration, softmax, act/escalate, confidence
+├── engine/                      # Engine trait glue (CapabilityRegistries + LlmRuntimeBridge)
 ├── models/                      # Model registry / catalog / sources (HF, hf-mirror, ModelScope)
-└── chronos2/                    # Chronos2 forecasting stub (T5-style encoder/decoder scaffold)
+├── metrics.rs                   # Prometheus / OTEL metrics surface
+└── chronos2/                    # Chronos2 forecasting (✅ landed 2026-07-19: vendor + CandleChronos2Runtime + StubChronos2Runtime)
+    ├── vendor/                  # T5-style encoder + decoder + embeddings (966 LOC)
+    ├── candle_runtime.rs        # CandleChronos2Runtime (844 LOC, 19 tests)
+    ├── output.rs                # Chronos2OutputHead (quantile interpolation)
+    └── metrics.rs               # MAE / MAPE / MSE / CRPS
 ```
 
 ## Trait surface
@@ -78,6 +92,7 @@ Each capability uses a `*RuntimeRegistry` (e.g. `LlmRuntimeRegistry`) that holds
 
 - **OpenAI-compatible**: every `/v1/*` endpoint is byte-for-byte compatible with OpenAI's wire format (chat completions, audio speech, audio transcriptions, embeddings, rerank, vision detect/classify/segment/pose, vision LoRA register/list, models, models/pull, catalog/sources, info).
 - **Anthropic Messages v1**: `/v1/messages` speaks the Anthropic Messages wire format (vision, tool_use, cache_control, extended thinking, streaming SSE), backed by the same engines as the OpenAI endpoint via the `ApiAdapter` dispatch system.
+- **Neuron-specific forecast, gate + decisions**: `POST /v1/forecast` (Chronos2 zero-shot time-series forecasting), `POST /v1/vision/gate/score` (Mage-VL StreamMind event gate — `p_speak` per codec window), and `POST /v1/decisions` (Laya discriminative decision scoring — per-option probabilities plus an act/escalate head).
 - **Liveness**: `GET /health` + `GET /v1/info`.
 
 ## Multi-source model registry

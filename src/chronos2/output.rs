@@ -20,7 +20,7 @@
 //! 3. For arbitrary quantile q: interpolate between the two
 //!    nearest quantile columns.
 
-use candle_core::{DType, Module, Result, Tensor};
+use candle::{DType, Module, Result, Tensor};
 use candle_nn::{linear, Linear, RmsNorm, VarBuilder};
 
 use super::vendor::T5BlockConfig;
@@ -285,7 +285,7 @@ pub fn take_horizon(projections: &Tensor, horizon: u32) -> Result<Tensor> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use candle_core::{Device, DType};
+    use candle::{Device, DType};
 
     fn make_head(num_quantiles: usize) -> Chronos2OutputHead {
         let cfg = OutputHeadConfig::new(8, num_quantiles);

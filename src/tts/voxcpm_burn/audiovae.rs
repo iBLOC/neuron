@@ -158,9 +158,9 @@ impl CausalEncoderConfig {
 
 #[derive(Debug)]
 pub struct EncoderOutput<B: Backend> {
-    hidden_state: Tensor<B, 3>,
-    mu: Tensor<B, 3>,
-    logvar: Tensor<B, 3>,
+    pub hidden_state: Tensor<B, 3>,
+    pub mu: Tensor<B, 3>,
+    pub logvar: Tensor<B, 3>,
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -268,7 +268,7 @@ impl CausalDecoderConfig {
 
 #[allow(clippy::large_enum_variant)]
 #[derive(Module, Debug)]
-enum CausalDecoderLayerType<B: Backend> {
+pub enum CausalDecoderLayerType<B: Backend> {
     WNCausalConv1d(WNCausalConv1d<B>),
     CausalDecoderBlock(CausalDecoderBlock<B>),
     Snake1d(Snake1d<B>),
@@ -303,15 +303,15 @@ impl<B: Backend> CausalDecoder<B> {
 #[derive(Debug, Config)]
 pub struct CausalDecoderBlockConfig {
     #[config(default = 16)]
-    input_dim: usize,
+    pub input_dim: usize,
     #[config(default = 8)]
-    output_dim: usize,
+    pub output_dim: usize,
     #[config(default = 1)]
-    stride: usize,
+    pub stride: usize,
     #[config(default = 1)]
-    groups: usize,
+    pub groups: usize,
     #[config(default = "false")]
-    use_noise_block: bool,
+    pub use_noise_block: bool,
 }
 
 impl CausalDecoderBlockConfig {
@@ -364,7 +364,7 @@ impl CausalDecoderBlockConfig {
 }
 
 #[derive(Module, Debug)]
-enum CausalDecoderBlockLayerType<B: Backend> {
+pub enum CausalDecoderBlockLayerType<B: Backend> {
     Snake1d(Snake1d<B>),
     WNCausalTransposeConv1d(WNCausalTransposeConv1d<B>),
     NoiseBlock(NoiseBlock<B>),
@@ -384,7 +384,7 @@ impl<B: Backend> CausalDecoderBlockLayerType<B> {
 
 #[derive(Module, Debug)]
 pub struct CausalDecoderBlock<B: Backend> {
-    block: Vec<CausalDecoderBlockLayerType<B>>,
+    pub block: Vec<CausalDecoderBlockLayerType<B>>,
 }
 
 impl<B: Backend> CausalDecoderBlock<B> {
@@ -462,6 +462,7 @@ impl WNCausalTransposeConv1dConfig {
             weight_g: g,
             bias: if self.bias { conv.bias } else { None },
             stride: self.stride,
+            kernel_size: self.kernel_size,
             padding: self.padding,
             output_padding: self.output_padding,
         }
@@ -473,13 +474,17 @@ pub struct WNCausalTransposeConv1d<B: Backend> {
     pub weight_g: burn::module::Param<Tensor<B, 3>>,
     pub weight_v: burn::module::Param<Tensor<B, 3>>,
     pub bias: Option<burn::module::Param<Tensor<B, 1>>>,
-    stride: usize,
-    padding: usize,
-    output_padding: usize,
+    pub stride: usize,
+    pub kernel_size: usize,
+    pub padding: usize,
+    pub output_padding: usize,
 }
 
 impl<B: Backend> WNCausalTransposeConv1d<B> {
     pub fn forward(&self, x: Tensor<B, 3>) -> Tensor<B, 3> {
+        // Materialize: see the note in WNCausalConv1d::forward.
+        let device = x.device();
+        let x = Tensor::from_data(x.to_data(), &device);
         let v = self.weight_v.val();
 
         let norm = v.clone().powf_scalar(2.0).sum_dim(2).sum_dim(1).sqrt();
@@ -488,16 +493,27 @@ impl<B: Backend> WNCausalTransposeConv1d<B> {
 
         let w = self.weight_g.val() * v_hat;
 
+        let w = Tensor::from_data(w.to_data(), &device);
+
         let out = conv_transpose1d(
             x,
             w,
             self.bias.clone().map(|b| b.val()),
-            ConvTransposeOptions::<1>::new([self.stride], [0], [0], [1], 1),
+            ConvTransposeOptions::<1> {
+                stride: [self.stride],
+                padding: [0],
+                padding_out: [0],
+                dilation: [1],
+                groups: 1,
+            },
         );
 
         let trim = self.padding * 2 - self.output_padding;
         let length = out.dims()[2];
-        out.narrow(2, 0, length - trim)
+        // Materialize the trimmed view so downstream convs read a standard
+        // layout.
+        let trimmed = out.narrow(2, 0, length - trim);
+        Tensor::from_data(trimmed.to_data(), &device)
     }
 }
 
@@ -552,29 +568,45 @@ pub struct WNCausalConv1d<B: Backend> {
     pub weight_g: burn::module::Param<Tensor<B, 3>>,
     pub weight_v: burn::module::Param<Tensor<B, 3>>,
     pub bias: Option<burn::module::Param<Tensor<B, 1>>>,
-    padding: usize,
-    stride: usize,
-    dilation: usize,
-    groups: usize,
+    pub padding: usize,
+    pub stride: usize,
+    pub dilation: usize,
+    pub groups: usize,
 }
 
 impl<B: Backend> WNCausalConv1d<B> {
     pub fn forward(&self, x: Tensor<B, 3>) -> Tensor<B, 3> {
+        // Materialize up front: callers may hand us narrow/slice views whose
+        // non-standard memory layout the ndarray conv kernels mis-read (same
+        // root cause as the weight materialization below).
+        let x: Tensor<B, 3> = Tensor::from_data(x.to_data(), &x.device());
         let v = self.weight_v.val();
 
         let norm = v.clone().powf_scalar(2.0).sum_dim(2).sum_dim(1).sqrt();
 
-        let v_hat = v / (norm.clone() + 1e-12);
+        let v_hat = v / (norm + 1e-12);
 
         let w = self.weight_g.val() * v_hat;
 
-        let x = x.pad((self.padding * 2, 0, 0, 0), PadMode::Constant(0.0));
+        let w = Tensor::from_data(w.to_data(), &x.device());
 
+        let device = x.device();
+        let padded = x.pad((self.padding * 2, 0, 0, 0), PadMode::Constant(0.0));
+        // Materialize the padded buffer too: pad results carry a non-standard
+        // layout that the ndarray conv kernel mis-reads (see note above).
+        let x: Tensor<B, 3> = Tensor::from_data(padded.to_data(), &device);
+
+        let opts = ConvOptions::<1> {
+            stride: [self.stride],
+            padding: [0],
+            dilation: [self.dilation],
+            groups: self.groups,
+        };
         conv1d(
             x,
             w,
             self.bias.clone().map(|b| b.val()),
-            ConvOptions::<1>::new([self.stride], [0], [self.dilation], self.groups),
+            opts,
         )
     }
 }
@@ -699,7 +731,7 @@ impl CausalResidualUnitConfig {
 
 #[allow(clippy::large_enum_variant)]
 #[derive(Module, Debug)]
-enum CausalResidualUnitLayerType<B: Backend> {
+pub enum CausalResidualUnitLayerType<B: Backend> {
     Snake1d(Snake1d<B>),
     WNCausalConv1d(WNCausalConv1d<B>),
 }
@@ -715,7 +747,7 @@ impl<B: Backend> CausalResidualUnitLayerType<B> {
 
 #[derive(Module, Debug)]
 pub struct CausalResidualUnit<B: Backend> {
-    block: Vec<CausalResidualUnitLayerType<B>>,
+    pub block: Vec<CausalResidualUnitLayerType<B>>,
 }
 
 impl<B: Backend> CausalResidualUnit<B> {
@@ -759,5 +791,80 @@ impl<B: Backend> Snake1d<B> {
     pub fn forward(&self, x: Tensor<B, 3>) -> Tensor<B, 3> {
         let alpha = self.alpha.val();
         x.clone() + (alpha.clone() + 1e-9).recip() * (alpha * x).sin().powi_scalar(2)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+//
+// `audiovae_encode_decode_roundtrip_*` exercises the architecture end-to-end
+// against uninitialized (zero) weights. The point isn't fidelity — untrained
+// weights give garbage output — it's to catch the regression class where the
+// forward graph changes shape, NaNs out, or panics on a real input tensor.
+//
+// The AudioVAE V2 port (the next VoxCPM2 blocker) will reuse this same harness:
+// add a `audiovae_v2_encode_decode_roundtrip_*` pair and assert the new module
+// also passes.
+
+#[cfg(test)]
+#[cfg(feature = "voxcpm")]
+mod tests {
+    use burn::backend::ndarray::{NdArray, NdArrayDevice};
+
+    use super::*;
+
+    fn build_vae() -> (AudioVae<NdArray>, usize, usize) {
+        let device = NdArrayDevice::Cpu;
+        let cfg = AudioVaeConfig::default();
+        let sample_rate = cfg.sample_rate;
+        let hop_length = cfg.encoder_rates.iter().product::<usize>(); // 2*5*8*8 = 640
+        let vae = cfg.init(&device);
+        (vae, sample_rate, hop_length)
+    }
+
+    #[test]
+    fn audiovae_encode_decode_shape_preserved_with_random_weights() {
+        let (vae, sample_rate, hop_length) = build_vae();
+
+        // 0.25 s at 16 kHz — small enough to be fast on CI, large enough to
+        // exercise the encoder's full stride stack (640-sample hop).
+        let n_samples = sample_rate / 4;
+        let x: Tensor<NdArray, 3> = Tensor::zeros([1, 1, n_samples], &NdArrayDevice::Cpu);
+
+        let z = vae.encode(x, Some(sample_rate));
+        // Encoder output: [B, latent_dim, T/hop_length]
+        assert_eq!(z.dims()[0], 1, "batch dim preserved");
+        assert_eq!(z.dims()[1], vae.latent_dim, "latent dim matches config");
+        let expected_latent_len = (n_samples + hop_length - 1) / hop_length; // ceil
+        assert_eq!(
+            z.dims()[2], expected_latent_len,
+            "latent time dim should be ceil(samples/hop_length)"
+        );
+
+        let y = vae.decode(z);
+        // Decoder output should match the padded input length (decode mirrors encode).
+        assert_eq!(y.dims()[0], 1, "batch dim preserved");
+        assert_eq!(y.dims()[1], 1, "single audio channel preserved");
+        let out_len = y.dims()[2];
+        let padded_in = expected_latent_len * hop_length;
+        assert_eq!(
+            out_len, padded_in,
+            "decode output should mirror the padded input length"
+        );
+    }
+
+    #[test]
+    fn audiovae_encode_on_short_input_does_not_panic() {
+        let (vae, sample_rate, hop_length) = build_vae();
+        // 100 samples — far smaller than one hop block (640). The encoder
+        // should still produce a valid latent (1 frame after right-padding).
+        let n_samples = 100;
+        let x: Tensor<NdArray, 3> = Tensor::zeros([1, 1, n_samples], &NdArrayDevice::Cpu);
+        let z = vae.encode(x, Some(sample_rate));
+        assert_eq!(z.dims()[0], 1);
+        assert_eq!(z.dims()[1], vae.latent_dim);
+        assert_eq!(z.dims()[2], 1, "single hop frame after right-padding");
+        let _ = hop_length; // silence unused warning if test ever gets compiled out
     }
 }

@@ -5,7 +5,7 @@
 //! Rust types so the architecture-completion commit can choose
 //! which to construct per-side.
 
-use candle_core::{DType, Tensor};
+use candle::{DType, Tensor};
 
 #[derive(Debug, Clone)]
 pub struct T5EmbeddingsConfig {
@@ -65,7 +65,7 @@ impl T5Embeddings {
                 data[pos * d_model + 2 * i + 1] = angle.cos();
             }
         }
-        Tensor::from_vec(data, (max_seq_len, d_model), &candle_core::Device::Cpu)
+        Tensor::from_vec(data, (max_seq_len, d_model), &candle::Device::Cpu)
             .expect("sinusoidal_table: from_vec should not fail for valid shape")
     }
 

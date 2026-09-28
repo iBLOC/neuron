@@ -28,8 +28,8 @@
 
 use std::collections::HashMap;
 
-use candle_core::{DType, Device, Result, Tensor};
-use candle_core::safetensors::Load as _;
+use candle::{DType, Device, Result, Tensor};
+use candle::safetensors::Load as _;
 use candle_nn::VarBuilder;
 
 use super::config::{MageVLConfig, PlaceholderTokens};
@@ -53,13 +53,13 @@ impl MageVLModel {
         device: &Device,
     ) -> Result<Self> {
         let (full_tensors, vision_tensors) = load_split_tensors(paths, device)?;
-        let vision_vb = VarBuilder::from_tensors(vision_tensors, dtype, device);
+        let vision_vb = crate::candle_compat::from_tensors(vision_tensors, dtype, device);
         // MageViT is rooted AT the visual tower: keys like
         // `visual.embeddings.patch_embedding.*`, `visual.encoder.layers.*`,
         // `visual.merger.*` — see the strip rule in load_split_tensors.
         let vision = MageViT::new(cfg.vision.clone(), vision_vb, device)?;
 
-        let text_vb = VarBuilder::from_tensors(full_tensors, dtype, device);
+        let text_vb = crate::candle_compat::from_tensors(full_tensors, dtype, device);
         let text_cfg = build_text_config(&cfg);
         let text = super::text_tower::MageVlTextModel::new(&text_cfg, text_vb)?;
 
@@ -106,7 +106,7 @@ impl MageVLModel {
         image_grid_thw: Option<&Tensor>,
     ) -> Result<Tensor> {
         let text = self.text.as_ref().ok_or_else(|| {
-            candle_core::Error::msg("MageVLModel was built vision_only; no text decoder")
+            candle::Error::msg("MageVLModel was built vision_only; no text decoder")
         })?;
 
         // Embed the token ids, then overwrite every image-placeholder
@@ -123,7 +123,7 @@ impl MageVLModel {
                 crate::mage_vl::processor::PlaceholderKind::Image,
             )?;
             if positions.dim(0)? as usize != merged.dim(0)? {
-                return Err(candle_core::Error::msg(format!(
+                return Err(candle::Error::msg(format!(
                     "placeholder count ({}) != merged vision tokens ({}) — \
                      prompt must carry exactly one <|image_pad|> per merged token",
                     positions.dim(0)?,
@@ -165,7 +165,7 @@ impl MageVLModel {
         eos_token_id: u32,
     ) -> Result<Vec<u32>> {
         let text = self.text.as_ref().ok_or_else(|| {
-            candle_core::Error::msg("MageVLModel was built vision_only; no text decoder")
+            candle::Error::msg("MageVLModel was built vision_only; no text decoder")
         })?;
         let (_, seq_len) = input_ids.dims2()?;
 
@@ -224,7 +224,7 @@ fn argmax_last(logits: &Tensor) -> Result<u32> {
             logits.get(0)?.get(seq_len - 1)?
         }
         r => {
-            return Err(candle_core::Error::msg(format!(
+            return Err(candle::Error::msg(format!(
                 "argmax_last: unexpected rank {r}"
             ))
             .into())
@@ -272,7 +272,7 @@ fn load_split_tensors<P: AsRef<std::path::Path>>(
     paths: &[P],
     device: &Device,
 ) -> Result<(HashMap<String, Tensor>, HashMap<String, Tensor>)> {
-    let mmap = unsafe { candle_core::safetensors::MmapedSafetensors::multi(paths)? };
+    let mmap = unsafe { candle::safetensors::MmapedSafetensors::multi(paths)? };
     let mut full = HashMap::new();
     let mut vision_stripped = HashMap::new();
     for (name, view) in mmap.tensors() {

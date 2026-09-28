@@ -28,7 +28,11 @@ use async_trait::async_trait;
 #[cfg(feature = "voxcpm")]
 use burn::backend::ndarray::{NdArray, NdArrayDevice};
 #[cfg(feature = "voxcpm")]
+use burn::module::Module;
+#[cfg(feature = "voxcpm")]
 use burn::prelude::Backend;
+#[cfg(feature = "voxcpm")]
+use burn_store::{BurnpackStore, ModuleSnapshot};
 
 use crate::config::{ensure_dir, DeviceSelection};
 use crate::llm::{ChatResult, NeuronError};
@@ -76,7 +80,9 @@ impl VoxCpmTtsRuntime {
                 return Err(format!(
                     "VoxCpmTtsRuntime: set NEURON_TTS_MODEL_PATH to a directory containing \
                      config.json + tokenizer.json + model.mpk + audiovae.mpk for VoxCPM model '{}' \
-                     (e.g. openbmb/VoxCpm-0.5B). Weights must be pre-converted to burn `.mpk` format.",
+                     (e.g. openbmb/VoxCpm-0.5B). Weights must be pre-converted to burn `.mpk` \
+                     (Burnpack) format. neuron does not convert from safetensors — you must \
+                     supply the converted files yourself.",
                     model
                 ));
             }
@@ -84,28 +90,8 @@ impl VoxCpmTtsRuntime {
         ensure_dir(&path, "NEURON_TTS_MODEL_PATH")?;
         let config_path = path.join("config.json");
         let tokenizer_path = path.join("tokenizer.json");
-        let has_model = std::fs::read_dir(&path)
-            .map(|entries| {
-                entries.filter_map(|e| e.ok()).any(|e| {
-                    e.path()
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .map(|n| n.ends_with(".mpk"))
-                        .unwrap_or(false)
-                })
-            })
-            .unwrap_or(false);
-        let has_audiovae = std::fs::read_dir(&path)
-            .map(|entries| {
-                entries.filter_map(|e| e.ok()).any(|e| {
-                    e.path()
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .map(|n| n.ends_with("_audiovae.mpk"))
-                        .unwrap_or(false)
-                })
-            })
-            .unwrap_or(false);
+        let model_path = path.join("model.mpk");
+        let audiovae_path = path.join("audiovae.mpk");
 
         if !config_path.exists() {
             return Err(format!("config.json not found in {}", path.display()));
@@ -116,14 +102,14 @@ impl VoxCpmTtsRuntime {
                 path.display()
             ));
         }
-        if !has_model {
+        if !model_path.exists() {
             return Err(format!(
                 "model.mpk not found in {} (download pre-converted burn weights — \
                  neuron does not convert from safetensors)",
                 path.display()
             ));
         }
-        if !has_audiovae {
+        if !audiovae_path.exists() {
             return Err(format!(
                 "audiovae.mpk not found in {} (download pre-converted burn weights — \
                  neuron does not convert from safetensors)",
@@ -169,10 +155,31 @@ impl TtsRuntime for VoxCpmTtsRuntime {
         let config: voxcpm_burn::voxcpm_model::VoxCPMConfig = serde_json::from_str(&config_json)
             .map_err(|e| NeuronError::not_implemented(format!("failed to parse config.json: {}", e)))?;
 
-        let model: voxcpm_burn::voxcpm_model::VoxCPM<NdArray> = config.init(&dev);
+        let mut model: voxcpm_burn::voxcpm_model::VoxCPM<NdArray> = config.init(&dev);
+
+        // Load LM weights from pre-converted Burnpack (`.mpk`) file.
+        // neuron does not convert from safetensors — the user must supply
+        // these files (see module-level docstring). `BurnpackStore::from_file`
+        // is infallible in burn-store 0.21; the only fallible call is
+        // `load_from` on the ModuleSnapshot trait.
+        let mut lm_store = BurnpackStore::from_file(path.join("model.mpk"));
+        model.load_from(&mut lm_store).map_err(|e| {
+            NeuronError::not_implemented(format!(
+                "VoxCpmTtsRuntime: failed to apply model.mpk as Burnpack: {e}. \
+                 Confirm the file is a Burnpack archive (burn 0.21+ native format)."
+            ))
+        })?;
 
         let audiovae_config = voxcpm_burn::audiovae::AudioVaeConfig::default();
-        let audio_vae: voxcpm_burn::audiovae::AudioVae<NdArray> = audiovae_config.init(&dev);
+        let mut audio_vae: voxcpm_burn::audiovae::AudioVae<NdArray> = audiovae_config.init(&dev);
+
+        let mut vae_store = BurnpackStore::from_file(path.join("audiovae.mpk"));
+        audio_vae.load_from(&mut vae_store).map_err(|e| {
+            NeuronError::not_implemented(format!(
+                "VoxCpmTtsRuntime: failed to apply audiovae.mpk as Burnpack: {e}. \
+                 Confirm the file is a Burnpack archive (burn 0.21+ native format)."
+            ))
+        })?;
 
         let sample_rate = audio_vae.sample_rate as u32;
 
@@ -354,7 +361,7 @@ mod tests {
         std::fs::write(dir.join("config.json"), b"{}").expect("write config");
         std::fs::write(dir.join("tokenizer.json"), b"{}").expect("write tokenizer");
         std::fs::write(dir.join("model.mpk"), b"fake").expect("write model.mpk");
-        std::fs::write(dir.join("vae_audiovae.mpk"), b"fake").expect("write audiovae");
+        std::fs::write(dir.join("audiovae.mpk"), b"fake").expect("write audiovae");
         unsafe { std::env::set_var("NEURON_TTS_MODEL_PATH", &dir) };
 
         let result = VoxCpmTtsRuntime::resolve_model_path("voxcpm-0.5b");
@@ -363,6 +370,34 @@ mod tests {
 
         assert!(result.is_ok(), "expected Ok, got: {result:?}");
         assert_eq!(result.unwrap(), dir);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_resolve_model_path_rejects_missing_audiovae_mpk() {
+        // Tightened filename check: `audiovae.mpk` (not `*_audiovae.mpk`) is required.
+        // Files that match the old loose pattern (`foo_audiovae.mpk`) must now fail.
+        let dir = std::env::temp_dir().join(format!(
+            "neuron-voxcpm-reject-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        std::fs::write(dir.join("config.json"), b"{}").expect("write config");
+        std::fs::write(dir.join("tokenizer.json"), b"{}").expect("write tokenizer");
+        std::fs::write(dir.join("model.mpk"), b"fake").expect("write model.mpk");
+        std::fs::write(dir.join("foo_audiovae.mpk"), b"fake").expect("write legacy name");
+        unsafe { std::env::set_var("NEURON_TTS_MODEL_PATH", &dir) };
+
+        let result = VoxCpmTtsRuntime::resolve_model_path("voxcpm-0.5b");
+        let _ = std::fs::remove_dir_all(&dir);
+        unsafe { std::env::remove_var("NEURON_TTS_MODEL_PATH") };
+
+        assert!(result.is_err(), "expected Err for non-canonical audiovae filename");
+        let err = result.err().unwrap();
+        assert!(
+            err.contains("audiovae.mpk"),
+            "error must mention the canonical filename, got: {err}"
+        );
     }
 
     #[test]

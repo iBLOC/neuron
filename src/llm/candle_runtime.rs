@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use candle_core::{Device, DType, IndexOp};
+use candle::{Device, DType, IndexOp};
 use candle_nn::VarBuilder;
 use candle_transformers::models::{chatglm, llama, mistral, phi3, qwen2, qwen3};
 use futures_util::stream::BoxStream;
@@ -40,7 +40,7 @@ enum CausalModel {
 }
 
 impl CausalModel {
-    fn forward(&mut self, input: &candle_core::Tensor, offset: usize) -> candle_core::Result<candle_core::Tensor> {
+    fn forward(&mut self, input: &candle::Tensor, offset: usize) -> candle::Result<candle::Tensor> {
         match self {
             CausalModel::Qwen2(m) => m.forward(input, offset),
             CausalModel::Qwen3(m) => m.forward(input, offset),
@@ -147,15 +147,15 @@ impl CandleLlmRuntime {
     /// 2-D everywhere made every Qwen request fail with
     /// "to scalar: unexpected rank" / empty streams.
     fn last_position_logits(
-        logits: &candle_core::Tensor,
-    ) -> candle_core::Result<candle_core::Tensor> {
+        logits: &candle::Tensor,
+    ) -> candle::Result<candle::Tensor> {
         match logits.dims().len() {
             2 => logits.i(0),
             3 => {
                 let seq = logits.dim(1)?;
                 logits.i((0, seq - 1))
             }
-            rank => Err(candle_core::Error::Msg(format!(
+            rank => Err(candle::Error::Msg(format!(
                 "unexpected logits rank {rank} (expected 2 or 3)"
             ))),
         }
@@ -239,11 +239,17 @@ impl CandleLlmRuntime {
                 }
             }
             DeviceSelection::Auto => {
-                // Try CUDA first, then Metal, then fall back to CPU
+                // Try CUDA first, then Metal, then fall back to CPU. The
+                // failure is logged rather than swallowed: a silent CPU
+                // fallback turns a 30 tok/s GPU model into a 0.3 tok/s
+                // CPU model with nothing but a benchmark to point at it.
                 #[cfg(feature = "cuda")]
                 {
-                    if let Ok(dev) = Device::new_cuda(0) {
-                        return Ok(dev);
+                    match Device::new_cuda(0) {
+                        Ok(dev) => return Ok(dev),
+                        Err(e) => eprintln!(
+                            "[neuron] CandleLlmRuntime: CUDA init failed, falling back: {e}"
+                        ),
                     }
                 }
                 #[cfg(feature = "metal")]
@@ -527,7 +533,7 @@ impl super::LlmRuntime for CandleLlmRuntime {
         );
 
         let vb = unsafe {
-            VarBuilder::from_mmaped_safetensors(safetensors_paths.as_slice(), weight_dtype, &dev)
+            crate::candle_compat::from_mmaped_safetensors(safetensors_paths.as_slice(), weight_dtype, &dev)
         }
         .map_err(|e| NeuronError::not_implemented(format!("load weights: {e}")))?;
 
@@ -650,7 +656,7 @@ impl super::LlmRuntime for CandleLlmRuntime {
             NeuronError::not_initialized("CandleLlmRuntime not loaded. Call load() first.")
         })?;
 
-        let input_tensor = candle_core::Tensor::from_vec(
+        let input_tensor = candle::Tensor::from_vec(
             prompt_token_ids.clone(),
             (1, prompt_token_ids.len()),
             &m.device,
@@ -679,7 +685,7 @@ impl super::LlmRuntime for CandleLlmRuntime {
         let last_logits = Self::last_position_logits(&logits)
             .map_err(|e| NeuronError::not_implemented(format!("last-position logits: {e}")))?;
         let mut next_token = last_logits
-            .argmax(candle_core::D::Minus1)
+            .argmax(candle::D::Minus1)
             .map_err(|e| NeuronError::not_implemented(format!("argmax: {e}")))?
             .to_scalar::<u32>()
             .map_err(|e| NeuronError::not_implemented(format!("to scalar: {e}")))?;
@@ -696,7 +702,7 @@ impl super::LlmRuntime for CandleLlmRuntime {
             if next_token == eos_token_id {
                 break;
             }
-            let next_input = candle_core::Tensor::from_vec(
+            let next_input = candle::Tensor::from_vec(
                 vec![next_token],
                 (1, 1),
                 &m.device,
@@ -710,7 +716,7 @@ impl super::LlmRuntime for CandleLlmRuntime {
             let last_logits = Self::last_position_logits(&logits)
                 .map_err(|e| NeuronError::not_implemented(format!("last-position logits: {e}")))?;
             next_token = last_logits
-                .argmax(candle_core::D::Minus1)
+                .argmax(candle::D::Minus1)
                 .map_err(|e| NeuronError::not_implemented(format!("argmax: {e}")))?
                 .to_scalar::<u32>()
                 .map_err(|e| NeuronError::not_implemented(format!("to scalar: {e}")))?;
@@ -847,7 +853,7 @@ impl super::LlmRuntime for CandleLlmRuntime {
                 }],
             });
 
-            let input = match candle_core::Tensor::from_vec(
+            let input = match candle::Tensor::from_vec(
                 prompt_ids.clone(),
                 (1, prompt_len),
                 &m.device,
@@ -950,7 +956,7 @@ impl super::LlmRuntime for CandleLlmRuntime {
                     break;
                 }
 
-                let input = match candle_core::Tensor::from_vec(
+                let input = match candle::Tensor::from_vec(
                     vec![next_token],
                     (1, 1),
                     &m.device,

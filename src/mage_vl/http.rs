@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use axum::{extract::State, http::StatusCode, Json};
-use candle_core::{Device, Tensor};
+use candle::{Device, Tensor};
 use serde::{Deserialize, Serialize};
 use tokio::sync::OnceCell;
 

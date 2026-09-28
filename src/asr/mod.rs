@@ -1,6 +1,15 @@
 //! ASR (Automatic Speech Recognition) runtime implementations.
 //!
-//! Provides `WhisperAsrRuntime` for OpenAI Whisper-based transcription.
+//! Ships three runtimes behind feature flags:
+//!
+//! * `WhisperAsrRuntime` (feature `candle`) -- OpenAI Whisper via candle.
+//! * `TractSenseVoiceRuntime` (feature `tract`) -- sherpa-onnx exported
+//!   SenseVoiceSmall graphs executed on neuron's own ONNX stack, with the
+//!   full preprocessing pipeline (fbank / LFR / CMVN / CTC) in-repo.
+//! * `SherpaAsrRuntime` (feature `sherpa`) -- the same SenseVoice graphs
+//!   through the official sherpa-onnx Rust binding (onnxruntime-backed).
+//!   The last two exist side by side so `benches/asr_speed.rs` can run
+//!   one graph on both engines and report the gap.
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -13,6 +22,10 @@ use crate::llm::ChatResult;
 pub enum AsrImpl {
     #[cfg(feature = "candle")]
     Candle,
+    #[cfg(feature = "tract")]
+    Tract,
+    #[cfg(feature = "sherpa")]
+    Sherpa,
 }
 
 impl AsrImpl {
@@ -20,13 +33,22 @@ impl AsrImpl {
         match self {
             #[cfg(feature = "candle")]
             Self::Candle => "candle",
+            #[cfg(feature = "tract")]
+            Self::Tract => "tract",
+            #[cfg(feature = "sherpa")]
+            Self::Sherpa => "sherpa",
         }
     }
 
     pub fn parse(s: &str) -> Result<Self, String> {
         match s {
             #[cfg(feature = "candle")]
-            "candle" => Ok(Self::Candle),
+            "candle" | "whisper" => Ok(Self::Candle),
+            #[cfg(feature = "tract")]
+            "tract" => Ok(Self::Tract),
+            #[cfg(feature = "sherpa")]
+            "sherpa" => Ok(Self::Sherpa),
+            #[allow(unused_variables)]
             other => Err(format!("unknown AsrImpl: {other}")),
         }
     }
@@ -53,8 +75,25 @@ pub mod whisper;
 #[cfg(feature = "candle")]
 pub use whisper::WhisperAsrRuntime;
 
+#[cfg(feature = "tract")]
+pub mod fbank;
+#[cfg(feature = "tract")]
+pub mod onnx_meta;
+#[cfg(feature = "tract")]
+pub mod sensevoice;
+
+#[cfg(feature = "tract")]
+pub use sensevoice::{TractSenseVoiceRuntime, ctc_greedy as asr_ctc_greedy};
+
+#[cfg(feature = "sherpa")]
+pub mod sherpa;
+
+#[cfg(feature = "sherpa")]
+pub use sherpa::SherpaAsrRuntime;
+
 #[cfg(feature = "asr-audio")]
 pub mod audio;
+pub mod wav;
 
 pub mod registry;
 pub use registry::AsrRuntimeRegistry;

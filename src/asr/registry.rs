@@ -10,6 +10,10 @@ use crate::llm::NeuronError;
 
 #[cfg(feature = "candle")]
 use crate::WhisperAsrRuntime;
+#[cfg(feature = "tract")]
+use crate::asr::TractSenseVoiceRuntime;
+#[cfg(feature = "sherpa")]
+use crate::asr::SherpaAsrRuntime;
 
 pub struct AsrRuntimeRegistry {
     pub registered: Vec<RegisteredAsr>,
@@ -92,6 +96,24 @@ impl AsrRuntimeRegistry {
                     .await
                     .map_err(|e| {
                         NeuronError::new(format!("WhisperAsrRuntime load failed: {e}"))
+                    })?;
+                Arc::from(loaded)
+            }
+            #[cfg(feature = "tract")]
+            AsrImpl::Tract => {
+                let loaded = TractSenseVoiceRuntime::load(&entry.model_id, &entry.device)
+                    .await
+                    .map_err(|e| {
+                        NeuronError::new(format!("TractSenseVoiceRuntime load failed: {e}"))
+                    })?;
+                Arc::from(loaded)
+            }
+            #[cfg(feature = "sherpa")]
+            AsrImpl::Sherpa => {
+                let loaded = SherpaAsrRuntime::load(&entry.model_id, &entry.device)
+                    .await
+                    .map_err(|e| {
+                        NeuronError::new(format!("SherpaAsrRuntime load failed: {e}"))
                     })?;
                 Arc::from(loaded)
             }

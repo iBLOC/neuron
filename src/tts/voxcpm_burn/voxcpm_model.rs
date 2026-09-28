@@ -387,7 +387,7 @@ impl<B: Backend> VoxCPM<B> {
                         .squeeze_dim::<2>(0),
                     step,
                 )
-                .unsqueeze();
+                .unsqueeze_dim(1);
 
             lm_hidden = self.fsq_layer.forward(lm_hidden);
 
@@ -401,7 +401,7 @@ impl<B: Backend> VoxCPM<B> {
                             .squeeze_dim::<2>(0),
                     step,
                 )
-                .unsqueeze();
+                .unsqueeze_dim(1);
         }
 
         let pred_feat_seq: Tensor<B, 4> = Tensor::cat(pred_feat_seq, 1);

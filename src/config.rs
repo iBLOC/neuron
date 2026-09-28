@@ -122,8 +122,8 @@ impl NeuronConfig {
     /// the chronos2 WIP path uses this and candle's CPU device
     /// is always available; explicit CUDA / Metal selection
     /// happens at runtime once the model is loaded.
-    pub fn default_device() -> candle_core::Device {
-        candle_core::Device::Cpu
+    pub fn default_device() -> candle::Device {
+        candle::Device::Cpu
     }
 
     pub fn new() -> Self {

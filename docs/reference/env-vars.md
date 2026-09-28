@@ -20,7 +20,7 @@ neuron reads its configuration from environment variables on startup. The full m
 | `NEURON_MODEL_DIRS` | `~/.neuron/models/` | Colon-separated list of roots scanned for downloaded model weights (use `NEURON_MODEL_DIR` for the single legacy value) |
 | `NEURON_LLM_MODEL_PATH` | (unset) | Path to the LLM model directory (must contain `config.json` + `tokenizer.json` + `*.safetensors`) |
 | `NEURON_TTS_MODEL_PATH` | (unset) | Path to the TTS model directory (VoxCpm: `config.json` + `tokenizer.json` + `model.mpk` + `audiovae.mpk`) |
-| `NEURON_ASR_MODEL_PATH` | (unset) | Path to the ASR model directory (Whisper) |
+| `NEURON_ASR_MODEL_PATH` | (unset) | Path to the ASR model directory (Whisper: `config.json` + `tokenizer.json` + `*.safetensors` + `mel_filters.safetensors`; SenseVoiceSmall: `model.onnx` or `model.int8.onnx` + `tokens.txt`; tract path also wants the `model.prepped.onnx` produced by `scripts/prep-sensevoice-onnx.py`) |
 | `NEURON_RERANK_MODEL_PATH` | (unset) | Path to the Rerank model directory (BGE/mxbai/jina; not used for cohere) |
 | `NEURON_EMBEDDING_MODEL_PATH` | (unset) | Path to the Embedding model directory (MiniLM BERT) |
 | `NEURON_VISION_MODEL_PATH` | (unset) | Path to the Vision model directory (YOLOv8: `config.json` + `yolov8n.safetensors`) |
@@ -29,16 +29,25 @@ neuron reads its configuration from environment variables on startup. The full m
 
 | Variable | Default | Description |
 |---|---|---|
-| `NEURON_LLM_RUNTIME` | (unset) | `candle` \| `litert` \| `mistralrs` — which LLM engine to load |
+| `NEURON_LLM_RUNTIME` | (unset) | `candle` \| `litert` \| `mistralrs` \| `mage_vl` — which LLM engine to load |
+| `NEURON_MAGE_VL_SHARD_DIR` | (unset) | Path to Mage-VL shards directory (must contain `model-00001-of-00002.safetensors` + `model-00002-of-00002.safetensors`); required when `NEURON_LLM_RUNTIME=mage_vl` |
+| `NEURON_MAGE_VL_MODEL_ID` | `microsoft/Mage-VL` | Override the registered Mage-VL model id (HF repo id or local path string used for `engines.llm` keying) |
 | `NEURON_MISTRALRS_ISQ` | `q4_0` | `q4_0` \| `q8_0` \| `none` — in-situ quantization applied by mistral.rs at load time |
 | `NEURON_EMBEDDING_RUNTIME` | (unset) | `candle` — which Embedding engine to load |
 | `NEURON_TTS_RUNTIME` | (unset) | `voxcpm` (requires `--features voxcpm`) |
-| `NEURON_ASR_RUNTIME` | (unset) | `candle` (Whisper) |
+| `NEURON_ASR_RUNTIME` | (unset) | `candle` (Whisper) \| `tract` (SenseVoiceSmall via neuron's own tract ONNX stack, requires `--features tract`) \| `sherpa` (SenseVoiceSmall via the official sherpa-onnx Rust binding, requires `--features sherpa`) |
+| `NEURON_ASR_ONNX_FILE` | (unset) | Override the SenseVoice graph file (e.g. `model.int8.onnx`); ignored by the Whisper runtime |
+| `NEURON_ASR_SHERPA_NUM_THREADS` | (unset, default 2) | Thread count for the sherpa-onnx recognizer |
 | `NEURON_RERANK_RUNTIME` | (unset) | `candle` (BGE-reranker, deprecated alias for `bge`) \| `bge` \| `mxbai` \| `jina` \| `cohere` |
 | `NEURON_COHERE_API_KEY` | (unset) | Cohere API key (required when `NEURON_RERANK_RUNTIME=cohere`) |
 | `NEURON_COHERE_ENDPOINT` | `https://api.cohere.com` | Cohere API base URL |
 | `NEURON_COHERE_MODEL` | `rerank-english-v3.0` | Cohere model id (e.g. `rerank-multilingual-v3.0`) |
 | `NEURON_VISION_RUNTIME` | (unset) | `candle-yolo` \| `candle-rtdetr` \| `candle-detr` \| `ort` \| `ultralytics` — which Vision engine + model family to load |
+| `NEURON_CHRONOS2_RUNTIME` | (unset) | `candle` — which Chronos2 engine to load (requires `--features chronos2`) |
+| `NEURON_CHRONOS2_MODEL_PATH` | (unset) | Path to the Chronos2 checkpoint directory |
+| `NEURON_DECISION_RUNTIME` | (unset) | `tract` — which Decision engine to load (requires `--features tract`) |
+| `NEURON_DECISION_MODEL_ID` | `laya` | Model id registered for the Decision capability |
+| `NEURON_DECISION_MODEL_PATH` | (unset) | Path to the prepped Decision model dir — a single `*.onnx` (plus `.onnx.data` if external) + `tokenizer.json`, optional `rl_agent_config.json` for the temperature tables |
 
 ## Model source registry
 
@@ -142,7 +151,7 @@ export RUST_LOG=warn
 neuron reads all `NEURON_*` env vars at startup. If a value is invalid (e.g. unknown runtime name, malformed source URL), you'll see a clear error in stderr:
 
 ```
-Error: invalid value for NEURON_LLM_RUNTIME: "candl" (expected one of: candle, litert, mistralrs)
+Error: invalid value for NEURON_LLM_RUNTIME: "candl" (expected one of: candle, litert, mistralrs, mage_vl)
 Error: invalid value for NEURON_RERANK_RUNTIME: "coher" (expected one of: candle, bge, mxbai, jina, cohere)
 ```
 

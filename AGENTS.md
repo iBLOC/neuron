@@ -1,20 +1,23 @@
 # neuron (神经元) — AGENTS guide
 
-**Status:** READ-ONLY contributor reference. Updated 2026-07-19 (post-Apache-2.0 open-source release prep: license switch, Shadow decoupling, internal-docs path cleanup).
+**Status:** READ-ONLY contributor reference. Updated 2026-09-27 (post-candle 0.11 upgrade per `huggingface/candle.git#aebc405`; post-`f643c1c` LLM auto-registration + USERPROFILE fallback on Windows GUI processes; **VoxCPM2 (2B/48 kHz) local inference landed** — `NEURON_TTS_RUNTIME=voxcpm2`, direct checkpoint load, see the "VoxCPM2 (loadable)" section; **628 lib tests as of 2026-09-27** on default features, **658 with `--features voxcpm`** (30 new VoxCPM2 weights/model/runtime/streaming tests); GitHub Pages CI now base-URL-configured + adds a `lychee` link-check job; prior 2026-09-25 baseline: post-rename `neure → neuron` per commit `e3d2c41` (2026-09-21); `AppState::register_engine` capability per `bccef7c`; 618 lib tests as of 2026-09-24; earlier 2026-07-19 baseline: license switch + Shadow decoupling).
 
 ## What neuron is
 
 neuron is a **library-only** Rust crate (no standalone binary) that host processes embed via `run_embedded()` to serve OpenAI-compatible inference:
 
-- Loads model weights (LLM, TTS, ASR, Rerank, Embedding)
+- Loads model weights (LLM, TTS, ASR, Rerank, Embedding, Vision, Decision)
 - Runs inference using one of 3 ML frameworks (candle / burn / litert)
 - Serves the result on **10+ OpenAI-compatible HTTP endpoints** + 2 liveness endpoints
 - **TTS chunked-transfer streaming** (`stream: true` on `/v1/audio/speech` → `Body::from_stream`)
 - **ASR multi-format decoding** (WAV, MP3, FLAC, OGG/Vorbis via symphonia, gated by `asr-audio` feature)
+- **SenseVoiceSmall via sherpa-onnx** (`NEURON_ASR_RUNTIME=sherpa`, feature `sherpa`) — the official `sherpa-onnx` Rust binding (https://github.com/k2-fsa/sherpa-onnx, 1.13.x). Recognizer construction, fbank, LFR, CMVN and greedy CTC all live inside onnxruntime-backed C++ (`src/asr/sherpa.rs`).
+- **SenseVoiceSmall via neuron's own tract ONNX stack** (`NEURON_ASR_RUNTIME=tract`, feature `tract`) — kaldi-style fbank (`src/asr/fbank.rs`), LFR stacking + CMVN stats parsed from the graph's `metadata_props` (`src/asr/onnx_meta.rs`), tract forward, in-repo greedy CTC (`src/asr/sensevoice.rs::ctc_greedy`). The export's dynamic PE chain must be moved out via `scripts/prep-sensevoice-onnx.py` first; the script asserts the export's constants and verifies against the original onnxruntime forward (max diff < `1e-3`, argmax equal across T = 37..250). See `docs/superpowers/specs/2026-09-26-sherpa-onnx-asr-backend.md`.
 - **Embedding batched forward** (`encode_batch` + `BatchLongest` padding, single BERT forward)
 - **Embedding base64 encoding** (`encoding_format: "base64"` → f32 LE bytes, base64 string)
 - **Multi-reranker families** (BGE / mxbai / jina, gated by `NEURON_RERANK_RUNTIME`) — all 3 have real candle forward passes now
 - **Cohere rerank adapter** (`NEURON_RERANK_RUNTIME=cohere`) — proxies requests to Cohere's hosted `/v1/rerank` API; no local weights, requires `NEURON_COHERE_API_KEY`
+- **Laya decision scoring** (`POST /v1/decisions`) — non-autoregressive discriminative scorers (int8 ONNX, encoder-only, one forward per question) served natively via `tract`; scores a question's options plus an act-vs-escalate head with calibrated confidence. Convai ships **safetensors only, no ONNX** (`convaiinnovations/laya{,-multilingual,-typed-decisions}`), so the graph is upstream `scripts/export_onnx.py` → this repo's `scripts/prep-laya-onnx.py`; `laya` is deliberately not in `SUPPORTED_CATALOG` since nothing downloadable is loadable as-is. See `docs/superpowers/specs/2026-09-24-laya-decision.md`.
 - **FlashAttention** for Llama 2/3 + Mistral (upstream candle-transformers) + Qwen 2/2.5/3/3.5 (via `src/llm/vendor/` with `use_flash_attn` + `From<upstream::Config>` + flash-attn forward branch); Phi-3/ChatGLM still warn + fall back to SDPA. Requires `--features flash-attn` + CUDA.
 - **Criterion benchmark suite** under `benches/perf.rs` (14 `bench_function` calls across all 5 model types; previously reported as 22 — corrected 2026-07-19)
 - Runs only as an in-process library — the host binds the port, owns the process lifecycle, and calls `request_shutdown()` + `join().await` for graceful drain
@@ -28,7 +31,7 @@ neuron is a **library-only** Rust crate (no standalone binary) that host process
 | You want to... | Edit file | Caveat |
 |---|---|---|
 | Add a new LLM architecture | `src/llm/candle_runtime.rs` | Update `Qwen3::new` / use correct model struct from `candle_transformers::models` |
-| Add a new TTS model | `src/tts/voxcpm_burn/` | Vendored from `madushan1000/voxcpm_rs`; consumes pre-converted burn `.mpk` weights (neuron does NOT convert from safetensors) |
+| Add a new TTS model | `src/tts/voxcpm_burn/` | 0.5B: vendored from `madushan1000/voxcpm_rs`, pre-converted burn `.mpk` weights. VoxCPM2: `voxcpm2_model.rs` + `audiovae_v2.rs`, loads upstream safetensors/pth directly via `weights.rs` |
 | Add a new model type (e.g. embedding) | Create new `src/<model_type>/mod.rs` | Follow the 10-step pattern in README's "Adding a new model type" section |
 | Add a new vision task (classify/segment/pose) | Extend `src/vision/lora.rs` + `candle_yolo.rs` | v1.0 implements full task dispatch + response shape + LoRA; detect head has preprocessing/NMS wired, classify/segment/pose are stubs pending heads |
 | Add a new vision model family (RT-DETR / DETR / RF-DETR / Florence-2 / Grounding DINO) | Create new `<family>.rs` in `src/vision/`, add a new `VisionImpl` variant, wire the loader | Wire into `default_capabilities()` in `src/capabilities/catalog.rs` |
@@ -44,20 +47,36 @@ neuron is a **library-only** Rust crate (no standalone binary) that host process
 | Add a new reranker family (e.g. Cohere) | `src/rerank/<name>.rs` + register `RerankImpl` variant in `src/rerank/mod.rs` | Match `RerankRuntime` trait shape; add env-var arm in `state.rs` |
 | Add a new TTS stream format (mp3 streaming, opus) | extend `synthesize_stream` impl or override per-runtime | The trait's default impl uses 16 KiB chunks; override if the runtime can yield in a more efficient shape |
 | Add a new ASR audio format (e.g. AAC) | `src/asr/audio.rs` | Add a `detect_format` arm + decode path via symphonia |
+| Add a new SenseVoice engine | `src/asr/{sherpa,sensevoice}.rs` + `scripts/prep-sensevoice-onnx.py` | sherpa runs the export unchanged (`NEURON_ASR_RUNTIME=sherpa`); the tract path needs the prep script first because tract 0.21 cannot translate the export's dynamic `Range` PE chain |
+| Add a new decision model / scorer | `src/decision/tract_session.rs` (`from_dir`) + `scripts/prep-laya-onnx.py` | The graph must be prepped first (grounded dims + `DynamicQuantizeLinear` decomposition) or tract cannot load it. Keep `OUTPUT_NAMES` in sync with the export's `graph.output` order — tract discards output tensor names. |
+
+### VoxCPM2 (loadable, 2026-09-27)
+
+The OpenBMB 2026-04 release of VoxCPM (2B params, 48 kHz AudioVAE V2, 30 languages, three cloning modes — Voice Design, Controllable Cloning, Ultimate Cloning) is now **loadable** via `NEURON_TTS_RUNTIME=voxcpm2` (feature `voxcpm`). The former P0 list is closed except model-level streaming:
+
+1. ~~**AudioVAE V2 port**~~ — landed as `src/tts/voxcpm_burn/audiovae_v2.rs`: same encoder as V1 (reused), decoder gains a sixth upsampling stage (`decoder_rates = [8, 6, 5, 2, 2, 2]`, `decoder_dim = 2048`, total ×1920 → 48 kHz) plus per-block **sample-rate conditioning** (`SampleRateConditionLayer`, `scale_bias` embeddings indexed by `torch.bucketize(sr, [20000, 30000, 40000])`; 48 kHz → bucket 3).
+2. ~~**2B-parameter model config**~~ — landed as `src/tts/voxcpm_burn/voxcpm2_model.rs` (`VoxCPM2Config` serde-mirrors the upstream `config.json`; `VoxCPM2<B>` model). V2 deltas vs the V1 vendored tree: new `fusion_concat_proj` (`Linear(2h → h)`) fusing encoder output + masked feature embed into the residual LM's input; `residual_lm_no_rope: true` (RALM drops RoPE — `MiniCPMConfig::no_rope`, `rope_emb` is now `Option`); LocDiT V2 feeds the LM condition as **two raw prefix tokens** (`cat(lm_to_dit, res_to_dit)` along features, timestep as a separate token, slice offset `prefix + 2 + 1`); patch_size 4; FSQ latent 512; 28L/2048h TSLM (vocab 73448); 12L LocEnc + LocDiT.
+3. ~~**Voice cloning wire format**~~ — `SpeechRequest` gains optional `reference_audio` (base64 / `data:` URI / server-local file path, decoded to mono 16 kHz via `src/tts/clone_audio.rs`, 30 s cap) and `prompt_text` (transcript). Reference-isolation prefix uses sentinel tokens 103/104. **Voice Design needs no new field**: upstream convention is a "(description)" prefix on `input`. Cloning ignores `stream: true` (returns full WAV). Continuation + combined prompt modes exist at the model layer (`ClonePrompt`) but only reference-isolation is wired to HTTP so far.
+4. ~~**Multi-language (30)**~~ — model-side; no `lang` field needed (upstream auto-detects from text; the multichar-Chinese tokenizer wrapper `VoxCpm2Tokenizer` splits pure-CJK multi-char vocab entries per char, mirroring upstream `mask_multichar_chinese_tokens`).
+5. **Streaming override — pipeline landed, HTTP wiring blocked on fidelity**: `VoxCPM2::generate_streaming` (per-step latent-patch callback) and `audiovae_v2_stream::StreamingVaeDecoder` (per-conv left-context state, mirroring upstream `StreamingVAEDecoder`) are implemented and unit-tested for structure (lengths, state-slot parity, finiteness). NOT wired into `TtsRuntime::synthesize_stream` yet: on the ndarray backend the streamed waveform deviates from the full decode beyond the benign per-chunk boundary-tap error (burn conv view/layout sensitivity under investigation — materializing weights and pad/slice buffers fixes most of it; a residual random-weight deviation remains). The trait default (full synthesis chunked into 16 KiB) keeps `stream: true` fidelity-safe.
+
+**Weights load directly — no conversion**: `src/tts/voxcpm_burn/weights.rs` reads `model.safetensors` (SafetensorsStore) / `audiovae.pth` (PytorchStore) via burn-store's snapshot API and adapts per tensor: bf16/fp32 → f32 (ndarray has no bf16 matmul), PyTorch `[out,in]` → burn 0.21 `[in,out]` Linear transpose (2-D `*.weight` not containing `embed`), norm `*.weight` → `*.inner.gamma` rewrite, and `apply(..., skip_enum_variants=true)` to bridge PyTorch's flat `decoder.model.N.…` paths to burn's enum-wrapped module tree. Required model dir: `config.json` + `tokenizer.json` + `model.safetensors` (4.58 GB bf16) + `audiovae.pth` (377 MB fp32) — exactly the upstream download. **Budget ~10 GB RAM** (2.29B params as f32). The registry dispatches `model_id == "voxcpm2"` → `VoxCpm2TtsRuntime` under the shared `TtsImpl::Burn`; `NEURON_TTS_RUNTIME=voxcpm2` registers the catalog id.
+
+**Test strategy (no 4.58 GB weights in CI)**: `weights.rs` builds a PyTorch-style fixture from a random-init burn module (invert each adaptation, serialize via the `safetensors` dev-dep) and asserts `load_checkpoint_into` restores every tensor bit-exact; `voxcpm2_model.rs` runs **end-to-end tiny generate** (structural config, ~30 s of ndarray CPU) through zero-shot and reference-prompt paths down to the V2 VAE decode.
 
 ## Architectural rules (DO NOT BREAK)
 
 1. **Wire format is OpenAI byte-for-byte compatible** for `/v1/chat/completions`, `/v1/audio/speech`, `/v1/audio/transcriptions`, `/v1/rerank`, `/v1/embeddings`, AND Anthropic Messages v1 compatible for `/v1/messages`. Any client that works with OpenAI / vLLM / ollama / llama.cpp server / Anthropic SDK should work with neuron unchanged.
 
-2. **All 6 model types share the same trait shape**: `load`, `infer`, `list_models`, `name`. See the README "Adding a new model type" section for the full pattern.
+2. **All model types share the same trait shape**: `load`, `infer`, `list_models`, `name`. See the README "Adding a new model type" section for the full pattern.
 
 3. **`run_embedded()` returns a `NeuronHandle` that owns the server lifetime**. Hosts MUST call `request_shutdown()` + `join().await` for graceful drain. Dropping the handle without shutdown leaks the bind port.
 
 4. **Feature flags are the only way to gate ML framework pulls**:
-   - `candle` (default) — pulls `candle-core`, `candle-nn`, `candle-transformers`, `tokenizers` (all from git rev `a9667ca`, version 0.10.2)
+   - `candle` (default) — pulls `candle-core` (imported as crate `candle` since upstream 0.11), `candle-nn`, `candle-transformers`, `tokenizers` (all from git rev `aebc405`, version 0.11.0 — see the "candle upgrade" note below)
    - `voxcpm` — pulls `burn`, `burn-store`
    - `litert` — pulls `litert-lm`
-   - `mistralrs` — pulls `mistralrs` (mistral.rs v0.8.22, MIT); implicitly activates `candle` since mistral.rs is built on candle-core 0.10.2
+   - `mistralrs` — pulls `mistralrs` (mistral.rs v0.8.22, MIT); implicitly activates `candle`. mistral.rs pins `regex-automata ^0.4.13` while candle 0.11's `fancy-regex` needs `^0.4.16` — a fresh `Cargo.lock` (delete and regenerate) resolves both at 0.4.18; a lockfile pinned to 0.4.14 fails resolution.
 
 5. **No echo stubs — real engines required (since 2026-06-30)**. Prior versions shipped `EchoLlmRuntime` / `EchoTtsRuntime` / `EchoAsrRuntime` / `EchoRerankRuntime` / `EchoEmbeddingRuntime` as always-available stubs for integration testing and wire-format validation. Those have been removed. Each `*RuntimeRegistry` now exposes `default_runtime()` which returns an `Unavailable*Runtime` error stub — every inference call against an unregistered or unloadable model returns `NeuronError::not_initialized(...)` so the HTTP layer can surface a clear 4xx response. To exercise the full HTTP stack end-to-end, integration tests must select a real engine via env vars (`NEURON_*_RUNTIME=candle|burn|mxbai|jina|cohere|litert|mistralrs`) and provide model weights.
 
@@ -75,6 +94,8 @@ neuron is a **library-only** Rust crate (no standalone binary) that host process
    - `POST /v1/chat/completions`, `POST /v1/audio/speech`, `POST /v1/audio/transcriptions`, `POST /v1/rerank`, `POST /v1/embeddings` — OpenAI-compat inference
    - `POST /v1/vision/detect`, `/classify`, `/segment`, `/pose` — Vision tasks
    - `POST /v1/vision/lora/register`, `GET /v1/vision/lora/list` — LoRA management
+   - `POST /v1/decisions` — Laya discriminative decision scoring (options + act/escalate)
+   - `POST /v1/forecast` — Chronos2 zero-shot time-series forecast
    - `POST /v1/messages` — Anthropic Messages v1 (via `adapter_dispatch`)
 
 8. **Each capability uses a `*RuntimeRegistry`** (e.g. `LlmRuntimeRegistry`) that holds registered model entries, a loaded-instance cache, and a `ResourceTracker`. Handlers route via `runtime_for(model_id)` which lazy-loads on first request. `ServerState` keeps both the registry (primary) and shortcut fields (backward compat).
@@ -85,14 +106,82 @@ neuron is a **library-only** Rust crate (no standalone binary) that host process
 
 11. **Rerank enum variant `RerankImpl::Candle` is a deprecated alias** for `RerankImpl::Bge`. Parsing the string `"candle"` is still accepted (with a `tracing::warn!`) for one release cycle, then should be removed.
 
+### candle upgraded to upstream main (2026-09-27)
+
+neuron now pins `huggingface/candle.git#aebc405` (0.11.0, upstream main of
+2026-09-25), up from `a9667ca` (0.10.2, Jan 2026). This brings new model
+families, the cuTILE + fused-MoE kernel integration, paged flash-attn
+kernels, and the CUDA launch-parameter cache. Performance on neuron's
+single-stream decode is unchanged within noise (A/B below) — the upgrade
+is for features, not speed. Four adaptation points, each load-bearing:
+
+1. **Upstream `layer_norm` regression worked around in
+   `src/candle_compat.rs`.** `candle-nn@b96522e` (Sep 2) probes
+   `bias`/`beta` via `contains_tensor` *before* checking
+   `config.affine`, so every bias-free norm (RmsNorm — llama/qwen/gemma/
+   chatglm checkpoints) fails with "Failed to find weight tensor".
+   Upstream CI misses this because unit tests use `VarMap`/zeros. The
+   `NormBiasShim<B: SimpleBackend>` here reports a synthetic bias for
+   `…norm.bias` / `…norm.beta` paths only; affine norms with a real
+   checkpoint bias are unaffected, and `affine = false` never loads the
+   probe result. ALL `VarBuilder::from_mmaped_safetensors` and
+   `from_tensors` call sites go through `candle_compat::{from_mmaped_safetensors,
+   from_tensors}` — remove the shim once upstream gates the probe on
+   `affine`.
+2. **Crate rename.** From 0.11, `candle-core` is re-exported as the crate
+   name `candle` (`package = "candle-core"` in Cargo.toml), so sources
+   use `use candle::…`; `candle-nn` keeps its name. Feature flags become
+   `candle/cuda`, `candle/metal`.
+3. **Strict `Tensor::repeat` semantics.** candle ≥ 0.11 follows PyTorch:
+   a `0` repeat narrows the dim to zero (old candle treated it as a
+   no-op). `src/mage_vl/gate.rs` used `repeat((0, rep, 1, 1))` for GQA
+   head expansion — fixed to `repeat((1, rep, 1, 1))`, correct on both
+   versions.
+4. **CUDA-on-Windows build & runtime.** `candle-kernels/build.rs` (in the
+   cargo git checkout, not this repo) needs `-Xcompiler /Zc:preprocessor`
+   for the CUDA 13 CCCL preprocessor hard-error under MSVC; cargo does
+   NOT re-run a build script when you edit files inside a git checkout —
+   `rm -rf target/release/build/candle-kernels-*` after patching. At
+   runtime, `Device::new_cuda` fails (and before 2026-09-27 *silently*
+   fell back to CPU) unless cudarc's DLLs resolve — launching the host
+   with the CUDA toolkit `bin` directory on `PATH` is the reliable fix.
+   The `Auto` device fallback now logs the CUDA init failure instead of
+   swallowing it.
+
+**A/B benchmark** (same machine, greedy 12-token decode, llama.cpp CUDA as
+the machine-mood control row, p50 of 3):
+
+| row | a9667ca (0.10.2) | aebc405 (0.11.0) |
+|---|---|---|
+| neuron-candle-cuda (bf16) | 30.6 / 38.0 tok/s | 26.5 / 26.0 tok/s |
+| neuron-candle-cpu (f16) | 2.15 / 2.12 tok/s | 2.58 / 1.63 tok/s |
+| llama-cuda q8_0 (control) | 142.9 / 141.5 | 131-135 (separate run) |
+
+Within run-to-run noise on both devices — the perf commits in the range
+target batch serving and quantized paths, not single-stream f16/bf16
+GEMM-bound decode. `neuron-mistralrs-cpu` (Q4_K ISQ) re-tested under
+the upgrade hits **~6.7 tok/s** steady-state, matching the pre-upgrade
+~7 tok/s — all three neuron backends (candle CPU/GPU + mistralrs CPU)
+work end-to-end on 0.11.
+
 ## Conformance tests
 
 ```bash
-cargo test --lib                                  # 450 unit tests (src/**/mod.rs) — 0 failures (2026-07-19; up from 397 pre-T5-chronos2 phases 3A-3C)
+cargo test --lib                                  # 628 unit tests (src/**/mod.rs) — 0 failures (2026-09-27, on candle 0.11; +4 from candle_compat tests)
+cargo test --lib --features voxcpm                # 658 unit tests — 0 failures (VoxCPM2 adds the weights/model/runtime/clone-audio/streaming suites; two pre-existing V1 audiovae roundtrip tests are slow, ~5 min, on ndarray)
+cargo test --lib --features tract                 # 659 unit tests — 0 failures (tract adds the decision + vision-ONNX + sensevoice paths)
+cargo test --lib --features tract,sherpa          # 665 unit tests — 0 failures (sherpa adds SherpaAsrRuntime + from_dir + the wav/onnx_meta/fbank/sensevoice coverage)
+cargo build --bench asr_speed --features tract,sherpa  # in-process tract-vs-sherpa benchmark compiles
+cargo bench  --bench asr_speed --features tract,sherpa  # writes target/asr-speed-compare.md
+cargo build --bench model_matrix --features "candle,tract,sherpa,voxcpm"  # per-cap × per-engine matrix harness compiles
+cargo bench  --bench model_matrix --features "candle,tract,sherpa,voxcpm"  # writes target/model-matrix.md (requires neuron_server on :18083)
 cargo build --lib                                 # library-only build (no standalone binary)
-cargo bench --no-run --bench perf                 # 22 Criterion benchmarks compile
+cargo bench --no-run --bench perf                 # 14 Criterion benchmarks compile
 cargo bench --bench perf -- --quick               # fast CI smoke
+cargo bench --no-run --bench llm_speed            # cross-framework HTTP harness compiles (see below)
 ```
+
+The **cross-framework LLM speed harness** (`benches/llm_speed.rs`, `harness = false`) needs live servers, so it is not part of CI — only its compilation is. To actually run it: `./scripts/run-llm-speed-compare.sh` starts whatever servers are installed (neuron via `examples/neuron_server`, llama.cpp, ollama, vLLM) and skips the rest; the report lands in `target/llm-speed-compare.md`. `benches/compare.rs` by contrast is a microbenchmark scaffold whose non-neuron backends are noop stubs — it does not measure real cross-framework latency.
 
 Run all three before submitting a PR. **All must pass**.
 
@@ -150,14 +239,17 @@ neuron has **no direct dependency** on any particular host — the integration c
 | `HF_TOKEN` | (unset) | Bearer token sent on every HuggingFace / hf-mirror HTTP download. Empty / unset is fine — `reqwest` simply omits the header. Used to un-gate private repos. |
 | `MODELSCOPE_TOKEN` | (unset) | Bearer token sent on every ModelScope HTTP download. Same semantics as `HF_TOKEN`. |
 | `NEURON_LLM_RUNTIME` | (unset) | `candle` \| `litert` \| `mistralrs` — which LLM engine to load |
+| `NEURON_LLM_DTYPE` | `f32` | `f32` \| `f16` \| `bf16` — storage dtype the candle runtime materialises weights (and the Llama KV cache) in. `f16`/`bf16` halve resident weight memory. candle's CPU backend has **no BF16 matmul** (loads but fails forward), so `f16` is the memory-lean choice on CPU; F32 for a 2B model is ~10 GB resident and pages on a 16 GB host. |
 | `NEURON_MISTRALRS_ISQ` | `q4_0` | `q4_0` \| `q8_0` \| `none` — in-situ quantization applied by mistral.rs at load time |
 | `NEURON_EMBEDDING_RUNTIME` | (unset) | `candle` — which Embedding engine to load |
 | `NEURON_EMBEDDING_MODEL_PATH` | (unset) | Path to the Embedding model directory (must contain `config.json` + `tokenizer.json` + `model.safetensors`) |
 | `NEURON_LLM_MODEL_PATH` | (unset) | Path to the LLM model directory (must contain `config.json` + `tokenizer.json` + `*.safetensors`) |
-| `NEURON_TTS_RUNTIME` | (unset) | `voxcpm` (requires `--features voxcpm`) |
-| `NEURON_TTS_MODEL_PATH` | (unset) | Path to the TTS model directory (pre-converted burn `.mpk` weights: `config.json` + `tokenizer.json` + `model.mpk` + `audiovae.mpk`) |
-| `NEURON_ASR_RUNTIME` | (unset) | `candle` (Whisper) |
-| `NEURON_ASR_MODEL_PATH` | (unset) | Path to the ASR model directory |
+| `NEURON_TTS_RUNTIME` | (unset) | `voxcpm` / `burn` (0.5B, requires `--features voxcpm`) \| `voxcpm2` (2B/48 kHz, same feature; loads upstream checkpoints directly, ~10 GB RAM) |
+| `NEURON_TTS_MODEL_PATH` | (unset) | Path to the TTS model directory. 0.5B: pre-converted burn `.mpk` weights (`config.json` + `tokenizer.json` + `model.mpk` + `audiovae.mpk`). VoxCPM2: the upstream `openbmb/VoxCPM2` download (`config.json` + `tokenizer.json` + `model.safetensors` + `audiovae.pth`) |
+| `NEURON_ASR_RUNTIME` | (unset) | `candle` (Whisper) \| `tract` (SenseVoiceSmall via neuron's own tract ONNX stack) \| `sherpa` (SenseVoiceSmall via the official sherpa-onnx Rust binding) |
+| `NEURON_ASR_MODEL_PATH` | (unset) | Path to the ASR model directory (SenseVoiceSmall needs `model.onnx` + `tokens.txt`; tract path also wants the `model.prepped.onnx` produced by `scripts/prep-sensevoice-onnx.py`) |
+| `NEURON_ASR_ONNX_FILE` | (unset) | Override the SenseVoice graph file (e.g. `model.int8.onnx`); ignored by the Whisper runtime |
+| `NEURON_ASR_SHERPA_NUM_THREADS` | (unset, default 2) | Thread count for the sherpa-onnx recognizer |
 | `NEURON_RERANK_RUNTIME` | (unset) | `candle` (BGE-reranker, deprecated alias for `bge`) \| `bge` \| `mxbai` \| `jina` \| `cohere` |
 | `NEURON_RERANK_MODEL_PATH` | (unset) | Path to the Rerank model directory (BGE/mxbai/jina only — cohere uses the API) |
 | `NEURON_COHERE_API_KEY` | (unset) | Cohere API key (required when `NEURON_RERANK_RUNTIME=cohere`) |
@@ -165,6 +257,9 @@ neuron has **no direct dependency** on any particular host — the integration c
 | `NEURON_COHERE_MODEL` | `rerank-english-v3.0` | Cohere model id (e.g. `rerank-multilingual-v3.0`) |
 | `NEURON_VISION_RUNTIME` | (unset) | `candle-yolo` \| `candle-rtdetr` \| `candle-detr` \| `ort` \| `ultralytics` — which Vision engine + model family to load (`ort` is a pluggable executor — see `src/vision/ort_runtime.rs` `build_session`) |
 | `NEURON_VISION_MODEL_PATH` | (unset) | Path to the Vision model directory (YOLOv8: `config.json` + `yolov8n.safetensors`) |
+| `NEURON_DECISION_RUNTIME` | (unset) | `tract` — which Decision engine to load (requires `--features tract`) |
+| `NEURON_DECISION_MODEL_ID` | `laya` | Model id registered for the Decision capability |
+| `NEURON_DECISION_MODEL_PATH` | (unset) | Path to the prepped Decision model dir — a single `*.onnx` (plus `.onnx.data` if external) + `tokenizer.json`, optional `rl_agent_config.json` for the temperature tables |
 
 ## Where the design specs live
 
@@ -201,6 +296,16 @@ Catalog dedup: the same `(engine, id)` may appear multiple times in `SUPPORTED_C
 - **Why this one**: 1B-class open-source SOTA on agentic tool-use, code generation, and difficult reasoning (per OpenBMB's public leaderboard); fits on 2-core 4 GB edge devices via candle (Llama path); built-in hybrid `<think>` reasoning without a separate model.
 - **Where it lives**: `modelscope:OpenBMB/MiniCPM5-1B` (`source_id = "modelscope"` in the catalog). HF fallback at `huggingface:openbmb/MiniCPM5-1B` if the user has switched the default source via `NEURON_DEFAULT_SOURCE=huggingface`.
 - **Runtime**: `candle` — auto-detected from `config.json` `architectures = ["LlamaForCausalLM"]` by `src/llm/candle_arch.rs::select_architecture()` → `load_llama()`.
+
+### MiniCPM5-2B (registered alongside the default, not the default itself)
+
+`minicpm5-2b` is registered in the same default catalog as a higher-fidelity alternative for hosts that have the VRAM headroom. It is NOT the platform default — `DEFAULT_MODEL_ID` remains `minicpm5-1b` to preserve the edge-tier branding.
+
+- **Model**: MiniCPM5-2B from OpenBMB (released 2026-09-07) — 2.52B `LlamaForCausalLM` (42 layers, hidden_size 2048, intermediate_size 6144, GQA 16Q/2KV, head_dim 128, 131K native context, vocab 130560, `rope_theta=5_000_000`, `tie_word_embeddings=false`, bos=0, eos=[1, 130073]), Apache 2.0. Self-positioned by OpenBMB as "2B-class SOTA, competitive with 4B-class models"; same Standard `LlamaForCausalLM` architecture as MiniCPM5-1B.
+- **Why alongside (not instead of) the 1B**: 2.52B BF16 needs ~6–7 GB VRAM (vs 1B's ~3 GB), so the 2B is impractical on the 2-core 4 GB edge tier the platform targets. Hosts that want higher-quality chat serve 2B explicitly via `with_llm_model("minicpm5-2b")` or the equivalent `NEURON_LLM_MODEL_PATH` pointing at OpenBMB/MiniCPM5-2B.
+- **Where it lives**: `huggingface:openbmb/MiniCPM5-2B` (also on `modelscope:OpenBMB/MiniCPM5-2B` — same dedup-by-`(engine, id)` catalog path used for MiniCPM5-1B).
+- **Runtime**: `candle` — same `model_type = "llama"` dispatch as MiniCPM5-1B. `candle_arch::detect_arch` returns `CausalArch::Llama` and the structural fields (42 layers, GQA 2, hidden_size 2048, intermediate_size 6144, vocab_size 130560, `rope_theta=5_000_000`, `tie_word_embeddings=false`) are preserved end-to-end. Verified by `src/llm/candle_arch.rs::test_detect_arch_minicpm5_2b_dispatches_to_llama` against a synthetic config blob mirroring OpenBMB's published checkpoint spec (see `src/capabilities/catalog.rs` top-of-file doc-comment for the side-by-side 1B/2B field table).
+- **Hybrid `<think>`**: same `enable_thinking` chat-template flag as MiniCPM5-1B — no per-model code change needed.
 
 Other catalog families: Gemma 4 / Gemma 3n / Gemma 3 (litert runtime; gated on HF — requires license agreement in the user's HF account), Qwen 2.5 / Qwen 3 (candle), Llama 3 (candle), Phi-3 (candle), Mistral 7B (candle), ChatGLM-3 (candle), VoxCPM 0.5B (burn TTS), Whisper base (candle ASR), BGE / mxbai / jina rerankers (candle), all-MiniLM-L6-v2 (candle embedding), YOLO v8 / v11 / RT-DETR / DETR / RF-DETR / Florence-2 / Grounding DINO (vision).
 

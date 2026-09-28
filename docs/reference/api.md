@@ -31,7 +31,7 @@ POST /v1/audio/speech         (TTS — OpenAI)
 POST /v1/audio/transcriptions (ASR — OpenAI)
 ```
 
-TTS uses VoxCpm (burn 0.21, `--features voxcpm`). ASR uses Whisper (candle, default).
+TTS uses VoxCpm (burn 0.21, `--features voxcpm`). `voxcpm-0.5b` is loadable; `voxcpm2` is registered in the catalog but not yet loadable (P0 blockers: AudioVAE V2 port + 2B model config + voice cloning wire format expansion; see AGENTS.md and README TTS section). ASR ships three engines behind `NEURON_ASR_RUNTIME`: **candle** (Whisper, default), **sherpa** (SenseVoiceSmall via the official sherpa-onnx Rust binding, `--features sherpa`), and **tract** (SenseVoiceSmall via neuron's own tract ONNX stack, `--features tract`). The two SenseVoice engines run the same exported graph; see `docs/superpowers/specs/2026-09-26-sherpa-onnx-asr-backend.md`.
 
 ### Embeddings
 
@@ -67,6 +67,30 @@ POST   /v1/vision/lora/register
 GET    /v1/vision/lora/list
 POST   /v1/vision/lora/unregister
 ```
+
+### Mage-VL StreamMind gate (neuron-specific)
+
+```
+POST /v1/vision/gate/score
+```
+
+Returns `p_speak ∈ [0, 1]` per codec window for the Mage-VL event gate. Used by clients to decide when to invoke full generation on `/v1/chat/completions` or `/v1/messages` with `model = "microsoft/Mage-VL"`. See [Vision Tasks How-to — StreamMind gate](/howto/vision-tasks#streammind-gate) for the request/response shape.
+
+### Chronos2 forecasting (neuron-specific)
+
+```
+POST /v1/forecast
+```
+
+Zero-shot time-series forecasting backed by the Chronos2 foundation model (Amazon, Apache-2.0; vendored T5-style encoder + decoder + linear output head in `src/chronos2/vendor/`). Request: `{context: [Number], horizon: usize, method?: "linear" | "cubic", quantiles?: [Float]}`. Response: `{forecast: [Number], quantiles?: {q0.1: [[Number]], ...}, metrics?: {mae?, mape?}}`. Requires `--features chronos2` + `NEURON_CHRONOS2_RUNTIME=candle` + `NEURON_CHRONOS2_MODEL_PATH=/path/to/chronos2-checkpoint`.
+
+### Decision scoring (neuron-specific)
+
+```
+POST /v1/decisions
+```
+
+Discriminative decision scoring backed by the [Laya](https://github.com/NandhaKishorM/laya) models (Apache-2.0; int8 encoder-only ONNX, one forward per question, no decoding). Request: `{model, state, questions: [{type: "choice"|"score"|"noul", instructions, criteria?, labels?, options?, option_order?}], max_len?, head_max_len?}`. Response carries one result per question: per-option probabilities in rendered order, the chosen index, the `act` vs `escalate` split, and a calibrated confidence. Question field names follow `laya/onnx_agent.py`'s input, so a schema written for the Python agent ports over unchanged. Requires `--features tract` + `NEURON_DECISION_RUNTIME=tract` + `NEURON_DECISION_MODEL_PATH` pointing at a model prepped with `scripts/prep-laya-onnx.py`. See [`docs/superpowers/specs/2026-09-24-laya-decision.md`](../superpowers/specs/2026-09-24-laya-decision.md).
 
 ### Models (neuron-specific)
 
@@ -240,6 +264,48 @@ Response:
   ]
 }
 ```
+
+### `POST /v1/decisions`
+
+```bash
+curl -X POST http://localhost:8085/v1/decisions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "laya",
+    "state": {"turn": 3, "last_error": "timeout"},
+    "questions": [{
+      "type": "choice",
+      "instructions": "Which action should the agent take?",
+      "criteria": ["Retry the request", "Escalate to a human", "Give up"]
+    }]
+  }'
+```
+
+Response — one entry per question, probabilities in **rendered option order** (unpermuted through any `option_order`):
+
+```json
+{
+  "object": "list",
+  "model": "laya",
+  "data": [
+    {
+      "index": 0,
+      "qtype": "choice",
+      "option_count": 3,
+      "probabilities": [0.71, 0.22, 0.07],
+      "chosen_index": 0,
+      "chosen": "Retry the request",
+      "confidence": 0.42,
+      "temperature_scale": 1.0,
+      "temperature_bucket": "choice:3-5",
+      "act": {"act": 0.88, "escalate": 0.12}
+    }
+  ],
+  "usage": {"prompt_tokens": 74, "total_tokens": 74}
+}
+```
+
+Type-specific fields: `chosen` is returned for `choice`, `score` (the expected level, `sum(i * p[i])`) for `score`, and `noul` (`P(true)`) for `noul`. `confidence` is the normalized entropy for `choice`/`score` and the majority probability for `noul`. `temperature_scale` reports the value actually applied after clamping to [0.5, 5.0].
 
 ## Error responses
 

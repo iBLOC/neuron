@@ -9,7 +9,7 @@ use crate::embedding::EmbeddingRuntime;
 use crate::llm::ModelInfo;
 
 #[cfg(feature = "candle")]
-use crate::MiniLmL6V2EmbeddingRuntime;
+use crate::embedding::candle::MiniLmL6V2EmbeddingRuntime;
 
 pub struct EmbeddingRuntimeRegistry {
     pub registered: Vec<RegisteredEmbedding>,

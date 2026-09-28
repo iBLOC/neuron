@@ -44,6 +44,7 @@ pub struct CapabilityRegistries {
     pub rerank: Arc<EngineRegistry<dyn crate::engine::AnyCapabilityEngine>>,
     pub embedding: Arc<EngineRegistry<dyn crate::engine::AnyCapabilityEngine>>,
     pub vision: Arc<EngineRegistry<dyn crate::engine::AnyCapabilityEngine>>,
+    pub decision: Arc<EngineRegistry<dyn crate::engine::AnyCapabilityEngine>>,
 }
 
 impl CapabilityRegistries {
@@ -55,6 +56,7 @@ impl CapabilityRegistries {
             rerank: Arc::new(EngineRegistry::new()),
             embedding: Arc::new(EngineRegistry::new()),
             vision: Arc::new(EngineRegistry::new()),
+            decision: Arc::new(EngineRegistry::new()),
         }
     }
 
@@ -66,6 +68,7 @@ impl CapabilityRegistries {
             Capability::Rerank => &self.rerank,
             Capability::Embedding => &self.embedding,
             Capability::Vision => &self.vision,
+            Capability::Decision => &self.decision,
         };
         reg.lookup(model_id)
     }
@@ -78,6 +81,7 @@ impl CapabilityRegistries {
             Capability::Rerank => self.rerank.default(),
             Capability::Embedding => self.embedding.default(),
             Capability::Vision => self.vision.default(),
+            Capability::Decision => self.decision.default(),
         }
     }
 

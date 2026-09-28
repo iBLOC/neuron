@@ -1,9 +1,14 @@
 /target
 .worktrees/
 .sisyphus/
+.zcode/
 .idea/
 *.swp
 *.swo
 .DS_Store
 
 docs/superpowers/
+# Model weights / tooling state stay out of git (GitHub 2GB blob limit)
+models/**/*.safetensors
+models/**/*.onnx
+.mimosa/

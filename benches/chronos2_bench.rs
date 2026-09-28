@@ -1,7 +1,7 @@
 //! Chronos2 inference benchmark.
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId};
-use candle_core::Device;
+use candle::Device;
 
 fn bench_forecast(c: &mut Criterion) {
     let mut group = c.benchmark_group("chronos2_forecast");

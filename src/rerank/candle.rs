@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use candle_core::{Device, DType, Tensor};
+use candle::{Device, DType, Tensor};
 use candle_nn::VarBuilder;
 use candle_transformers::models::xlm_roberta::{
     Config as XLMRobertaConfig, XLMRobertaForSequenceClassification,
@@ -134,7 +134,7 @@ impl RerankRuntime for CandleRerankRuntime {
 
         let safetensors_path = path.join("model.safetensors");
         let vb = unsafe {
-            VarBuilder::from_mmaped_safetensors(&[&safetensors_path], DType::F32, &dev)
+            crate::candle_compat::from_mmaped_safetensors(&[&safetensors_path], DType::F32, &dev)
         }
         .map_err(|e| NeuronError::not_implemented(format!("load safetensors: {}", e)))?;
 

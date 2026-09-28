@@ -165,6 +165,18 @@ impl NeuronError {
             error_type: "not_implemented".to_string(),
         }
     }
+
+    /// Used by capability registries when `runtime_for(id)` is asked for an id
+    /// that was never registered. Distinct from a load-time failure so HTTP
+    /// handlers can return 400 (caller asked for a model we don't have) instead
+    /// of silently falling back to the first-registered shortcut (which can mask
+    /// typos in `model` field and silently burn cycles on the wrong runtime).
+    pub fn model_not_registered(model_id: impl Into<String>) -> Self {
+        Self {
+            message: format!("ModelNotRegistered: {}", model_id.into()),
+            error_type: "model_not_registered".to_string(),
+        }
+    }
 }
 
 impl std::fmt::Display for NeuronError {

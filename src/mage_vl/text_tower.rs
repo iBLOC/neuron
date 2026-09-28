@@ -16,7 +16,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use candle_core::{DType, Device, IndexOp, Result, Tensor};
+use candle::{DType, Device, IndexOp, Result, Tensor};
 use candle_nn::{
     embedding, kv_cache::KvCache, linear_b, rms_norm, Activation, Embedding, Linear,
     Module, RmsNorm, VarBuilder,
@@ -350,7 +350,7 @@ impl MageVlTextModel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use candle_core::DType;
+    use candle::DType;
     use candle_nn::VarBuilder;
     use std::collections::HashMap;
 
@@ -439,7 +439,7 @@ mod tests {
                 mk("d", &[cfg.hidden_size, cfg.intermediate_size]),
             );
         }
-        VarBuilder::from_tensors(ts, DType::F32, &dev)
+        crate::candle_compat::from_tensors(ts, DType::F32, &dev)
     }
 
     #[test]

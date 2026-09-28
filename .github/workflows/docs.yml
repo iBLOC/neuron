@@ -51,6 +51,12 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # No submodules today, but defense-in-depth: docs/superpowers/ is
+          # currently gitignored per .gitignore, but if it ever moves to a
+          # submodule the build should still pick it up (and VitePress
+          # srcExclude already strips it from the output).
+          submodules: recursive
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -101,12 +107,71 @@ jobs:
             echo "::warning::VitePress build output directory not found" >> $GITHUB_STEP_SUMMARY
           fi
 
+  link-check:
+    name: Markdown link check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Run on the same triggers as the build: any push to main or PR that
+    # touches docs/source files. Independently gated, so a broken link
+    # never blocks the VitePress build (which keeps `ignoreDeadLinks:true`
+    # to handle transient HTTPS errors gracefully). Reports as a separate
+    # status check that reviewers can choose to require.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Run lychee
+        uses: lycheeverse/lychee-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          # Scan the docs site + top-level contributor references. Excluded:
+          #   docs/superpowers/**  — internal design specs (gitignored) that
+          #                            intentionally link to gitignored siblings
+          #   localhost / 127.0.0.1 / mailto — appear in cURL / example payloads
+          args: >-
+            --no-progress
+            --exclude-loopback
+            --exclude-mail
+            --exclude 'docs/superpowers/**'
+            --exclude 'docs/.vitepress/**'
+            --exclude 'docs/node_modules/**'
+            --max-concurrency 8
+            --timeout 30
+            --retry 1
+            --retry-wait-time 1
+            .
+          # `fail: false` so link-check reports as a warning rather than a
+          # blocking red ❌. This lets the workflow catch real rot (e.g. a
+          # model card deletion on HuggingFace) without making the doc site
+          # PR unmergeable when an external site has transient downtime.
+          # Reviewers should treat a warning as "fix before next release".
+          fail: false
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## Markdown link check" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Scanned: docs/, README.md, AGENTS.md, ARCHITECTURE.md" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Broken-link warnings are non-blocking (fail: false). Treat as fix-before-merge." >> $GITHUB_STEP_SUMMARY
+
   deploy:
     name: Deploy to GitHub Pages
-    needs: build
+    needs: [build, link-check]
     if: github.event_name == 'workflow_dispatch' && inputs.deploy == true
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    # A manual deploy must not be cancelled by a fresh push-to-main
+    # build that happens to land on the same ref. Without this guard, a
+    # Pages deploy kicked off by an operator could be silently aborted
+    # mid-flight by the next push workflow.
+    concurrency:
+      group: pages-deploy-${{ github.ref }}
+      cancel-in-progress: false
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}

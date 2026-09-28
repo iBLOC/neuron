@@ -5,7 +5,7 @@
 //! memory is scarce and garbage collection pauses cause frame drops.
 
 #[cfg(feature = "candle")]
-use candle_core::{DType, Device, Result, Tensor};
+use candle::{DType, Device, Result, Tensor};
 use std::collections::HashMap;
 use std::sync::Mutex;
 

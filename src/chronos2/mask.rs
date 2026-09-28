@@ -14,7 +14,7 @@
 //!    the decoder self-attention. The encoder uses only the
 //!    padding mask (no causality constraint).
 
-use candle_core::{Device, Result, Tensor};
+use candle::{Device, Result, Tensor};
 
 /// Special token id for padding.
 const PAD_TOKEN_ID: u32 = 2;

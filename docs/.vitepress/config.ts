@@ -1,12 +1,20 @@
 import { defineConfig } from 'vitepress'
 
 export default defineConfig({
+  // GitHub Pages site URL: https://ibloc.github.io/neuron/. Without this,
+  // every emitted asset resolves to /assets/... and the deployed site 404s.
+  // Override locally with `vitepress --base=/` (set in the build script
+  // below) for `vitepress dev` / `vitepress preview`.
+  base: '/neuron/',
   title: 'neuron',
   description: 'Apache-2.0 Rust inference runtime for LLM / TTS / ASR / Rerank / Embedding / Vision — OpenAI- and Anthropic-compatible',
   lang: 'en-US',
   cleanUrls: true,
   lastUpdated: true,
   appearance: 'dark',
+  // Always ignore dead links at build time — link rot is now caught by the
+  // `link-check` job in .github/workflows/docs.yml. Keeping `true` here
+  // avoids spurious CI failures from transient HTTPS errors during build.
   ignoreDeadLinks: true,
 
   // Exclude internal-only design specs from the public site. The

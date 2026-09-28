@@ -34,7 +34,7 @@
 //! `forward` here and returns a uniform prediction (so the
 //! HTTP path is observable end-to-end without a real model).
 
-use candle_core::{DType, Device, Result, Tensor};
+use candle::{DType, Device, Result, Tensor};
 use candle_nn::Module;
 use candle_nn::{linear, Linear, RmsNorm, VarBuilder};
 
@@ -83,7 +83,7 @@ pub struct T5CrossBlock {
 impl T5CrossBlock {
     pub fn new(cfg: T5BlockConfig, vb: VarBuilder) -> Result<Self> {
         cfg.validate()
-            .map_err(|e| candle_core::Error::Msg(format!("T5BlockConfig invalid: {e}")))?;
+            .map_err(|e| candle::Error::Msg(format!("T5BlockConfig invalid: {e}")))?;
         let d = cfg.d_model;
         let dff = cfg.d_ff;
         Ok(Self {

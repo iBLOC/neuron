@@ -40,8 +40,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config: NeuronConfig::default(),       // see /reference/env-vars
     }).await?;
 
-    // 2. Optionally: register pre-downloaded models so the catalog surfaces them
-    // handle.llm_registry_mut().register(...);
+    // 2. Auto-registration: ServerState scans NEURON_MODEL_DIRS for every
+    //    llm/<id>/model.safetensors at startup and registers it as a candle
+    //    runtime automatically (USERPROFILE fallback on Windows when HOME
+    //    is unset). So a model pulled via /v1/models/pull is servable by id
+    //    on the next start with no env-var setup.
+    //    If you need a model from a non-default location, register explicitly:
+    //    handle.llm_registry_mut().register(Arc::new(LlmImpl::Candle(...)))?;
+    //    See /concepts/engines#auto-registration-of-downloaded-models for the full flow.
 
     // 3. Run the host's main loop (UI, agent, RPC server, etc.)
     // ... your host code ...

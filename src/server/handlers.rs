@@ -172,6 +172,16 @@ pub struct SpeechRequest {
     pub response_format: String,
     #[serde(default)]
     pub stream: bool,
+    /// VoxCPM2 voice cloning: reference audio as base64 (or `data:` URI, or a
+    /// server-local file path). Decoded to mono 16 kHz. When present, the
+    /// request takes the cloning path instead of zero-shot synthesis.
+    /// Voice Design needs no extra field — prefix `input` with the desired
+    /// voice description in parentheses, e.g. `"(A young woman, gentle voice)..."`.
+    #[serde(default)]
+    pub reference_audio: Option<String>,
+    /// Transcript of `reference_audio`, used by continuation-style prompts.
+    #[serde(default)]
+    pub prompt_text: Option<String>,
 }
 
 fn default_speed() -> f32 {
@@ -192,12 +202,17 @@ pub async fn audio_speech(
         ));
     }
 
+    // Explicit unknown model id → 400 (caller asked for something we don't have).
+    // Other registry failures (load-time crash, etc.) still fall back to the
+    // shortcut so a transient misconfiguration doesn't surface as a hard error.
     let model = payload.model.as_deref().unwrap_or("echo-tts");
-    let rt = state
-        .tts_registry
-        .runtime_for(model)
-        .await
-        .unwrap_or_else(|_| state.tts.clone());
+    let rt = match state.tts_registry.runtime_for(model).await {
+        Ok(rt) => rt,
+        Err(e) if e.error_type == "model_not_registered" => {
+            return Err(ServerError::BadRequest(e.message));
+        }
+        Err(_) => state.tts.clone(),
+    };
 
     let content_type = match payload.response_format.as_str() {
         "wav" => "audio/wav",
@@ -205,6 +220,24 @@ pub async fn audio_speech(
         "opus" => "audio/opus",
         _ => "audio/mpeg",
     };
+
+    // Voice-cloning path (VoxCPM2): reference_audio present → decode to
+    // 16 kHz mono and hand off to `synthesize_clone`. Streaming is not
+    // supported for cloned synthesis yet; the full WAV is returned.
+    if let Some(reference) = payload.reference_audio.as_deref() {
+        let samples = crate::tts::clone_audio::decode_reference_payload(reference)
+            .map_err(ServerError::BadRequest)?;
+        let audio = rt
+            .synthesize_clone(&payload.input, Some(&samples), payload.prompt_text.as_deref())
+            .await
+            .map_err(|e| ServerError::BadRequest(e.message))?;
+        return Ok((
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "audio/wav")],
+            audio.audio,
+        )
+            .into_response());
+    }
 
     if payload.stream {
         let stream = rt
@@ -336,6 +369,71 @@ pub async fn rerank(
         "data": response.data,
         "usage": response.usage,
     })))
+}
+
+// ---------------------------------------------------------------------------
+// Decision
+// ---------------------------------------------------------------------------
+
+/// `POST /v1/decisions` — score a batch of typed discriminative questions.
+///
+/// One request carries a shared `state` plus a list of `choice` / `score` /
+/// `noul` questions; a single encoder forward pass emits a logit per option and
+/// the host calibrates them into probabilities. Nothing here generates text.
+#[derive(Debug, serde::Deserialize)]
+pub struct DecisionHttpRequest {
+    pub model: String,
+    pub state: serde_json::Value,
+    pub questions: Vec<crate::decision::DecisionQuestion>,
+    /// Override the checkpoint's sequence budget.
+    #[serde(default)]
+    pub max_len: Option<usize>,
+    /// Override the checkpoint's head-section budget.
+    #[serde(default)]
+    pub head_max_len: Option<usize>,
+}
+
+pub async fn decisions(
+    State(state): State<ServerState>,
+    Json(payload): Json<DecisionHttpRequest>,
+) -> Result<Json<crate::decision::DecisionResponse>, ServerError> {
+    if payload.model.trim().is_empty() {
+        return Err(ServerError::BadRequestWithParam(
+            "model cannot be empty".to_string(),
+            "model".to_string(),
+        ));
+    }
+    if payload.questions.is_empty() {
+        return Err(ServerError::BadRequestWithParam(
+            "questions cannot be empty".to_string(),
+            "questions".to_string(),
+        ));
+    }
+
+    let mut req = crate::decision::DecisionRequest::new(
+        payload.model.clone(),
+        payload.state,
+        payload.questions,
+    );
+    req.max_len = payload.max_len;
+    req.head_max_len = payload.head_max_len;
+
+    let rt = state
+        .decision_registry
+        .runtime_for(&payload.model)
+        .await
+        .unwrap_or_else(|_| state.decision.clone());
+
+    let response = rt
+        .decide(req)
+        .await
+        .map_err(|e| match e.error_type.as_str() {
+            "invalid_request_error" => ServerError::BadRequest(e.message),
+            "not_implemented" | "not_initialized" => ServerError::NotImplemented(e.message),
+            _ => ServerError::Internal(e.message),
+        })?;
+
+    Ok(Json(response))
 }
 
 // ---------------------------------------------------------------------------
