@@ -280,11 +280,31 @@ impl CandleLlmRuntime {
     /// Non-Llama architectures use model-internal caches (or none) and
     /// need no reset.
     fn reset_llama_cache(m: &mut LoadedModel) -> Result<(), NeuronError> {
-        if let (CausalModel::Llama { model: _, cache }, Some(cfg)) =
-            (&mut m.model, m.llama_cfg.as_ref())
-        {
-            *cache = llama::Cache::new(true, m.dtype, cfg, &m.device)
-                .map_err(|e| NeuronError::not_implemented(format!("rebuild Llama cache: {e}")))?;
+        match &mut m.model {
+            CausalModel::Llama { model: _, cache } => {
+                if let Some(cfg) = m.llama_cfg.as_ref() {
+                    *cache = llama::Cache::new(true, m.dtype, cfg, &m.device).map_err(|e| {
+                        NeuronError::not_implemented(format!("rebuild Llama cache: {e}"))
+                    })?;
+                }
+            }
+            // Qwen-family caches live inside the model and are never
+            // cleared by the forward path itself. Without this, a second
+            // request appends to the previous request's cache and the
+            // new candle rev's attention fails on
+            // broadcast_add(mask, scores): lhs [1, 16, 22, kv_grown] vs
+            // rhs [1, 1, 22, 22].
+            CausalModel::Qwen2(m) => m.clear_kv_cache(),
+            #[cfg(feature = "flash-attn")]
+            CausalModel::Qwen2Flash(m) => m.clear_kv_cache(),
+            CausalModel::Qwen3(m) => m.clear_kv_cache(),
+            #[cfg(feature = "flash-attn")]
+            CausalModel::Qwen3Flash(m) => m.clear_kv_cache(),
+            CausalModel::Phi3(m) => m.clear_kv_cache(),
+            CausalModel::Mistral(m) => m.clear_kv_cache(),
+            // candle-transformers' ChatGlm exposes no cache-reset API;
+            // multi-request reuse for that arch behaves as before.
+            CausalModel::ChatGlm(_) => {}
         }
         Ok(())
     }
