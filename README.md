@@ -75,6 +75,8 @@ let config = NeuronConfig::new()
 | `/v1/models/pull` | POST | neuron | Start an async download job (returns 202 + job_id) |
 | `/v1/models/pull/{job_id}` | GET | neuron | Poll download job status |
 | `/v1/models/{engine}/{id}` | DELETE | neuron | Delete a downloaded model from disk (returns 204) |
+| `/v1/scheduler/status` | GET | neuron | Model scheduler snapshot: resident models, queue, memory budget, correction stats |
+| `/v1/scheduler/models/{id}` | DELETE | neuron | Administratively evict a resident model (409 while it has leases / queued requests) |
 | `/v1/info` | GET | neuron | neuron version, capabilities, model registry |
 | `/health` | GET | neuron | Liveness probe |
 
@@ -215,6 +217,35 @@ The `/v1/models` endpoint returns a `supported_count` and `available_count` so c
 
 POST `/v1/models/pull` accepts an optional `source` field that takes precedence over both the reference-string prefix and the per-engine/per-model config: `{ "reference": "Qwen/X", "engine": "llm", "id": "x", "source": "modelscope" }`.
 - After pull, restart the server to load the new model (hot-swap is out of scope)
+
+## Model scheduler (bounded memory, on-demand loading)
+
+LLM chat requests — both `/v1/chat/completions` (OpenAI) and `/v1/messages` (Anthropic), streaming SSE and non-streaming — are admitted through the model scheduler. Instead of loading every registered model's weights and keeping them forever, neuron keeps a **memory budget** of resident models and swaps on demand:
+
+1. Requests targeting the currently-resident model run immediately (bounded by a per-model concurrency cap).
+2. A request for a *different* model loads it alongside when it fits the budget — both models stay warm.
+3. When it doesn't fit, queued work for the resident models is served **first** (their weights are already paid for); once none remains, idle resident models are evicted LRU-first and the requested model is swapped in.
+4. Models idle beyond `NEURON_SCHEDULER_IDLE_SECS` with no leases and no queued demand are recycled automatically. A model that can never fit the budget is rejected up front (`400 model_too_large`); a request that queues past `NEURON_SCHEDULER_MAX_QUEUE_WAIT_SECS` fails with `503 queue_timeout` (retryable).
+
+Memory cost estimates come from a reference table shipped in the repo (`assets/model_memory_profiles.json`, per-platform `cpu`/`cuda`/`metal` values). At runtime every eviction measures the actual RSS released and blends it into the estimate (EWMA); observed values persist under `<model_dirs>/scheduler/observed_profiles.json`, so each deployment's estimates get more accurate over its first few swap cycles.
+
+```bash
+# What's resident / queued / how big
+curl http://localhost:8083/v1/scheduler/status
+# Force-evict an idle model (409 while it has leases or queued requests)
+curl -X DELETE http://localhost:8083/v1/scheduler/models/qwen3-0.6b
+```
+
+| Env var | Default | Purpose |
+|---|---|---|
+| `NEURON_SCHEDULER_ENABLED` | `true` | Set `false` to restore the legacy always-load behavior (requests never queue, weights never unload) |
+| `NEURON_SCHEDULER_BUDGET_MB` | auto (80% of RAM) | Resident-weights memory budget in MiB |
+| `NEURON_SCHEDULER_IDLE_SECS` | `120` | Idle residents are recycled after this |
+| `NEURON_SCHEDULER_MAX_CONCURRENCY` | `4` | Concurrent leases per resident model |
+| `NEURON_SCHEDULER_MAX_QUEUE_WAIT_SECS` | `300` | Queue dwell time before `503 queue_timeout` |
+| `NEURON_SCHEDULER_PLATFORM` | from `NEURON_DEVICE` | Platform key into the memory profile (`cpu` / `cuda` / `metal`) |
+
+v1 scope: the scheduler gates the LLM capability (the only one with multiple swappable resident weights today). See `docs/superpowers/specs/2026-09-29-model-scheduler.md` for the full design.
 
 ## Supported Models
 

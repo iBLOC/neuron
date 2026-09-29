@@ -17,6 +17,7 @@ pub mod mage_vl;
 pub mod metrics;
 pub mod models;
 pub mod rerank;
+pub mod scheduler;
 pub mod server;
 pub mod tts;
 pub mod vision;

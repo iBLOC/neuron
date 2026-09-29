@@ -56,6 +56,11 @@ pub struct NeuronConfig {
     pub source_endpoints: HashMap<String, String>,
     /// Pre-registered models for the runtime registries.
     pub registrations: Vec<ModelRegistration>,
+    /// Model scheduler knobs (queue, memory budget, idle recycling).
+    /// Serde-defaulted so pre-scheduler serialized configs load
+    /// unchanged.
+    #[serde(default)]
+    pub scheduler: crate::scheduler::SchedulerConfig,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
@@ -145,6 +150,7 @@ impl NeuronConfig {
             per_model_source: HashMap::new(),
             source_endpoints: HashMap::new(),
             registrations: Vec::new(),
+            scheduler: crate::scheduler::SchedulerConfig::default(),
         }
     }
 
@@ -358,6 +364,7 @@ impl NeuronConfig {
         apply_per_engine_sources_env(&mut cfg, env);
         apply_per_model_sources_env(&mut cfg, env);
         apply_source_endpoints_env(&mut cfg, env);
+        apply_scheduler_env(&mut cfg, env);
         cfg
     }
 
@@ -543,6 +550,45 @@ fn apply_source_endpoints_env(cfg: &mut NeuronConfig, env: &HashMap<String, Stri
     }
 }
 
+fn apply_scheduler_env(cfg: &mut NeuronConfig, env: &HashMap<String, String>) {
+    // NEURON_SCHEDULER_ENABLED: true/1/false/0 (anything unparseable
+    // keeps the default, mirroring the other env appliers).
+    if let Some(v) = env_map_get(env, "SCHEDULER_ENABLED") {
+        match v.to_lowercase().as_str() {
+            "true" | "1" | "yes" => cfg.scheduler.enabled = true,
+            "false" | "0" | "no" => cfg.scheduler.enabled = false,
+            _ => {}
+        }
+    }
+    // NEURON_SCHEDULER_BUDGET_MB: resident-weight budget in MiB; 0 /
+    // unset = derive from total RAM.
+    if let Some(v) = env_map_get(env, "SCHEDULER_BUDGET_MB")
+        && let Ok(mb) = v.parse::<u64>()
+    {
+        cfg.scheduler.budget_bytes = mb.saturating_mul(1024 * 1024);
+    }
+    if let Some(v) = env_map_get(env, "SCHEDULER_IDLE_SECS")
+        && let Ok(secs) = v.parse::<u64>()
+    {
+        cfg.scheduler.idle_evict_secs = secs;
+    }
+    if let Some(v) = env_map_get(env, "SCHEDULER_MAX_CONCURRENCY")
+        && let Ok(n) = v.parse::<u32>()
+    {
+        cfg.scheduler.max_concurrent_per_model = n;
+    }
+    if let Some(v) = env_map_get(env, "SCHEDULER_MAX_QUEUE_WAIT_SECS")
+        && let Ok(secs) = v.parse::<u64>()
+    {
+        cfg.scheduler.max_queue_wait_secs = secs;
+    }
+    if let Some(v) = env_map_get(env, "SCHEDULER_PLATFORM")
+        && !v.is_empty()
+    {
+        cfg.scheduler.platform = v.to_lowercase();
+    }
+}
+
 impl Default for NeuronConfig {
     fn default() -> Self {
         Self::new()
@@ -696,6 +742,7 @@ mod tests {
             per_model_source: HashMap::new(),
             source_endpoints: HashMap::new(),
             registrations: Vec::new(),
+            scheduler: crate::scheduler::SchedulerConfig::default(),
         };
 
         let json = serde_json::to_string(&config).unwrap();
@@ -710,6 +757,36 @@ mod tests {
             Some("bge-reranker-base")
         );
         assert_eq!(parsed.model_dirs.len(), 2);
+        assert!(parsed.scheduler.enabled);
+    }
+
+    #[test]
+    fn test_neuron_config_scheduler_defaults_roundtrip_without_field() {
+        // Pre-scheduler serialized configs (no `scheduler` key) must
+        // still load.
+        let legacy = r#"{"port":8083,"host":"0.0.0.0","llm_model_path":null,"tts_model_path":null,"asr_model_path":null,"rerank_model_path":null,"device":"auto","default_llm_model":null,"default_tts_model":null,"default_asr_model":null,"default_rerank_model":null,"model_dirs":[],"default_source_id":"modelscope","per_engine_source":{},"per_model_source":{},"source_endpoints":{},"registrations":[]}"#;
+        let parsed: NeuronConfig = serde_json::from_str(legacy).unwrap();
+        assert!(parsed.scheduler.enabled);
+        assert_eq!(parsed.scheduler.budget_bytes, 0);
+    }
+
+    #[test]
+    fn test_from_env_parses_scheduler_knobs() {
+        let mut env = HashMap::new();
+        env.insert("NEURON_SCHEDULER_ENABLED".to_string(), "false".to_string());
+        env.insert("NEURON_SCHEDULER_BUDGET_MB".to_string(), "4096".to_string());
+        env.insert("NEURON_SCHEDULER_IDLE_SECS".to_string(), "30".to_string());
+        env.insert("NEURON_SCHEDULER_MAX_CONCURRENCY".to_string(), "8".to_string());
+        env.insert("NEURON_SCHEDULER_MAX_QUEUE_WAIT_SECS".to_string(), "60".to_string());
+        env.insert("NEURON_SCHEDULER_PLATFORM".to_string(), "CUDA".to_string());
+        let c = NeuronConfig::from_env_map(&env);
+        assert!(!c.scheduler.enabled);
+        assert_eq!(c.scheduler.budget_bytes, 4 * 1024 * 1024 * 1024);
+        assert_eq!(c.scheduler.idle_evict_secs, 30);
+        assert_eq!(c.scheduler.max_concurrent_per_model, 8);
+        assert_eq!(c.scheduler.max_queue_wait_secs, 60);
+        assert_eq!(c.scheduler.effective_platform(), "cuda");
+        assert!(!c.scheduler.observes_rss());
     }
 
     #[test]

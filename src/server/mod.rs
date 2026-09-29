@@ -22,15 +22,16 @@ mod state;
 pub use error::ServerError;
 pub use handlers::{
     audio_speech, audio_transcriptions, chat_completions, decisions, embedding_handler, forecast,
-    gate_score, health_handler, info_handler, list_models, rerank, vision_classify, vision_detect,
-    vision_lora_list, vision_lora_register, vision_lora_unregister, vision_pose, vision_segment,
-    ChatCompletionsRequest, DecisionHttpRequest, EmbeddingHttpRequest, ModelList, RerankHttpRequest,
-    SpeechRequest, TranscriptionResponse,
+    gate_score, health_handler, info_handler, list_models, rerank, scheduler_evict,
+    scheduler_status, vision_classify, vision_detect, vision_lora_list, vision_lora_register,
+    vision_lora_unregister, vision_pose, vision_segment, ChatCompletionsRequest,
+    DecisionHttpRequest, EmbeddingHttpRequest, ModelList, RerankHttpRequest, SpeechRequest,
+    TranscriptionResponse,
 };
 pub use state::ServerState;
 
 use axum::{
-    routing::{get, post},
+    routing::{delete, get, post},
     Router,
 };
 use crate::config::NeuronConfig;
@@ -82,6 +83,11 @@ pub fn routes() -> Router<ServerState> {
         .route("/v1/messages", post(crate::server::dispatch::adapter_dispatch))
         .route("/v1/forecast", post(forecast))
         .route("/v1/vision/gate/score", post(gate_score))
+        .route("/v1/scheduler/status", get(handlers::scheduler_status))
+        .route(
+            "/v1/scheduler/models/{id}",
+            delete(handlers::scheduler_evict),
+        )
 }
 
 /// Build the full axum [`Router`] with all endpoints registered.
@@ -208,6 +214,53 @@ mod tests {
         let config = crate::config::NeuronConfig::default();
         let _router = create_router(config);
         // Router creation should not panic.
+    }
+
+    // -- Scheduler endpoints -------------------------------------------------
+
+    #[tokio::test]
+    async fn test_scheduler_status_endpoint_reports_llm_snapshot() {
+        use tower::util::ServiceExt;
+        let router = create_router(crate::config::NeuronConfig::default());
+        let resp = router
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/v1/scheduler/status")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["capability"], "llm");
+        assert_eq!(json["enabled"], true);
+        assert!(json["budget_bytes"].is_u64());
+        assert!(json["resident_bytes"].is_u64());
+        assert!(json["residents"].is_array());
+        assert!(json["queue"].is_array());
+        assert!(json["stats"]["load_admissions"].is_u64());
+    }
+
+    #[tokio::test]
+    async fn test_scheduler_evict_unknown_model_returns_404() {
+        use tower::util::ServiceExt;
+        let router = create_router(crate::config::NeuronConfig::default());
+        let resp = router
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("DELETE")
+                    .uri("/v1/scheduler/models/no-such-model")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let bytes = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["error"]["type"], "model_not_resident");
     }
 
     // -- Health endpoint tests ---------------------------------------------

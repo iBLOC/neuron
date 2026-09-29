@@ -40,6 +40,18 @@ pub enum ApiError {
     #[error("engine execution error: {0}")]
     Execution(String),
 
+    #[error(
+        "model '{model}' needs ~{required_bytes} bytes which exceeds the scheduler memory budget of {budget_bytes} bytes"
+    )]
+    ModelTooLarge {
+        model: String,
+        required_bytes: u64,
+        budget_bytes: u64,
+    },
+
+    #[error("timed out after {waited_secs}s waiting in the scheduler queue for model '{model}'")]
+    QueueTimeout { model: String, waited_secs: u64 },
+
     #[error("internal error: {0}")]
     Internal(String),
 }
@@ -56,6 +68,8 @@ impl ApiError {
             Self::Parse(_) => "adapter_parse_error",
             Self::Serialize(_) => "adapter_serialize_error",
             Self::Execution(_) => "engine_execution_error",
+            Self::ModelTooLarge { .. } => "model_too_large",
+            Self::QueueTimeout { .. } => "queue_timeout",
             Self::Internal(_) => "internal_error",
         }
     }
@@ -68,9 +82,31 @@ impl ApiError {
             | Self::UnsupportedFeature { .. }
             | Self::UnsupportedCapability(_) => 400,
             Self::Parse(_) => 400,
+            Self::ModelTooLarge { .. } => 400,
+            // Queue timeouts are transient — the client may retry.
+            Self::QueueTimeout { .. } => 503,
             Self::Serialize(_) => 500,
             Self::Execution(_) => 500,
             Self::Internal(_) => 500,
+        }
+    }
+}
+
+impl From<crate::scheduler::ScheduleError> for ApiError {
+    fn from(e: crate::scheduler::ScheduleError) -> Self {
+        match e {
+            crate::scheduler::ScheduleError::TooLarge {
+                model,
+                required_bytes,
+                budget_bytes,
+            } => Self::ModelTooLarge {
+                model,
+                required_bytes,
+                budget_bytes,
+            },
+            crate::scheduler::ScheduleError::Timeout { model, waited_secs } => {
+                Self::QueueTimeout { model, waited_secs }
+            }
         }
     }
 }

@@ -1,6 +1,6 @@
 # neuron (神经元) — AGENTS guide
 
-**Status:** READ-ONLY contributor reference. Updated 2026-09-27 (post-candle 0.11 upgrade per `huggingface/candle.git#aebc405`; post-`f643c1c` LLM auto-registration + USERPROFILE fallback on Windows GUI processes; **VoxCPM2 (2B/48 kHz) local inference landed** — `NEURON_TTS_RUNTIME=voxcpm2`, direct checkpoint load, see the "VoxCPM2 (loadable)" section; **628 lib tests as of 2026-09-27** on default features, **658 with `--features voxcpm`** (30 new VoxCPM2 weights/model/runtime/streaming tests); GitHub Pages CI now base-URL-configured + adds a `lychee` link-check job; prior 2026-09-25 baseline: post-rename `neure → neuron` per commit `e3d2c41` (2026-09-21); `AppState::register_engine` capability per `bccef7c`; 618 lib tests as of 2026-09-24; earlier 2026-07-19 baseline: license switch + Shadow decoupling).
+**Status:** READ-ONLY contributor reference. Updated 2026-09-27 (post-candle 0.11 upgrade per `huggingface/candle.git#aebc405`; post-`f643c1c` LLM auto-registration + USERPROFILE fallback on Windows GUI processes; **VoxCPM2 (2B/48 kHz) local inference landed** — `NEURON_TTS_RUNTIME=voxcpm2`, direct checkpoint load, see the "VoxCPM2 (loadable)" section; **658 lib tests as of 2026-09-29** on default features (+30 model-scheduler/profile/dispatch/config tests), **688 with `--features voxcpm`**, 689 with `tract`, 695 with `tract,sherpa`; **model scheduler landed** — bounded-memory LLM swap queue behind `/v1/chat/completions` + `/v1/messages`, see the "Model scheduler" bullet and `docs/superpowers/specs/2026-09-29-model-scheduler.md`; GitHub Pages CI now base-URL-configured + adds a `lychee` link-check job; prior 2026-09-25 baseline: post-rename `neure → neuron` per commit `e3d2c41` (2026-09-21); `AppState::register_engine` capability per `bccef7c`; 618 lib tests as of 2026-09-24; earlier 2026-07-19 baseline: license switch + Shadow decoupling).
 
 ## What neuron is
 
@@ -17,6 +17,7 @@ neuron is a **library-only** Rust crate (no standalone binary) that host process
 - **Embedding base64 encoding** (`encoding_format: "base64"` → f32 LE bytes, base64 string)
 - **Multi-reranker families** (BGE / mxbai / jina, gated by `NEURON_RERANK_RUNTIME`) — all 3 have real candle forward passes now
 - **Cohere rerank adapter** (`NEURON_RERANK_RUNTIME=cohere`) — proxies requests to Cohere's hosted `/v1/rerank` API; no local weights, requires `NEURON_COHERE_API_KEY`
+- **Model scheduler** (2026-09-29; `src/scheduler/`, spec `docs/superpowers/specs/2026-09-29-model-scheduler.md`) — LLM requests on `/v1/chat/completions` + `/v1/messages` (OpenAI & Anthropic, SSE + non-streaming) queue against a memory budget: same-model runs immediately, a different model loads alongside when it fits, otherwise queued resident-model work drains first and idle residents are evicted LRU-first before the swap; idle models recycle after `NEURON_SCHEDULER_IDLE_SECS`. Memory reference values ship in `assets/model_memory_profiles.json` and are corrected at runtime by observed unload RSS (EWMA → `~/.neuron/models/scheduler/observed_profiles.json`). Disable with `NEURON_SCHEDULER_ENABLED=false` for the legacy always-load path. `LlmRuntimeRegistry`'s loaded cache is now a **std** mutex (never held across `await`) with a synchronous `unload()` — the scheduler evicts from lease-drop contexts; `EngineRegistry::unregister` covers the canonical table.
 - **Laya decision scoring** (`POST /v1/decisions`) — non-autoregressive discriminative scorers (int8 ONNX, encoder-only, one forward per question) served natively via `tract`; scores a question's options plus an act-vs-escalate head with calibrated confidence. Convai ships **safetensors only, no ONNX** (`convaiinnovations/laya{,-multilingual,-typed-decisions}`), so the graph is upstream `scripts/export_onnx.py` → this repo's `scripts/prep-laya-onnx.py`; `laya` is deliberately not in `SUPPORTED_CATALOG` since nothing downloadable is loadable as-is. See `docs/superpowers/specs/2026-09-24-laya-decision.md`.
 - **FlashAttention** for Llama 2/3 + Mistral (upstream candle-transformers) + Qwen 2/2.5/3/3.5 (via `src/llm/vendor/` with `use_flash_attn` + `From<upstream::Config>` + flash-attn forward branch); Phi-3/ChatGLM still warn + fall back to SDPA. Requires `--features flash-attn` + CUDA.
 - **Criterion benchmark suite** under `benches/perf.rs` (14 `bench_function` calls across all 5 model types; previously reported as 22 — corrected 2026-07-19)
@@ -49,6 +50,7 @@ neuron is a **library-only** Rust crate (no standalone binary) that host process
 | Add a new ASR audio format (e.g. AAC) | `src/asr/audio.rs` | Add a `detect_format` arm + decode path via symphonia |
 | Add a new SenseVoice engine | `src/asr/{sherpa,sensevoice}.rs` + `scripts/prep-sensevoice-onnx.py` | sherpa runs the export unchanged (`NEURON_ASR_RUNTIME=sherpa`); the tract path needs the prep script first because tract 0.21 cannot translate the export's dynamic `Range` PE chain |
 | Add a new decision model / scorer | `src/decision/tract_session.rs` (`from_dir`) + `scripts/prep-laya-onnx.py` | The graph must be prepped first (grounded dims + `DynamicQuantizeLinear` decomposition) or tract cannot load it. Keep `OUTPUT_NAMES` in sync with the export's `graph.output` order — tract discards output tensor names. |
+| Extend the model scheduler to another capability | handler: `acquire` → execute with the lease (streaming: `HoldingStream`); add an `Arc<ModelScheduler>` + unload handle in `ServerState::new` | The scheduler is capability-generic (`Capability` keyed); v1 wires LLM only. The unload handle must reach every cache holding that capability's weights. |
 
 ### VoxCPM2 (loadable, 2026-09-27)
 
@@ -96,6 +98,9 @@ The OpenBMB 2026-04 release of VoxCPM (2B params, 48 kHz AudioVAE V2, 30 languag
    - `POST /v1/vision/lora/register`, `GET /v1/vision/lora/list` — LoRA management
    - `POST /v1/decisions` — Laya discriminative decision scoring (options + act/escalate)
    - `POST /v1/forecast` — Chronos2 zero-shot time-series forecast
+   - `POST /v1/vision/gate/score` — Mage-VL StreamMind gate score
+   - `GET /v1/scheduler/status` — model scheduler snapshot (residents, queue, budget, correction stats)
+   - `DELETE /v1/scheduler/models/{id}` — administratively evict a resident model (409 while in use)
    - `POST /v1/messages` — Anthropic Messages v1 (via `adapter_dispatch`)
 
 8. **Each capability uses a `*RuntimeRegistry`** (e.g. `LlmRuntimeRegistry`) that holds registered model entries, a loaded-instance cache, and a `ResourceTracker`. Handlers route via `runtime_for(model_id)` which lazy-loads on first request. `ServerState` keeps both the registry (primary) and shortcut fields (backward compat).
@@ -164,13 +169,46 @@ the upgrade hits **~6.7 tok/s** steady-state, matching the pre-upgrade
 ~7 tok/s — all three neuron backends (candle CPU/GPU + mistralrs CPU)
 work end-to-end on 0.11.
 
+## Model scheduler invariants (2026-09-29)
+
+`src/scheduler/` + the `adapter_dispatch` integration. Full design in
+`docs/superpowers/specs/2026-09-29-model-scheduler.md`; load-bearing
+points if you touch it:
+
+1. **Grant channels flush after the state lock drops.** A failed
+   oneshot send drops a `ModelLease`, whose `Drop` calls `release`
+   which re-locks — sending under the lock self-deadlocks. Same
+   reason `run_evictions`/`do_unload` execute outside the lock with
+   two-phase `evicting` marking (`mark_for_eviction` → unload →
+   remove under lock → re-scan).
+2. **`LlmRuntimeRegistry::unload` is synchronous by design.** The
+   loaded cache uses a std mutex that is never held across `await`
+   (the load runs outside it and re-checks on insert). Do not revert
+   to `tokio::sync::Mutex` — the scheduler evicts from lease-drop
+   contexts where blocking on a tokio mutex is not allowed.
+3. **The lease must outlive execution, not the handler.** Streaming
+   responses wrap the wire stream in `HoldingStream` so the model
+   stays resident until the SSE body drops (completion *or* client
+   disconnect). Dropping the lease early lets a swap unload weights
+   under a live stream.
+4. **Engine-resolution failures must call `mark_load_failed`.** The
+   scheduler reserves the model's estimate at admission, before the
+   lazy weights load; without the hook a failed load would pin a
+   phantom reservation until the idle reaper.
+5. **RSS observation is `cpu`-only** (`SchedulerConfig::observes_rss`):
+   GPU-resident weights are invisible to process RSS, so `cuda` /
+   `metal` platforms keep the shipped reference estimates.
+6. `NEURON_SCHEDULER_ENABLED=false` must keep the legacy path
+   byte-identical (no queue, no unload, silent default-model
+   fallback) — hosts rely on it as an escape hatch.
+
 ## Conformance tests
 
 ```bash
-cargo test --lib                                  # 628 unit tests (src/**/mod.rs) — 0 failures (2026-09-27, on candle 0.11; +4 from candle_compat tests)
-cargo test --lib --features voxcpm                # 658 unit tests — 0 failures (VoxCPM2 adds the weights/model/runtime/clone-audio/streaming suites; two pre-existing V1 audiovae roundtrip tests are slow, ~5 min, on ndarray)
-cargo test --lib --features tract                 # 659 unit tests — 0 failures (tract adds the decision + vision-ONNX + sensevoice paths)
-cargo test --lib --features tract,sherpa          # 665 unit tests — 0 failures (sherpa adds SherpaAsrRuntime + from_dir + the wav/onnx_meta/fbank/sensevoice coverage)
+cargo test --lib                                  # 658 unit tests (src/**/mod.rs) — 0 failures (2026-09-29; +30 scheduler/profile/mem_probe/dispatch/config tests)
+cargo test --lib --features voxcpm                # 688 unit tests — 0 failures (VoxCPM2 adds the weights/model/runtime/clone-audio/streaming suites; two pre-existing V1 audiovae roundtrip tests are slow, ~5 min, on ndarray)
+cargo test --lib --features tract                 # 689 unit tests — 0 failures (tract adds the decision + vision-ONNX + sensevoice paths)
+cargo test --lib --features tract,sherpa          # 695 unit tests — 0 failures (sherpa adds SherpaAsrRuntime + from_dir + the wav/onnx_meta/fbank/sensevoice coverage)
 cargo build --bench asr_speed --features tract,sherpa  # in-process tract-vs-sherpa benchmark compiles
 cargo bench  --bench asr_speed --features tract,sherpa  # writes target/asr-speed-compare.md
 cargo build --bench model_matrix --features "candle,tract,sherpa,voxcpm"  # per-cap × per-engine matrix harness compiles
@@ -260,6 +298,12 @@ neuron has **no direct dependency** on any particular host — the integration c
 | `NEURON_DECISION_RUNTIME` | (unset) | `tract` — which Decision engine to load (requires `--features tract`) |
 | `NEURON_DECISION_MODEL_ID` | `laya` | Model id registered for the Decision capability |
 | `NEURON_DECISION_MODEL_PATH` | (unset) | Path to the prepped Decision model dir — a single `*.onnx` (plus `.onnx.data` if external) + `tokenizer.json`, optional `rl_agent_config.json` for the temperature tables |
+| `NEURON_SCHEDULER_ENABLED` | `true` | `false` disables the model scheduler (requests never queue, weights never unload) |
+| `NEURON_SCHEDULER_BUDGET_MB` | auto (80% RAM) | Resident-weights memory budget in MiB (`0` = auto) |
+| `NEURON_SCHEDULER_IDLE_SECS` | `120` | Idle residents (0 leases, no queued demand) recycled after this |
+| `NEURON_SCHEDULER_MAX_CONCURRENCY` | `4` | Concurrent leases per resident model |
+| `NEURON_SCHEDULER_MAX_QUEUE_WAIT_SECS` | `300` | Queue dwell time before `503 queue_timeout` (`0` = forever) |
+| `NEURON_SCHEDULER_PLATFORM` | from `NEURON_DEVICE` | Platform key into the memory profile (`cpu` \| `cuda` \| `metal`); RSS observation runs on `cpu` only |
 
 ## Where the design specs live
 

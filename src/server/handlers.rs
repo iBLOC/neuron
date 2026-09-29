@@ -59,6 +59,48 @@ pub async fn info_handler(
 }
 
 // ---------------------------------------------------------------------------
+// Model scheduler (LLM capability, v1)
+// ---------------------------------------------------------------------------
+
+/// `GET /v1/scheduler/status` — resident models, queue contents,
+/// budget accounting and correction-loop stats for the LLM scheduler.
+pub async fn scheduler_status(
+    State(state): State<ServerState>,
+) -> Json<crate::scheduler::SchedulerStatus> {
+    Json(state.llm_scheduler.status())
+}
+
+/// `DELETE /v1/scheduler/models/{id}` — administrative eviction.
+/// 404 when not resident, 409 when the model still has leases or
+/// queued requests, 200 with the evicted id otherwise.
+pub async fn scheduler_evict(
+    State(state): State<ServerState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Response {
+    match state.llm_scheduler.force_evict(&id) {
+        Ok(true) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "evicted": id })),
+        )
+            .into_response(),
+        Ok(false) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": { "type": "model_not_resident", "message": format!("model '{id}' is not resident") }
+            })),
+        )
+            .into_response(),
+        Err(msg) => (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": { "type": "model_in_use", "message": msg }
+            })),
+        )
+            .into_response(),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Model list (legacy — the primary implementation is in models::handlers)
 // ---------------------------------------------------------------------------
 

@@ -1,0 +1,131 @@
+{
+  "version": 1,
+  "note": "Model memory reference values for the scheduler. Per-model byte entries are platform reference estimates derived from parameter count x storage dtype x an overhead factor (activations/KV cache/allocator) — they are starting points, not measurements. At runtime the scheduler measures the actual RSS freed when a model is evicted and blends it into the estimate (EWMA, alpha=0.3); observed values are persisted to <model_dirs>/scheduler/observed_profiles.json so each deployment converges on its own hardware. Regenerate/extend this table from benches/model_matrix peak-RSS output when new models are added.",
+  "platform_bytes_per_param": {
+    "cpu": 4.0,
+    "cuda": 2.0,
+    "metal": 2.0,
+    "default": 4.0
+  },
+  "overhead_factor": 1.3,
+  "fallback_model_bytes": 2000000000,
+  "models": {
+    "minicpm5-1b": {
+      "bytes": { "cpu": 5200000000, "cuda": 2600000000, "metal": 2600000000, "default": 5200000000 },
+      "source": "derived",
+      "params_billion": 1.0,
+      "note": "~1B LlamaForCausalLM; bf16 on GPU matches the ~3 GB figure in the platform docs"
+    },
+    "minicpm5-2b": {
+      "bytes": { "cpu": 13100000000, "cuda": 6550000000, "metal": 6550000000, "default": 13100000000 },
+      "source": "derived",
+      "params_billion": 2.52,
+      "note": "2.52B bf16 ~6-7 GB VRAM per OpenBMB's published spec"
+    },
+    "qwen3-0.6b": {
+      "bytes": { "cpu": 3900000000, "cuda": 1950000000, "metal": 1950000000, "default": 3900000000 },
+      "source": "derived",
+      "params_billion": 0.75
+    },
+    "Qwen/Qwen3-0.6B": {
+      "bytes": { "cpu": 3900000000, "cuda": 1950000000, "metal": 1950000000, "default": 3900000000 },
+      "source": "derived",
+      "params_billion": 0.75,
+      "note": "mistralrs registry id for the same weights"
+    },
+    "qwen2.5-0.5b": {
+      "bytes": { "cpu": 2600000000, "cuda": 1300000000, "metal": 1300000000, "default": 2600000000 },
+      "source": "derived",
+      "params_billion": 0.5
+    },
+    "qwen3-1.7b": {
+      "bytes": { "cpu": 9400000000, "cuda": 4700000000, "metal": 4700000000, "default": 9400000000 },
+      "source": "derived",
+      "params_billion": 1.8
+    },
+    "qwen3-4b": {
+      "bytes": { "cpu": 20800000000, "cuda": 10400000000, "metal": 10400000000, "default": 20800000000 },
+      "source": "derived",
+      "params_billion": 4.0
+    },
+    "llama-3.2-1b": {
+      "bytes": { "cpu": 6450000000, "cuda": 3250000000, "metal": 3250000000, "default": 6450000000 },
+      "source": "derived",
+      "params_billion": 1.24
+    },
+    "llama-3.2-3b": {
+      "bytes": { "cpu": 16700000000, "cuda": 8350000000, "metal": 8350000000, "default": 16700000000 },
+      "source": "derived",
+      "params_billion": 3.21
+    },
+    "phi-3-mini-4k": {
+      "bytes": { "cpu": 19800000000, "cuda": 9900000000, "metal": 9900000000, "default": 19800000000 },
+      "source": "derived",
+      "params_billion": 3.8
+    },
+    "mistral-7b": {
+      "bytes": { "cpu": 37700000000, "cuda": 18850000000, "metal": 18850000000, "default": 37700000000 },
+      "source": "derived",
+      "params_billion": 7.25
+    },
+    "chatglm-3-6b": {
+      "bytes": { "cpu": 32200000000, "cuda": 16100000000, "metal": 16100000000, "default": 32200000000 },
+      "source": "derived",
+      "params_billion": 6.2
+    },
+    "litert-model": {
+      "bytes": { "cpu": 1000000000, "cuda": 1000000000, "metal": 1000000000, "default": 1000000000 },
+      "source": "bench",
+      "note": "matches the registration budget in server state wiring"
+    },
+    "voxcpm-model": {
+      "bytes": { "cpu": 2000000000, "cuda": 2000000000, "metal": 2000000000, "default": 2000000000 },
+      "source": "bench",
+      "note": "VoxCPM 0.5B burn .mpk; matches the registration budget"
+    },
+    "voxcpm2": {
+      "bytes": { "cpu": 10500000000, "cuda": 10500000000, "metal": 10500000000, "default": 10500000000 },
+      "source": "bench",
+      "note": "2.29B params materialized as f32 (~9.2 GB) + activations; ~10 GB RAM per the platform docs"
+    },
+    "whisper-model": {
+      "bytes": { "cpu": 1500000000, "cuda": 1500000000, "metal": 1500000000, "default": 1500000000 },
+      "source": "bench"
+    },
+    "sensevoice-small": {
+      "bytes": { "cpu": 1500000000, "cuda": 1500000000, "metal": 1500000000, "default": 1500000000 },
+      "source": "bench",
+      "note": "fp32 tract graph; int8 sherpa graph is smaller but shares the id"
+    },
+    "bge-reranker-base": {
+      "bytes": { "cpu": 1450000000, "cuda": 725000000, "metal": 725000000, "default": 1450000000 },
+      "source": "derived",
+      "params_billion": 0.278
+    },
+    "mxbai-rerank-base-v2": {
+      "bytes": { "cpu": 1500000000, "cuda": 1500000000, "metal": 1500000000, "default": 1500000000 },
+      "source": "bench"
+    },
+    "jina-reranker-base-v2": {
+      "bytes": { "cpu": 1450000000, "cuda": 725000000, "metal": 725000000, "default": 1450000000 },
+      "source": "derived",
+      "params_billion": 0.278
+    },
+    "all-minilm-l6-v2": {
+      "bytes": { "cpu": 150000000, "cuda": 100000000, "metal": 100000000, "default": 150000000 },
+      "source": "derived",
+      "params_billion": 0.022
+    },
+    "laya": {
+      "bytes": { "cpu": 500000000, "cuda": 500000000, "metal": 500000000, "default": 500000000 },
+      "source": "bench",
+      "note": "int8-prepped decision graph"
+    },
+    "microsoft/Mage-VL": {
+      "bytes": { "cpu": 16000000000, "cuda": 8000000000, "metal": 8000000000, "default": 16000000000 },
+      "source": "derived",
+      "params_billion": 3.0,
+      "note": "approximate — two-shard VLM; refine via runtime observation"
+    }
+  }
+}

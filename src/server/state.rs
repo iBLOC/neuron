@@ -64,6 +64,12 @@ pub struct ServerState {
     // -- Adapter registry (Phase 2) --
     pub adapters: Arc<crate::adapter::registry::AdapterRegistry>,
 
+    // -- Model scheduler (LLM capability, v1) --
+    // Gates /v1/chat/completions + /v1/messages through a request
+    // queue with a memory budget, drain-then-swap model switching and
+    // idle recycling. Disabled via NEURON_SCHEDULER_ENABLED=false.
+    pub llm_scheduler: Arc<crate::scheduler::ModelScheduler>,
+
     // -- Shared infrastructure --
     pub config: NeuronConfig,
     pub puller: Arc<crate::models::Puller>,
@@ -659,8 +665,42 @@ impl ServerState {
         let vision_registry_lock = Arc::new(Mutex::new(vision_registry.clone()));
         let decision_registry_lock = Arc::new(Mutex::new(decision_registry.clone()));
 
+        // ---- Model scheduler (LLM capability, v1) ------------------------
+        // The registry Arc must exist before the scheduler so the
+        // unload handle can reach it; `Clone` on the registry shares
+        // the loaded-weights map, so the clone used for the lock and
+        // the Arc stay in sync.
+        let llm_registry_arc = Arc::new(llm_registry.clone());
+        let scheduler_config = {
+            let mut sc = config.scheduler.clone();
+            if sc.platform.is_empty() {
+                sc.platform = match config.device {
+                    DeviceSelection::Nvidia => "cuda".to_string(),
+                    DeviceSelection::Apple => "metal".to_string(),
+                    _ => "cpu".to_string(),
+                };
+            }
+            sc
+        };
+        let memory_profiles = Arc::new(
+            crate::scheduler::MemoryProfileStore::embedded().with_overrides_path(
+                crate::scheduler::default_overrides_path(&config.model_dirs)
+                    .unwrap_or_else(|| std::path::PathBuf::from("scheduler_observed_profiles.json")),
+            ),
+        );
+        let llm_unloader: Arc<dyn crate::scheduler::ModelUnload> = Arc::new(LlmUnloadHandle {
+            registry: llm_registry_arc.clone(),
+            engines: engines.llm.clone(),
+        });
+        let llm_scheduler = crate::scheduler::ModelScheduler::new(
+            crate::capabilities::Capability::Llm,
+            scheduler_config,
+            memory_profiles,
+            llm_unloader,
+        );
+
         Self {
-            llm_registry: Arc::new(llm_registry),
+            llm_registry: llm_registry_arc,
             tts_registry: Arc::new(tts_registry),
             asr_registry: Arc::new(asr_registry),
             rerank_registry: Arc::new(rerank_registry),
@@ -693,6 +733,7 @@ impl ServerState {
                     .expect("anthropic-messages adapter path conflict");
                 adapters
             },
+            llm_scheduler,
             config,
             puller,
             catalog,
@@ -856,6 +897,24 @@ impl ServerState {
             }
         }
         Ok(())
+    }
+}
+
+/// [`crate::scheduler::ModelUnload`] handle over both LLM
+/// registries: the legacy `LlmRuntimeRegistry` weight cache and the
+/// canonical `EngineRegistry` (mage-vl and future native engines
+/// register there). Evicting through both guarantees the weights are
+/// no longer reachable after the scheduler drops its reference.
+struct LlmUnloadHandle {
+    registry: Arc<LlmRuntimeRegistry>,
+    engines: Arc<crate::engine::registry::EngineRegistry<dyn crate::engine::AnyCapabilityEngine>>,
+}
+
+impl crate::scheduler::ModelUnload for LlmUnloadHandle {
+    fn unload(&self, model_id: &str) -> usize {
+        let legacy = self.registry.unload(model_id);
+        let canonical = usize::from(self.engines.unregister(model_id));
+        legacy + canonical
     }
 }
 

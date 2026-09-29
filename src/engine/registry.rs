@@ -19,6 +19,12 @@ impl<T: ?Sized + Send + Sync + 'static> EngineRegistry<T> {
     pub fn register(&self, model_id: String, engine: Arc<T>) {
         self.by_model.write().unwrap().insert(model_id, engine);
     }
+    /// Remove a registered engine. Returns whether it was present.
+    /// Used by the model scheduler to evict weights; the engine frees
+    /// when the last `Arc` (in-flight requests only) drops.
+    pub fn unregister(&self, model_id: &str) -> bool {
+        self.by_model.write().unwrap().remove(model_id).is_some()
+    }
     pub fn lookup(&self, model_id: &str) -> Option<Arc<T>> {
         self.by_model.read().unwrap().get(model_id).cloned()
     }

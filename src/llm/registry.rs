@@ -10,7 +10,12 @@ use crate::llm::{ChatRequest, ChatResponse, ChatChunk};
 
 pub struct LlmRuntimeRegistry {
     pub registered: Vec<RegisteredLlm>,
-    loaded: Arc<tokio::sync::Mutex<HashMap<RegistryKey, Arc<dyn LlmRuntime>>>>,
+    // std (not tokio) mutex: the load itself runs *outside* the lock
+    // and re-checks on insert, so this guard never crosses an await.
+    // That is what lets `unload` be synchronous — the scheduler
+    // evicts models from lease-Drop contexts, where blocking on a
+    // tokio mutex is not allowed.
+    loaded: Arc<std::sync::Mutex<HashMap<RegistryKey, Arc<dyn LlmRuntime>>>>,
     resources: Mutex<ResourceTracker>,
 }
 
@@ -28,7 +33,7 @@ impl LlmRuntimeRegistry {
     pub fn new(_config: Arc<NeuronConfig>) -> Self {
         Self {
             registered: Vec::new(),
-            loaded: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            loaded: Arc::new(std::sync::Mutex::new(HashMap::new())),
             resources: Mutex::new(ResourceTracker::default()),
         }
     }
@@ -78,11 +83,16 @@ impl LlmRuntimeRegistry {
             device: entry.device,
         };
 
-        let mut loaded = self.loaded.lock().await;
-        if let Some(rt) = loaded.get(&key) {
-            return Ok(rt.clone());
+        {
+            let loaded = self.loaded.lock().unwrap();
+            if let Some(rt) = loaded.get(&key) {
+                return Ok(rt.clone());
+            }
         }
 
+        // Load outside the cache lock: two concurrent first requests
+        // for the same model may both load; the insert below keeps
+        // whichever lands first and drops the loser.
         let rt: Arc<dyn LlmRuntime> = match entry.impl_id {
             #[cfg(feature = "candle")]
             LlmImpl::Candle => {
@@ -113,8 +123,56 @@ impl LlmRuntimeRegistry {
             }
         };
 
+        let mut loaded = self.loaded.lock().unwrap();
+        // Another task may have inserted while we were loading —
+        // keep the first-loaded runtime, drop ours.
+        if let Some(existing) = loaded.get(&key) {
+            return Ok(existing.clone());
+        }
         loaded.insert(key, rt.clone());
         Ok(rt)
+    }
+
+    /// Drop the cached runtime(s) for `model_id` — the weights free
+    /// when the last `Arc` reference (held only by in-flight
+    /// requests) goes away. Returns how many cache entries were
+    /// removed. Synchronous so the scheduler can call it from
+    /// lease-drop contexts.
+    pub fn unload(&self, model_id: &str) -> usize {
+        let mut loaded = self.loaded.lock().unwrap();
+        let removed: Vec<RegistryKey> = loaded
+            .keys()
+            .filter(|k| k.model_id == model_id)
+            .cloned()
+            .collect();
+        // Drop the runtimes after releasing the cache lock —
+        // deallocating GB of tensors is not something to do while
+        // holding it.
+        let dropped: Vec<Arc<dyn LlmRuntime>> =
+            removed.iter().filter_map(|k| loaded.remove(k)).collect();
+        drop(loaded);
+        drop(dropped);
+        removed.len()
+    }
+
+    pub fn is_registered(&self, model_id: &str) -> bool {
+        self.registered.iter().any(|r| r.model_id == model_id)
+    }
+
+    pub fn is_loaded(&self, model_id: &str) -> bool {
+        self.loaded
+            .lock()
+            .unwrap()
+            .keys()
+            .any(|k| k.model_id == model_id)
+    }
+
+    pub fn loaded_model_ids(&self) -> Vec<String> {
+        let loaded = self.loaded.lock().unwrap();
+        let mut ids: Vec<String> = loaded.keys().map(|k| k.model_id.clone()).collect();
+        ids.sort();
+        ids.dedup();
+        ids
     }
 
     pub fn list_registered(&self) -> Vec<String> {
