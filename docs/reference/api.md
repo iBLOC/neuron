@@ -31,7 +31,7 @@ POST /v1/audio/speech         (TTS — OpenAI)
 POST /v1/audio/transcriptions (ASR — OpenAI)
 ```
 
-TTS uses VoxCpm (burn 0.21, `--features voxcpm`). `voxcpm-0.5b` is loadable; `voxcpm2` is registered in the catalog but not yet loadable (P0 blockers: AudioVAE V2 port + 2B model config + voice cloning wire format expansion; see AGENTS.md and README TTS section). ASR ships three engines behind `NEURON_ASR_RUNTIME`: **candle** (Whisper, default), **sherpa** (SenseVoiceSmall via the official sherpa-onnx Rust binding, `--features sherpa`), and **tract** (SenseVoiceSmall via neuron's own tract ONNX stack, `--features tract`). The two SenseVoice engines run the same exported graph; see `docs/superpowers/specs/2026-09-26-sherpa-onnx-asr-backend.md`.
+TTS uses VoxCpm (burn 0.21, `--features voxcpm`). Both generations are loadable: `voxcpm-0.5b` (16 kHz, zh/en) via pre-converted `.mpk` weights, and `voxcpm2` (2B, 48 kHz, 30 languages) via the upstream `openbmb/VoxCPM2` checkpoints loaded directly. VoxCPM2 voice cloning takes optional `reference_audio` (base64 / `data:` URI / server-local path) and `prompt_text` fields on `/v1/audio/speech`; Voice Design needs no extra field — prefix `input` with the voice description in parentheses. See AGENTS.md and the README TTS section. ASR ships three engines behind `NEURON_ASR_RUNTIME`: **candle** (Whisper, default), **sherpa** (SenseVoiceSmall via the official sherpa-onnx Rust binding, `--features sherpa`), and **tract** (SenseVoiceSmall via neuron's own tract ONNX stack, `--features tract`). The two SenseVoice engines run the same exported graph; see `docs/superpowers/specs/2026-09-26-sherpa-onnx-asr-backend.md`.
 
 ### Embeddings
 

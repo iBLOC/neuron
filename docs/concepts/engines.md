@@ -14,7 +14,7 @@ neuron supports **3 ML frameworks** and **multiple impls per framework** to cove
 | LLM | litert_lm | `litert` | — | Gemma 3 via Google LiteRT-LM subprocess (shells out to `lit` binary) |
 | LLM | mistralrs | `mistralrs` | — | 40+ model families via mistral.rs engine (PagedAttention, prefix caching, KV cache, ISQ) |
 | LLM | mage_vl | (default `candle`) | — | **neuron-native candle port of Microsoft Mage-VL**: MageViT 24-layer codec-native ViT (3D RoPE, I/P-frame patch sparsity) + Qwen3-4B-Instruct-2507 decoder + StreamMind gate; reaches OpenAI `/v1/chat/completions` + Anthropic `/v1/messages` via the `adapter_dispatch` system |
-| TTS | burn (VoxCpm) | `voxcpm` | — | VoxCpm 0.5B loadable (burn 0.21 + `hound`); **VoxCPM2 planned** (catalog entry `voxcpm2`, runtime returns `ModelNotRegistered` until AudioVAE V2 port lands) |
+| TTS | burn (VoxCpm) | `voxcpm` | — | **VoxCPM 0.5B and VoxCPM2 both loadable** (burn 0.21 + `hound`). 0.5B: pre-converted `.mpk` weights. VoxCPM2 (2B, 48 kHz, 30 languages): loads the upstream `openbmb/VoxCPM2` checkpoints directly (no conversion), ~10 GB RAM |
 | ASR | candle (Whisper) | `candle` | ✅ | Whisper via `candle-transformers` |
 | ASR | tract ONNX (SenseVoiceSmall) | `tract` | — | In-repo fbank / LFR / CMVN / greedy CTC; sherpa-onnx export prepped by `scripts/prep-sensevoice-onnx.py`. Blocked on tract 0.21 codegen for the full network; see `docs/superpowers/specs/2026-09-26-sherpa-onnx-asr-backend.md`. |
 | ASR | sherpa-onnx (SenseVoiceSmall) | `sherpa` | — | Official `sherpa-onnx` Rust binding, onnxruntime-backed C++ |
@@ -111,7 +111,7 @@ curl -X POST http://localhost:8083/v1/chat/completions \
 
 ### TTS
 
-- **burn (VoxCpm)** is the only TTS engine. **VoxCpm 0.5B is loadable** (small, fast Chinese/English with voice cloning support; pre-converted `.mpk` weights required). **VoxCPM2 is registered in the catalog but not yet loadable** — see the VoxCPM2 planned block in AGENTS.md / README for the P0 blockers (AudioVAE V2 port + 2B model config + voice cloning wire format expansion + multi-language support). Until then, callers hitting `POST /v1/audio/speech` with `model: "voxcpm2"` get a clear 4xx `ModelNotRegistered`.
+- **burn (VoxCpm)** is the only TTS engine, with two loadable generations. **VoxCPM 0.5B** (`NEURON_TTS_RUNTIME=voxcpm`): small, fast Chinese/English with voice cloning; pre-converted `.mpk` weights required. **VoxCPM2** (`NEURON_TTS_RUNTIME=voxcpm2`, 2B params, 48 kHz, 30 languages): zero-shot, Voice Design (a "(description)" text prefix on `input`), and voice cloning via optional `reference_audio` + `prompt_text` on `/v1/audio/speech`; loads the upstream `openbmb/VoxCPM2` checkpoints directly (no conversion step). Budget ~10 GB RAM — weights materialize as f32 on the ndarray backend. Model-level streaming is a follow-up (see AGENTS.md); `stream: true` currently returns chunked full-synthesis WAV.
 
 ### ASR
 

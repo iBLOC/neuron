@@ -232,7 +232,7 @@ Question `type` is `choice` (pick one of N), `score` (rate N levels) or `noul` (
 | Capability | OpenAI route | Anthropic route | Engine | Feature flag | Default |
 |---|---|---|---|---|---|
 | LLM | `/v1/chat/completions` | `/v1/messages` | candle (incl. MiniCPM5-1B/2B) / litert_lm / mistralrs / **mage_vl** | `candle` (default) | ✅ |
-| TTS | `/v1/audio/speech` | — | burn (VoxCpm 0.5B; voxcpm2 planned) | `voxcpm` | — |
+| TTS | `/v1/audio/speech` | — | burn (VoxCPM 0.5B / VoxCPM2 2B·48 kHz, loadable) | `voxcpm` | — |
 | ASR | `/v1/audio/transcriptions` | — | candle (Whisper) / sherpa-onnx (SenseVoiceSmall) / tract ONNX (SenseVoiceSmall, prepped graph) | `candle` (default) | ✅ |
 | Rerank | `/v1/rerank` | — | candle (BGE/mxbai/jina) / cohere | `candle` (default) | ✅ |
 | Embedding | `/v1/embeddings` | — | candle (MiniLM) | `candle` (default) | ✅ |

@@ -34,7 +34,7 @@ neuron reads its configuration from environment variables on startup. The full m
 | `NEURON_MAGE_VL_MODEL_ID` | `microsoft/Mage-VL` | Override the registered Mage-VL model id (HF repo id or local path string used for `engines.llm` keying) |
 | `NEURON_MISTRALRS_ISQ` | `q4_0` | `q4_0` \| `q8_0` \| `none` — in-situ quantization applied by mistral.rs at load time |
 | `NEURON_EMBEDDING_RUNTIME` | (unset) | `candle` — which Embedding engine to load |
-| `NEURON_TTS_RUNTIME` | (unset) | `voxcpm` (requires `--features voxcpm`) |
+| `NEURON_TTS_RUNTIME` | (unset) | `voxcpm` / `burn` (0.5B, requires `--features voxcpm`) \| `voxcpm2` (2B/48 kHz, same feature; loads upstream checkpoints directly, ~10 GB RAM) |
 | `NEURON_ASR_RUNTIME` | (unset) | `candle` (Whisper) \| `tract` (SenseVoiceSmall via neuron's own tract ONNX stack, requires `--features tract`) \| `sherpa` (SenseVoiceSmall via the official sherpa-onnx Rust binding, requires `--features sherpa`) |
 | `NEURON_ASR_ONNX_FILE` | (unset) | Override the SenseVoice graph file (e.g. `model.int8.onnx`); ignored by the Whisper runtime |
 | `NEURON_ASR_SHERPA_NUM_THREADS` | (unset, default 2) | Thread count for the sherpa-onnx recognizer |
