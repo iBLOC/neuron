@@ -13,3 +13,5 @@ docs/superpowers/
 models/**/*.safetensors
 models/**/*.onnx
 .mimosa/
+__pycache__/
+*.pyc
