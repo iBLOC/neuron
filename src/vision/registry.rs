@@ -115,11 +115,6 @@ impl VisionRuntimeRegistry {
                 })?;
                 Arc::from(loaded_box)
             }
-            VisionImpl::Ultralytics => {
-                return Err(NeuronError::not_implemented(
-                    "ultralytics backend: requires `ultralytics` Python package".to_string(),
-                ));
-            }
         };
 
         loaded.insert(key, rt.clone());

@@ -176,7 +176,6 @@ The dispatch rules in `src/vision/registry.rs`:
 | `rtdetr-r50` / `detr-resnet50` | candle | detect |
 | `rf-detr-base` / `rf-detr-large` | ONNX | detect |
 | `florence-2-base` | ONNX | detect (vision-language, text-prompted) |
-| `grounding-dino-base` | ultralytics subprocess | detect (text-prompted) |
 | `vit-base-patch16-224` / `swin-tiny` | ONNX | classify |
 | `yolov8n-seg` / `mask-rcnn-r50` | ONNX | segment |
 | `yolov8n-pose` | ONNX | pose |

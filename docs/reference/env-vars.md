@@ -42,7 +42,7 @@ neuron reads its configuration from environment variables on startup. The full m
 | `NEURON_COHERE_API_KEY` | (unset) | Cohere API key (required when `NEURON_RERANK_RUNTIME=cohere`) |
 | `NEURON_COHERE_ENDPOINT` | `https://api.cohere.com` | Cohere API base URL |
 | `NEURON_COHERE_MODEL` | `rerank-english-v3.0` | Cohere model id (e.g. `rerank-multilingual-v3.0`) |
-| `NEURON_VISION_RUNTIME` | (unset) | `candle-yolo` \| `candle-rtdetr` \| `candle-detr` \| `ort` \| `ultralytics` — which Vision engine + model family to load |
+| `NEURON_VISION_RUNTIME` | (unset) | `candle-yolo` \| `candle-rtdetr` \| `candle-detr` \| `ort` — which Vision engine + model family to load. The historical `ultralytics` Python-subprocess option was removed (neuron is pure Rust). |
 | `NEURON_CHRONOS2_RUNTIME` | (unset) | `candle` — which Chronos2 engine to load (requires `--features chronos2`) |
 | `NEURON_CHRONOS2_MODEL_PATH` | (unset) | Path to the Chronos2 checkpoint directory |
 | `NEURON_DECISION_RUNTIME` | (unset) | `tract` — which Decision engine to load (requires `--features tract`) |

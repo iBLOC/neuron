@@ -181,9 +181,6 @@ pub fn default_capabilities() -> Vec<ModelCapabilities> {
             &[ApiStyle::openai_vision()], false, false, false, false),
         cap("ort", "rf-detr-large", &[ImageInput], &[BoundingBox],
             &[ApiStyle::openai_vision()], false, false, false, false),
-        // Grounding DINO (open-vocabulary detection, text-prompted)
-        cap("ultralytics", "grounding-dino-base", &[ImageInput], &[BoundingBox],
-            &[ApiStyle::openai_vision()], false, false, false, false),
         // Florence-2 (vision-language, text-prompted)
         cap("ort", "florence-2-base", &[ImageInput], &[BoundingBox],
             &[ApiStyle::openai_vision()], false, false, false, false),
@@ -420,8 +417,7 @@ mod tests {
         // RF-DETR (Roboflow DETR, query-based)
         assert!(cat.lookup("rf-detr-base").is_some());
         assert!(cat.lookup("rf-detr-large").is_some());
-        // Open-vocabulary / vision-language
-        assert!(cat.lookup("grounding-dino-base").is_some());
+        // Vision-language
         assert!(cat.lookup("florence-2-base").is_some());
     }
 

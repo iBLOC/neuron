@@ -25,8 +25,7 @@
 │         ├─→ RerankRuntimeRegistry ──→ CandleRerankRuntime  (BGE / mxbai / jina / cohere)
 │         ├─→ EmbeddingRuntimeRegistry ─→ CandleEmbeddingRuntime (MiniLM BERT, batched, base64)
 │         ├─→ VisionRuntime        ─┬─→ CandleYoloRuntime  (YOLOv8 / RT-DETR / DETR)
-│         │                        ├─→ OrtVisionRuntime   (YOLOv8 / RT-DETR / DETR / RF-DETR / Florence-2)
-│         │                        └─→ UltralyticsVisionRuntime (Grounding DINO)
+│         │                        └─→ OrtVisionRuntime   (YOLOv8 / RT-DETR / DETR / RF-DETR / Florence-2)
 │         ├─→ Chronos2Registry   ────→ CandleChronos2Runtime (T5-style encoder + decoder + output head, vendored)
 │         └─→ DecisionRuntimeRegistry → TractDecisionRuntime (Laya int8 ONNX — options + act/escalate, calibrated confidence)
 └──────────────────────────────────────────────────────────────────────┘
@@ -117,7 +116,8 @@ Each capability uses a `*RuntimeRegistry` (e.g. `LlmRuntimeRegistry`) that holds
 | YOLOv8 (exported to ONNX) | ONNX (ort / tract / onnxruntime — pluggable) | same anchor + NMS convention |
 | RT-DETR / DETR | candle or ONNX | query-based, sigmoid (no NMS) |
 | RF-DETR / Florence-2 | ONNX | query-based (RF-DETR) / vision-language (Florence-2) |
-| Grounding DINO | ultralytics subprocess | text-prompted detection |
+
+The historical Grounding DINO entry under a `ultralytics` Python-subprocess backend was removed — neuron is pure Rust and does not shell out to Python runtimes.
 
 LoRA adapters are dynamically registerable via `POST /v1/vision/lora/register` for extending detection classes without retraining the base model.
 

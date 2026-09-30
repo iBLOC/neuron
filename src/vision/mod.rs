@@ -111,15 +111,11 @@ pub enum VisionImpl {
     #[cfg(feature = "candle")]
     CandleDetr,
     /// ONNX backend. Supports any model exported to ONNX
-    /// including RT-DETR, DETR, Grounding DINO, YOLOv8 (ONNX export).
+    /// including RT-DETR, DETR, YOLOv8 (ONNX export).
     /// The `OrtVisionRuntime` is always available; it uses a pluggable
     /// session backend (`OrtSession` type alias) so users can wire in
     /// `ort`, `tract`, `onnxruntime`, or any other ONNX executor.
     Ort,
-    /// Ultralytics subprocess backend (shells out to the `ultralytics`
-    /// Python CLI). Wider model compatibility at the cost of requiring
-    /// a Python environment with `ultralytics` installed.
-    Ultralytics,
 }
 
 impl VisionImpl {
@@ -132,7 +128,6 @@ impl VisionImpl {
             #[cfg(feature = "candle")]
             Self::CandleDetr => "candle-detr",
             Self::Ort => "ort",
-            Self::Ultralytics => "ultralytics",
         }
     }
 
@@ -145,7 +140,6 @@ impl VisionImpl {
             #[cfg(feature = "candle")]
             "candle-detr" => Ok(Self::CandleDetr),
             "ort" => Ok(Self::Ort),
-            "ultralytics" => Ok(Self::Ultralytics),
             other => Err(format!("unknown VisionImpl: {other}")),
         }
     }
@@ -352,12 +346,6 @@ mod tests {
         assert_eq!(VisionImpl::parse("candle-yolo").unwrap(), VisionImpl::CandleYolo);
         assert_eq!(VisionImpl::CandleYolo.as_str(), "candle-yolo");
         assert!(VisionImpl::parse("not-a-backend").is_err());
-    }
-
-    #[test]
-    fn test_vision_impl_parse_ultralytics() {
-        assert_eq!(VisionImpl::parse("ultralytics").unwrap(), VisionImpl::Ultralytics);
-        assert_eq!(VisionImpl::Ultralytics.as_str(), "ultralytics");
     }
 
     #[cfg(feature = "candle")]

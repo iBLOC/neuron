@@ -24,7 +24,7 @@ Most inference servers (vLLM, ollama, llama.cpp server) are standalone daemons �
   - **ASR** — Whisper (candle-transformers); MP3 / FLAC / OGG-Vorbis via `symphonia` when `--features asr-audio`
   - **Rerank** — BGE / mxbai / jina (candle cross-encoders) + Cohere HTTP proxy
   - **Embedding** — MiniLM BERT (batched via `BatchLongest` padding, base64 output)
-  - **Vision** — YOLOv8 / RT-DETR / DETR (candle), RF-DETR / Florence-2 (ONNX pluggable: ort / tract / onnxruntime), Grounding DINO (ultralytics subprocess), with LoRA adapter registration
+  - **Vision** — YOLOv8 / RT-DETR / DETR (candle), RF-DETR / Florence-2 (ONNX pluggable: ort / tract / onnxruntime), with LoRA adapter registration
 - **10+ OpenAI-compatible HTTP routes** + Anthropic Messages v1 at `/v1/messages`
 - **Multi-source model registry** (HuggingFace, hf-mirror China CDN, ModelScope) with per-engine and per-model source overrides
 - **Multi-framework engine** — candle (default), burn (TTS), litert_lm (on-device LLM). Pick what fits; opt out of the rest via feature flags.

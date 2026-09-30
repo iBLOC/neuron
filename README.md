@@ -12,12 +12,11 @@ A Rust inference engine for **LLM / TTS / ASR / Rerank / Embedding / Vision** th
 
 neuron is a single Rust crate that loads model weights, runs inference, and serves the result on OpenAI-compatible endpoints (`/v1/chat/completions`, `/v1/audio/speech`, `/v1/audio/transcriptions`, `/v1/embeddings`, `/v1/rerank`, `/v1/vision/*`, `/v1/messages`, …). The same wire format as OpenAI / vLLM / ollama / llama.cpp server means any compatible client can talk to neuron without modification.
 
-neuron is **library-only** — there is no standalone binary. Rust hosts embed it via `run_embedded()`, so the inference runs inside the host process. Inference itself is local (weights live under `$NEURON_MODEL_DIRS` and stay on disk), but the OpenAI-compatible HTTP surface that neuron exposes does not restrict itself to local engines. Two non-local cases show up in the matrices below and are worth calling out at the top so the "library is for local inference, why is there Cohere?" question has an immediate answer:
+neuron is **library-only, pure Rust** — there is no standalone binary. Rust hosts embed it via `run_embedded()`, so the inference runs inside the host process. Inference itself is local (weights live under `$NEURON_MODEL_DIRS` and stay on disk), but the OpenAI-compatible HTTP surface that neuron exposes does not restrict itself to local engines. Two non-local cases show up in the matrices below and are worth calling out at the top so the "library is for local inference, why is there Cohere?" question has an immediate answer:
 
 - **Cohere Rerank (one column in the Rerank matrix).** Cohere is an HTTP protocol adapter, not a local inference engine. `NEURON_RERANK_RUNTIME=cohere` makes neuron's `/v1/rerank` endpoint forward requests to Cohere's hosted `/v1/rerank` API and translate the response back to OpenAI's `data` envelope. This is intentional: a host that already runs Cohere's cloud rerank (or doesn't yet have a local cross-encoder downloaded) can keep a single OpenAI-shaped client surface while still going to the cloud behind neuron's port. Business code does not change when the host flips the env var to a local rerank family later. Cohere is the only such cloud adapter shipped today; every other column in the matrices below is a local inference backend.
-- **`ultralytics` (one column in the Vision matrix).** A thin subprocess that shells out to a Python `ultralytics` runtime that the host already has installed. The model weights still live locally under the host's `ultralytics` model dir; neuron just orchestrates the call.
 
-Both of those columns are **protocol adapters over a local or remote service**, not rows in neuron's inference-engine framework. Everything else in the matrices — candle / burn / litert / mistralrs / mage_vl / sherpa / tract / ort — is a real local inference backend.
+Both of those columns are **protocol adapters over a remote service**, not rows in neuron's inference-engine framework. Everything else in the matrices — candle / burn / litert / mistralrs / mage_vl / sherpa / tract / ort — is a real local inference backend.
 
 ## Embedded library usage
 
@@ -260,7 +259,7 @@ v1 scope: the scheduler gates the LLM capability (the only one with multiple swa
 
 The matrix below splits models by capability (LLM / TTS / ASR / Rerank / Embedding / Vision / Chronos2 / Decision) and lists which inference backends can serve each one. A ✓ means the model is loadable on that backend today; a blank cell means not supported. Default models (per env-var registration in `ServerState::new`) are shown in **bold**; everything else is auto-registered when the corresponding weights directory exists under `$NEURON_MODEL_DIRS`. See [`src/capabilities/catalog.rs::default_capabilities`](src/capabilities/catalog.rs) for the source of truth.
 
-Legend: candle · burn · litert · mistralrs · mage_vl · sherpa · tract · ort · ultralytics · Cohere (hosted). Backends marked **opt** need an extra Cargo feature or external binary; see the footnotes below the matrices.
+Legend: candle · burn · litert · mistralrs · mage_vl · sherpa · tract · ort · Cohere (hosted). Backends marked **opt** need an extra Cargo feature or external binary; see the footnotes below the matrices.
 
 ### LLM (chat completions + Anthropic Messages v1)
 
@@ -326,17 +325,16 @@ Cohere adapter is an HTTP proxy to the hosted `/v1/rerank` API — no local weig
 
 ### Vision (detect / classify / segment / pose)
 
-| Model id | candle | ultralytics | ort / tract / onnxruntime (pluggable) |
-|---|---|---|---|
-| **yolov8n** | ✓ | | |
-| **yolov8s** | ✓ | | |
-| **yolov11n** | ✓ | | |
-| **rtdetr-r50** | ✓ | | |
-| **detr-resnet50** | ✓ | | |
-| **rf-detr-base** | | | ✓ |
-| **rf-detr-large** | | | ✓ |
-| **florence-2-base** | | | ✓ |
-| **grounding-dino-base** | | ✓ | |
+| Model id | candle | ort / tract / onnxruntime (pluggable) |
+|---|---|---|
+| **yolov8n** | ✓ | |
+| **yolov8s** | ✓ | |
+| **yolov11n** | ✓ | |
+| **rtdetr-r50** | ✓ | |
+| **detr-resnet50** | ✓ | |
+| **rf-detr-base** | | ✓ |
+| **rf-detr-large** | | ✓ |
+| **florence-2-base** | | ✓ |
 
 ONNX backend is pluggable: replace `build_session` in `src/vision/ort_runtime.rs` to wire in `ort`, `tract`, `onnnxruntime`, or any executor implementing the `OrtSession` contract. COCO 80 base classes; dynamic extension via LoRA adapters (`/v1/vision/lora/register`).
 
@@ -368,7 +366,6 @@ The same engines also broken down by what they serve, with build flags:
 | **sherpa** | sherpa-onnx 1.13.x | ASR (SenseVoiceSmall) | `sherpa` |
 | **tract** | tract-onnx 0.21 | ASR (SenseVoiceSmall), Decision (Laya), Vision (ONNX pluggable) | `tract` |
 | **ort** | onnxruntime | Vision (RF-DETR / Florence-2 / custom), Decision (Laya, bit-exact path) | opt-in `ort` integration or `tract` fallback |
-| **ultralytics** | ultralytics Python subprocess | Vision (Grounding DINO) | host wires its own `ultralytics` runtime |
 | **Cohere (hosted)** | HTTP proxy | Rerank | none (no local weights) |
 
 ### Engine overview
@@ -381,8 +378,9 @@ The matrices above replace the older "one big model-type table + one engine tabl
 - **mistralrs** — [mistral.rs](https://github.com/EricLBuehler/mistral.rs) v0.8.22; one unified dispatcher that handles 40+ model families with PagedAttention + ISQ quantization. `--features mistralrs`.
 - **mage_vl** — neuron-native candle port of [Microsoft Mage-VL](https://huggingface.co/microsoft/Mage-VL); MageViT + Qwen3-4B decoder + StreamMind gate. Bundled with the default `candle` feature; activated with `NEURON_LLM_RUNTIME=mage_vl` + `NEURON_MAGE_VL_SHARD_DIR`.
 - **sherpa / tract / ort** — three engines for ONNX-based models (ASR SenseVoice, Vision Florence-2 / RF-DETR, Decision Laya). `tract` is pure-Rust ONNX (`--features tract`); `sherpa` is the official onnxruntime-backed Rust binding (`--features sherpa`); `ort` is the onnxruntime binding (host-wired). Specs: [`docs/superpowers/specs/2026-09-26-sherpa-onnx-asr-backend.md`](docs/superpowers/specs/2026-09-26-sherpa-onnx-asr-backend.md), [`docs/superpowers/specs/2026-09-01-mobile-phase-2-tract-onnx.md`](docs/superpowers/specs/2026-09-01-mobile-phase-2-tract-onnx.md).
-- **ultralytics** — Python subprocess for open-vocabulary detection (Grounding DINO). The host wires its own `ultralytics` runtime; neuron only orchestrates.
 - **Cohere (hosted)** — HTTP proxy for `/v1/rerank`. No local weights; just `NEURON_COHERE_API_KEY`.
+
+Note: the previous release advertised an `ultralytics` Python-subprocess backend for Grounding DINO. That column is **removed** — neuron is pure-Rust and does not shell out to Python; the Grounding DINO catalog entry was dropped with it. Open-vocabulary detection stays on the `ort`/`tract`/`onnxruntime` line (Florence-2 is the working vision-language model in that column).
 
 ### How to load real model weights
 
@@ -535,15 +533,14 @@ NEURON_LLM_RUNTIME=mistralrs NEURON_LLM_DEFAULT_MODEL="Qwen/Qwen3-0.6B" ./neuron
   - 384-dim output (all-MiniLM-L6-v2 native dimension)
 
 #### Vision (multi-model, multi-task + dynamic LoRA)
-- **Engines (4 backends)**:
+- **Engines (3 backends)**:
   - `candle` — YOLOv8 (detect / classify / segment / pose), RT-DETR, DETR
   - `ort` (ONNX Runtime, opt-in) — Florence-2, RT-DETR-ONNX, DETR-ONNX, custom ONNX exports
-  - `ultralytics` (Python subprocess) — Grounding DINO, YOLO-World (open-vocabulary)
 - **HTTP endpoints**: 4 per-task routes — `POST /v1/vision/{detect,classify,segment,pose}` (each forces its task discriminator, returns the right `VisionResponse` variant). Plus the legacy `POST /v1/vision/detect` that accepts `task` in the body.
 - **Wire format**: OpenAI-shaped `image_url` content part (URL, base64, or data URL)
 - **Preprocessing**: aspect-ratio-preserving letterbox to 640×640, gray padding (114), f32 [0, 1] CHW
 - **Postprocessing** (YOLO family): per-class NMS (IoU threshold), confidence threshold, max-detections cap, optional class-id filter
-- **Model catalog (9 default entries)**: `yolov8n`, `yolov8s`, `yolov11n`, `rtdetr-r50`, `detr-resnet50`, `rf-detr-base`, `rf-detr-large`, `grounding-dino-base`, `florence-2-base`
+- **Model catalog (8 default entries)**: `yolov8n`, `yolov8s`, `yolov11n`, `rtdetr-r50`, `detr-resnet50`, `rf-detr-base`, `rf-detr-large`, `florence-2-base`
 - **Status (2026-07-03)**:
   - All preprocessing + per-task dispatch + response shape wired
   - LoRA class extension end-to-end (class-ID allocation, runtime validation, `lora_id` source attribution)

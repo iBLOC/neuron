@@ -23,7 +23,6 @@ neuron supports **3 ML frameworks** and **multiple impls per framework** to cove
 | Embedding | candle (MiniLM) | `candle` | ✅ | MiniLM BERT (batched via `BatchLongest` padding, base64 output) |
 | Vision | candle (YOLOv8 / RT-DETR / DETR) | `candle` | ✅ | CSPDarknet + PANet + decoupled head |
 | Vision | ort (YOLOv8 / RT-DETR / DETR / RF-DETR / Florence-2) | `ort` | — | Pluggable ONNX executors: `ort` / `tract` / `onnxruntime` |
-| Vision | ultralytics (Grounding DINO) | `ultralytics` | — | Grounding DINO subprocess (text-prompted detection) |
 | Chronos2 | candle | `chronos2` | — | ✅ landed 2026-07-19: vendored T5 encoder + decoder + linear output head, `CandleChronos2Runtime` (844 LOC, 19 tests) |
 | Decision | tract (Laya int8 ONNX) | `tract` | — | ✅ landed 2026-09-24: pure-Rust ONNX executor (no C++ toolchain / system ONNX Runtime). Encoder-only int8, one forward per question, no decoding. Graph must be prepped with `scripts/prep-laya-onnx.py` first. Bit-exact parity with onnxruntime is **not** achievable on this engine — see [the spec](../superpowers/specs/2026-09-24-laya-decision.md); the `ort` executor slot in `src/vision/ort_runtime.rs` is the drop-in alternative when it is. |
 
@@ -132,7 +131,6 @@ curl -X POST http://localhost:8083/v1/chat/completions \
 
 - **candle**: best for YOLOv8 / RT-DETR / DETR with native candle inference. Fast, no subprocess overhead.
 - **ort**: use when you have a model exported to ONNX (RF-DETR, Florence-2, custom architectures). Pluggable executors: `ort` (default), `tract` (pure Rust), `onnxruntime` (heaviest, fastest).
-- **ultralytics**: use for Grounding DINO (text-prompted detection). Requires the `ultralytics` Python package installed separately.
 
 ## Performance considerations
 

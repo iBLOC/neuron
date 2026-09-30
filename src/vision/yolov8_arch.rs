@@ -325,10 +325,10 @@ impl Yolov8Forward {
     ///
     /// Returns the number of tensors that were successfully loaded.
     ///
-    /// Note: real YOLOv8 weight files (e.g. yolov8n.safetensors from
-    /// Ultralytics) use a different key naming convention (e.g.
-    /// `model.0.conv.weight`). To use those, a key-mapping step is
-    /// required; that's a v1.1 follow-up.
+    /// Note: real YOLOv8 weight files (e.g. yolov8n.safetensors
+    /// shipped by the official Ultralytics repo) use a different key
+    /// naming convention (e.g. `model.0.conv.weight`). To use those,
+    /// a key-mapping step is required; that's a v1.1 follow-up.
     pub fn load_weights<P: AsRef<std::path::Path>>(&mut self, path: P) -> Result<usize> {
         self.varmap.load(path).map_err(|e| {
             candle::Error::Msg(format!("varmap load: {e}"))
@@ -343,10 +343,10 @@ impl Yolov8Forward {
         self.varmap.data().lock().unwrap().keys().cloned().collect()
     }
 
-    /// Map a Ultralytics-style weight name to this architecture's
-    /// canonical name.
+    /// Map an official Ultralytics-exported YOLOv8 weight name to this
+    /// architecture's canonical name.
     ///
-    /// Ultralytics exports YOLOv8n.safetensors with names like
+    /// Ultralytics ships YOLOv8n.safetensors files with names like
     /// `model.0.conv.weight`, `model.1.m.0.cv1.conv.weight`, etc. This
     /// helper translates them to our architecture's names
     /// (`backbone.stem.conv.weight`, `backbone.stage1.m.0.cv1.conv.weight`).

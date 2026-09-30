@@ -27,34 +27,32 @@ For YOLOv8, LoRA is typically applied to the classification head's final linear 
 
 ## Training a LoRA in Python
 
-The standard training pipeline is:
+The standard training pipeline is host-driven and pure PyTorch — neuron does not shell out to Python and does not care which training framework you use. The only contract is that the LoRA factors are saved as a standard safetensors file for neuron to load.
 
 ```python
 import torch
 from peft import LoraConfig, get_peft_model
-from ultralytics import YOLO
+from torchvision.models.detection import fasterrcnn_resnet50_fpn
 
-# 1. Load the base YOLOv8 model
-base_model = YOLO("yolov8n.pt")
+# 1. Load the base detector (any PyTorch detector works — torchvision,
+#    timm, your own architecture, etc.). Pick whatever fits the host's
+#    training pipeline.
+base_model = fasterrcnn_resnet50_fpn(weights="DEFAULT")
+head = base_model.roi_heads.box_predictor  # the classification + box head
 
-# 2. Add LoRA adapter to the classification head
-#    YOLOv8's classification head is in model.model.model[22] (for yolov8n)
-#    The final conv is model.model.model[22].cv3.conv
-head = base_model.model.model[22]
 lora_config = LoraConfig(
     r=16,                     # rank
     lora_alpha=32,            # scaling factor
-    target_modules=["cv3.conv"],
+    target_modules=["cls_score", "bbox_pred"],
     lora_dropout=0.1,
     bias="none",
 )
 peft_model = get_peft_model(head, lora_config)
 
-# 3. Train on your custom data
-#    (use your standard YOLOv8 training loop with the LoRA-augmented head)
+# 2. Train on your custom data
 peft_model.train()
-# ... training loop on custom dataset ...
-# ... save the LoRA weights as a standard safetensors file
+# ... standard PyTorch training loop on custom dataset ...
+# ... save the LoRA factors as a standard safetensors file ...
 ```
 
 ## Exporting the LoRA

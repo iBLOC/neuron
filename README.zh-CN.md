@@ -18,12 +18,9 @@ neuron 是一个单 crate 的 Rust 项目，能力：
 
 `/v1/chat/completions`、`/v1/audio/speech`、`/v1/audio/transcriptions`、`/v1/embeddings`、`/v1/rerank`、`/v1/vision/*`、`/v1/messages` 等端点的 wire format 与 OpenAI / vLLM / ollama / llama.cpp server 完全一致——任何兼容客户端都可以无修改地对接 neuron。
 
-neuron 是 **纯库（library-only）**—— 没有独立可执行文件。Rust 宿主通过 `run_embedded()` 把它嵌入自己的进程,所以推理实际跑在宿主进程里。推理本身是本地的(模型权重落在 `$NEURON_MODEL_DIRS` 下、留在磁盘),但 neuron 暴露的 OpenAI 兼容 HTTP 表面并没有限制只能接本地引擎。后面的矩阵里有两种"非纯本地"列值得在开头说明,免得"既然是本地推理,为什么出现 Cohere"这种问题没有即时答案:
+neuron 是 **纯 Rust 库（library-only）**—— 没有独立可执行文件。Rust 宿主通过 `run_embedded()` 把它嵌入自己的进程,所以推理实际跑在宿主进程里。推理本身是本地的(模型权重落在 `$NEURON_MODEL_DIRS` 下、留在磁盘),但 neuron 暴露的 OpenAI 兼容 HTTP 表面并没有限制只能接本地引擎。后面的矩阵里值得在开头说明的唯一一种"非纯本地"列就是 Cohere:
 
-- **Cohere Rerank(Rerank 矩阵里单独一列)。** Cohere 是 HTTP 协议适配器,不是本地推理引擎。设了 `NEURON_RERANK_RUNTIME=cohere` 后,`/v1/rerank` 会把请求转发到 Cohere 托管的 `/v1/rerank` API,再把响应字段映射回 OpenAI 风格的 `data` 信封。这是有意为之:已经接了 Cohere 云端 rerank 的宿主(或暂时还没下载本地 cross-encoder 的宿主),可以保持一份统一的 OpenAI 风格客户端表面,后端走云还是走本地完全用 env var 切换。业务代码不会因为后面换成本地家族而改动。Cohere 是唯一带出远程外发的适配器;矩阵里的其他列都是真正的本地推理后端。
-- **`ultralytics`(Vision 矩阵里单独一列)。** 一个薄薄的子进程层,转发到宿主已安装的 Python `ultralytics` 运行时。模型权重仍在宿主本地 ultralytics 模型目录下,neuron 只负责编排。
-
-这两个列都是**对本地或远程服务的协议适配器**,不在 neuron 的推理引擎框架里。矩阵里的其他列(candle / burn / litert / mistralrs / mage_vl / sherpa / tract / ort)都是真正的本地推理后端。
+- **Cohere Rerank(Rerank 矩阵里单独一列)。** Cohere 是 HTTP 协议适配器,不是本地推理引擎。设了 `NEURON_RERANK_RUNTIME=cohere` 后,`/v1/rerank` 会把请求转发到 Cohere 托管的 `/v1/rerank` API,再把响应字段映射回 OpenAI 风格的 `data` 信封。这是有意为之:已经接了 Cohere 云端 rerank 的宿主(或暂时还没下载本地 cross-encoder 的宿主),可以保持一份统一的 OpenAI 风格客户端表面,后端走云还是走本地完全用 env var 切换。业务代码不会因为后面换成本地家族而改动。Cohere 是 neuron 当前**唯一**的远程外发适配器;矩阵里的其他列都是真正的本地推理后端。
 
 ## 嵌入式库使用
 
@@ -261,7 +258,7 @@ v1 范围：调度器仅覆盖 LLM 能力（这是目前唯一存在多模型常
 
 下面的矩阵按能力拆分（LLM / TTS / ASR / Rerank / Embedding / Vision / Chronos2 / Decision），逐行列出每个模型可以跑在哪些推理后端上。✓ 表示该后端今天即可加载该模型；空白格表示不支持。**加粗**的 model id 是在 `ServerState::new` 中按 env var 注册的默认模型；其余模型会在对应权重目录存在于 `$NEURON_MODEL_DIRS` 时被自动注册。源码真值在 [`src/capabilities/catalog.rs::default_capabilities`](src/capabilities/catalog.rs)。
 
-图例：candle · burn · litert · mistralrs · mage_vl · sherpa · tract · ort · ultralytics · Cohere（托管）。标记 **opt** 的后端需要额外的 Cargo feature 或外部二进制；具体见下方脚注。
+图例：candle · burn · litert · mistralrs · mage_vl · sherpa · tract · ort · Cohere（托管）。标记 **opt** 的后端需要额外的 Cargo feature 或外部二进制；具体见下方脚注。
 
 ### LLM（chat completions + Anthropic Messages v1）
 
@@ -327,17 +324,16 @@ Cohere 适配器是到 Cohere 托管 `/v1/rerank` API 的 HTTP 代理——无�
 
 ### Vision（detect / classify / segment / pose）
 
-| 模型 id | candle | ultralytics | ort / tract / onnxruntime（可插拔） |
-|---|---|---|---|
-| **yolov8n** | ✓ | | |
-| **yolov8s** | ✓ | | |
-| **yolov11n** | ✓ | | |
-| **rtdetr-r50** | ✓ | | |
-| **detr-resnet50** | ✓ | | |
-| **rf-detr-base** | | | ✓ |
-| **rf-detr-large** | | | ✓ |
-| **florence-2-base** | | | ✓ |
-| **grounding-dino-base** | | ✓ | |
+| 模型 id | candle | ort / tract / onnxruntime（可插拔） |
+|---|---|---|
+| **yolov8n** | ✓ | |
+| **yolov8s** | ✓ | |
+| **yolov11n** | ✓ | |
+| **rtdetr-r50** | ✓ | |
+| **detr-resnet50** | ✓ | |
+| **rf-detr-base** | | ✓ |
+| **rf-detr-large** | | ✓ |
+| **florence-2-base** | | ✓ |
 
 ONNX 后端可插拔：替换 `src/vision/ort_runtime.rs` 中的 `build_session` 即可接入 `ort`、`tract`、`onnnxruntime` 或任何实现 `OrtSession` 契约的执行器。COCO 80 基础类；通过 LoRA 适配器动态扩展（`/v1/vision/lora/register`）。
 
@@ -367,7 +363,6 @@ Laya 上游**只发 safetensors**，所以要 tract 加载的图需要先跑上�
 | **sherpa** | sherpa-onnx 1.13.x | ASR（SenseVoiceSmall） | `sherpa` |
 | **tract** | tract-onnx 0.21 | ASR（SenseVoiceSmall）、Decision（Laya）、Vision（ONNX 可插拔） | `tract` |
 | **ort** | onnxruntime | Vision（RF-DETR / Florence-2 / 自定义）、Decision（Laya，bit-exact 路径） | opt-in `ort` 集成或 `tract` 回退 |
-| **ultralytics** | ultralytics Python 子进程 | Vision（Grounding DINO） | 宿主自带 `ultralytics` |
 | **Cohere（托管）** | HTTP 代理 | Rerank | 无（无本地权重） |
 
 ### 引擎概览
@@ -380,8 +375,9 @@ Laya 上游**只发 safetensors**，所以要 tract 加载的图需要先跑上�
 - **mistralrs** —— [mistral.rs](https://github.com/EricLBuehler/mistral.rs) v0.8.22；一个统一分发器，覆盖 40+ 家族，PagedAttention + ISQ 量化开箱即用。`--features mistralrs`。
 - **mage_vl** —— neuron 原生 candle 移植的 [Microsoft Mage-VL](https://huggingface.co/microsoft/Mage-VL)；MageViT + Qwen3-4B 解码器 + StreamMind gate。随默认 `candle` feature 一并提供；通过 `NEURON_LLM_RUNTIME=mage_vl` + `NEURON_MAGE_VL_SHARD_DIR` 激活。
 - **sherpa / tract / ort** —— 三个跑 ONNX 模型的引擎（ASR SenseVoice、Vision Florence-2 / RF-DETR、Decision Laya）。`tract` 是纯 Rust ONNX（`--features tract`）；`sherpa` 是官方的 onnxruntime 后端 Rust 绑定（`--features sherpa`）；`ort` 是 onnxruntime 绑定（由宿主集成）。规范见 [`docs/superpowers/specs/2026-09-26-sherpa-onnx-asr-backend.md`](docs/superpowers/specs/2026-09-26-sherpa-onnx-asr-backend.md)、[`docs/superpowers/specs/2026-09-01-mobile-phase-2-tract-onnx.md`](docs/superpowers/specs/2026-09-01-mobile-phase-2-tract-onnx.md)。
-- **ultralytics** —— Python 子进程，用于开放词汇检测（Grounding DINO）。宿主自带 `ultralytics`，neuron 只负责编排。
 - **Cohere（托管）** —— `/v1/rerank` 的 HTTP 代理。无本地权重，只要 `NEURON_COHERE_API_KEY`。
+
+注：旧版 README 宣传过 `ultralytics` Python 子进程后端（用于 Grounding DINO）。该列**已移除** —— neuron 是纯 Rust 库，不发任何 Python 子进程；Grounding DINO 的 catalog 条目也已一并删除。开放词汇检测继续走 `ort / tract / onnxruntime` 列（Florence-2 是这一列里已经在跑的多模态视觉模型）。
 
 ### 如何加载真实权重
 

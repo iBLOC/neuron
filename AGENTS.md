@@ -35,7 +35,7 @@ neuron is a **library-only** Rust crate (no standalone binary) that host process
 | Add a new TTS model | `src/tts/voxcpm_burn/` | 0.5B: vendored from `madushan1000/voxcpm_rs`, pre-converted burn `.mpk` weights. VoxCPM2: `voxcpm2_model.rs` + `audiovae_v2.rs`, loads upstream safetensors/pth directly via `weights.rs` |
 | Add a new model type (e.g. embedding) | Create new `src/<model_type>/mod.rs` | Follow the 10-step pattern in README's "Adding a new model type" section |
 | Add a new vision task (classify/segment/pose) | Extend `src/vision/lora.rs` + `candle_yolo.rs` | v1.0 implements full task dispatch + response shape + LoRA; detect head has preprocessing/NMS wired, classify/segment/pose are stubs pending heads |
-| Add a new vision model family (RT-DETR / DETR / RF-DETR / Florence-2 / Grounding DINO) | Create new `<family>.rs` in `src/vision/`, add a new `VisionImpl` variant, wire the loader | Wire into `default_capabilities()` in `src/capabilities/catalog.rs` |
+| Add a new vision model family (RT-DETR / DETR / RF-DETR / Florence-2) | Create new `<family>.rs` in `src/vision/`, add a new `VisionImpl` variant, wire the loader | Wire into `default_capabilities()` in `src/capabilities/catalog.rs` |
 | Add a new output layout to the ONNX backend | Extend `OrtOutputLayout` in `src/vision/ort_runtime.rs` and add a new decoder function (see `decode_yolov8_output` / `decode_rfdetr_output` for templates) | The unified `decode_detection_output` dispatcher routes by layout; add a new match arm |
 | Add a new ONNX executor to the `ort` backend | Replace `build_session` in `src/vision/ort_runtime.rs` | The `OrtSession` type alias lets you wire in `ort` / `tract` / `onnxruntime` without touching the rest of the runtime |
 | Add a new engine backend | `src/llm/` (new file) + wire into registry `runtime_for()` dispatch + add Cargo feature | Match the `LlmRuntime` trait shape |
@@ -294,7 +294,7 @@ neuron has **no direct dependency** on any particular host — the integration c
 | `NEURON_COHERE_API_KEY` | (unset) | Cohere API key (required when `NEURON_RERANK_RUNTIME=cohere`) |
 | `NEURON_COHERE_ENDPOINT` | `https://api.cohere.com` | Cohere API base URL |
 | `NEURON_COHERE_MODEL` | `rerank-english-v3.0` | Cohere model id (e.g. `rerank-multilingual-v3.0`) |
-| `NEURON_VISION_RUNTIME` | (unset) | `candle-yolo` \| `candle-rtdetr` \| `candle-detr` \| `ort` \| `ultralytics` — which Vision engine + model family to load (`ort` is a pluggable executor — see `src/vision/ort_runtime.rs` `build_session`) |
+| `NEURON_VISION_RUNTIME` | (unset) | `candle-yolo` \| `candle-rtdetr` \| `candle-detr` \| `ort` — which Vision engine + model family to load (`ort` is a pluggable executor — see `src/vision/ort_runtime.rs` `build_session`). The historical `ultralytics` Python-subprocess backend was removed (neuron is pure Rust, no subprocesses); Grounding DINO went with it. |
 | `NEURON_VISION_MODEL_PATH` | (unset) | Path to the Vision model directory (YOLOv8: `config.json` + `yolov8n.safetensors`) |
 | `NEURON_DECISION_RUNTIME` | (unset) | `tract` — which Decision engine to load (requires `--features tract`) |
 | `NEURON_DECISION_MODEL_ID` | `laya` | Model id registered for the Decision capability |
@@ -354,14 +354,14 @@ Catalog dedup: the same `(engine, id)` may appear multiple times in `SUPPORTED_C
 
 Other catalog families — loadable by capability, by backend. ✓ = the model is served by that backend today; the source of truth is `default_capabilities()` in `src/capabilities/catalog.rs` (see the README's "Supported Models" section for the full table including defaults + build flags):
 
-| Capability | candle | burn | litert | mistralrs | mage_vl | sherpa | tract | ort | ultralytics | Cohere |
+| Capability | candle | burn | litert | mistralrs | mage_vl | sherpa | tract | ort | Cohere |
 |---|---|---|---|---|---|---|---|---|---|---|
 | LLM | ✓ (Qwen2/3, Llama2/3, Phi-3, Mistral, ChatGLM, MiniCPM5) | | ✓ (Gemma 3/4) | ✓ (40+ families) | ✓ (`microsoft/Mage-VL`) | | | | | |
 | TTS | | ✓ (VoxCPM 0.5B + VoxCPM2) | | | | | | | | |
 | ASR | ✓ (Whisper) | | | | | ✓ | ✓ | | | |
 | Rerank | ✓ (BGE / mxbai / jina) | | | | | | | | | ✓ (hosted) |
 | Embedding | ✓ (MiniLM) | | | | | | | | | |
-| Vision | ✓ (YOLOv8 / RT-DETR / DETR) | | | | | | ✓ | ✓ | ✓ (Grounding DINO) | |
+| Vision | ✓ (YOLOv8 / RT-DETR / DETR) | | | | | | ✓ | ✓ | |
 | Chronos2 | ✓ | | | | | | | | | |
 | Decision | | | | | | | ✓ | ✓ (bit-exact path) | | |
 

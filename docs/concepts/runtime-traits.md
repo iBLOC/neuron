@@ -137,7 +137,7 @@ pub trait VisionRuntime: Send + Sync {
 }
 ```
 
-**Implementations**: `CandleYoloRuntime` (YOLOv8 / RT-DETR / DETR), `OrtVisionRuntime` (YOLOv8-ONNX / RF-DETR / Florence-2 with pluggable executors), `UltralyticsVisionRuntime` (Grounding DINO subprocess)
+**Implementations**: `CandleYoloRuntime` (YOLOv8 / RT-DETR / DETR), `OrtVisionRuntime` (YOLOv8-ONNX / RF-DETR / Florence-2 with pluggable executors)
 
 **Tasks**: `VisionTask::Detect | Classify | Segment | Pose` (discriminator enum)
 

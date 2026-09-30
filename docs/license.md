@@ -59,7 +59,7 @@ neuron does not redistribute model weights. Weights are loaded at runtime from t
 - **MiniLM-L6-v2 (embedding)**: Apache-2.0
 - **BGE / mxbai / jina (rerank)**: MIT
 - **Cohere (rerank hosted)**: governed by Cohere's API terms
-- **YOLOv8 / RT-DETR / DETR / RF-DETR / Florence-2 / Grounding DINO (vision)**: per-model (most are Apache-2.0 / MIT; some Ultralytics-trained weights are AGPL-3.0)
+- **YOLOv8 / RT-DETR / DETR / RF-DETR / Florence-2 (vision)**: per-model (most are Apache-2.0 / MIT). Historical note: a Grounding DINO entry was previously listed here under an `ultralytics` Python-subprocess backend; that backend has been removed (neuron is pure Rust), and Grounding DINO went with it.
 
 Users are responsible for downloading weights from their respective sources and complying with each model's license terms. neuron does not enforce weight licensing — it loads whatever weights the user points it at.
 

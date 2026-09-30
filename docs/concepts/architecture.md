@@ -32,8 +32,7 @@ title: Architecture
 │         ├─→ RerankRuntimeRegistry ──→ CandleRerankRuntime  (BGE / mxbai / jina / cohere)
 │         ├─→ EmbeddingRuntimeRegistry ─→ CandleEmbeddingRuntime (MiniLM BERT, batched, base64)
 │         ├─→ VisionRuntime        ─┬─→ CandleYoloRuntime  (YOLOv8 / RT-DETR / DETR)
-│         │                        ├─→ OrtVisionRuntime   (YOLOv8 / RT-DETR / DETR / RF-DETR / Florence-2)
-│         │                        └─→ UltralyticsVisionRuntime (Grounding DINO)
+│         │                        └─→ OrtVisionRuntime   (YOLOv8 / RT-DETR / DETR / RF-DETR / Florence-2)
 │         └─→ Chronos2Registry   ────→ CandleChronos2Runtime (T5-style encoder + decoder + output head, vendored)
 └──────────────────────────────────────────────────────────────────────┘
 ```
@@ -228,9 +227,8 @@ Handlers resolve models with `runtime_for(&model).await.unwrap_or_else(|_| state
 | YOLOv8 (exported to ONNX) | ONNX (ort / tract / onnxruntime — pluggable) | same anchor + NMS convention |
 | RT-DETR / DETR | candle or ONNX | query-based, sigmoid (no NMS) |
 | RF-DETR / Florence-2 | ONNX | query-based (RF-DETR) / vision-language (Florence-2) |
-| Grounding DINO | ultralytics subprocess | text-prompted detection |
 
-LoRA adapters are dynamically registerable via `POST /v1/vision/lora/register` for extending detection classes without retraining the base model.
+LoRA adapters are dynamically registerable via `POST /v1/vision/lora/register` for extending detection classes without retraining the base model. (Historical: a Grounding DINO entry under an `ultralytics` Python-subprocess backend was removed — neuron is pure Rust.)
 
 ## Feature flags
 

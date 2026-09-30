@@ -130,10 +130,9 @@ neuron exposes **8 capability surfaces** that mirror the OpenAI wire format wher
 **Engines**:
 - **candle** (default) — YOLOv8 (n/s/11n), RT-DETR (r50), DETR (resnet50)
 - **ort** (ONNX pluggable: ort / tract / onnxruntime) — YOLOv8-ONNX, RF-DETR (base/large), Florence-2 (vision-language)
-- **ultralytics** (subprocess) — Grounding DINO (text-prompted detection)
 
 **Configuration**:
-- `NEURON_VISION_RUNTIME=candle-yolo|candle-rtdetr|candle-detr|ort|ultralytics`
+- `NEURON_VISION_RUNTIME=candle-yolo|candle-rtdetr|candle-detr|ort`
 - `NEURON_VISION_MODEL_PATH=/path/to/vision-model-dir`
 
 **Request shape** (multipart/form-data):
@@ -236,7 +235,7 @@ Question `type` is `choice` (pick one of N), `score` (rate N levels) or `noul` (
 | ASR | `/v1/audio/transcriptions` | — | candle (Whisper) / sherpa-onnx (SenseVoiceSmall) / tract ONNX (SenseVoiceSmall, prepped graph) | `candle` (default) | ✅ |
 | Rerank | `/v1/rerank` | — | candle (BGE/mxbai/jina) / cohere | `candle` (default) | ✅ |
 | Embedding | `/v1/embeddings` | — | candle (MiniLM) | `candle` (default) | ✅ |
-| Vision | `/v1/vision/{detect,classify,segment,pose,lora/*,gate/score}` | — | candle / ort (tract, ort, onnxruntime) / ultralytics | `candle` (default) | ✅ |
+| Vision | `/v1/vision/{detect,classify,segment,pose,lora/*,gate/score}` | — | candle / ort (tract, ort, onnxruntime) | `candle` (default) | ✅ |
 | Chronos2 | `/v1/forecast` | — | candle (T5-style vendored) | `chronos2` | — |
 | Decision | `/v1/decisions` | — | tract (Laya int8 ONNX) | `tract` | — |
 | Model mgmt | `/v1/models/*`, `/v1/catalog/sources`, `/v1/models/pull` | — | (HTTP-only) | — | ✅ |

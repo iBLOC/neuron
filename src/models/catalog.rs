@@ -308,15 +308,6 @@ pub const SUPPORTED_CATALOG: &[SupportedModel] = &[
         source_id: "huggingface",
         families: &["rf-detr"],
     },
-    // Grounding DINO (open-vocabulary, text-prompted) — ultralytics CLI.
-    SupportedModel {
-        id: "grounding-dino-base",
-        engine: EngineType::Vision,
-        engine_impl: "ultralytics",
-        default_repo: "huggingface:IDEA-Research/grounding-dino-base",
-        source_id: "huggingface",
-        families: &["grounding-dino"],
-    },
     // Florence-2 (vision-language, text-prompted) — ONNX Runtime.
     SupportedModel {
         id: "florence-2-base",
