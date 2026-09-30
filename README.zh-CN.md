@@ -299,6 +299,8 @@ v1 范围：调度器仅覆盖 LLM 能力（这是目前唯一存在多模型常
 
 音频格式：WAV 默认即可；MP3/FLAC/OGG-Vorbis 需开启 `--features asr-audio`。许可证：MIT（Whisper）、Apache-2.0（SenseVoice）。
 
+> **sherpa-onnx 是多家族 ASR 分发器，不是 SenseVoice 的简单包装。** `sherpa-onnx` crate 在 `OfflineModelConfig` 里暴露了约 10 个 ASR 模型变体（SenseVoice、Whisper、Paraformer、Moonshine、Icefall/Conformer Zipformer transducer、Fire-Red ASR、Nemo CTC、TDNN CTC、Dolphin），另外还有独立的 `OnlineRecognizerConfig` 用于流式变体。neuron 目前只接了 SenseVoice（见 `src/asr/sherpa.rs` —— `OfflineModelConfig` 里唯一非默认字段就是 `OfflineSenseVoiceModelConfig`）；补齐 Whisper / Paraformer / Moonshine / Zipformer 等是逐家族接线工作（每个变体都要写自己的 `OfflineXxxModelConfig` 分支、权重 shape 校验、`resolve_model_path` 分支）。本表中 `sherpa` 那一个勾目前的语义是"通过 sherpa-onnx 绑定加载 SenseVoiceSmall"；后续 commit 可以扩展这一列,不必更换绑定依赖。
+
 ### Rerank
 
 | 模型 id | candle | Cohere（托管） |

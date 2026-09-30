@@ -298,6 +298,8 @@ License: Apache-2.0 (OpenBMB). VoxCPM2 loads the upstream checkpoints directly (
 
 Audio formats: WAV out of the box; MP3/FLAC/OGG-Vorbis via `--features asr-audio`. License: MIT (Whisper), Apache-2.0 (SenseVoice).
 
+> **sherpa-onnx is a multi-family dispatcher, not a SenseVoice wrapper.** The `sherpa-onnx` crate exposes ~10 ASR model variants in its `OfflineModelConfig` (SenseVoice, Whisper, Paraformer, Moonshine, Icefall/Conformer Zipformer transducer, Fire-Red ASR, Nemo CTC, TDNN CTC, Dolphin) plus a separate `OnlineRecognizerConfig` for streaming variants. neuron currently wires up only SenseVoice (via `src/asr/sherpa.rs` — `OfflineSenseVoiceModelConfig` is the only non-default field set in `OfflineModelConfig`); adding Whisper / Paraformer / Moonshine / Zipformer / etc. is a per-family wiring task (each variant needs its own `OfflineXxxModelConfig` arm, weight-shape validation, and resolve_model_path branch). The `sherpa` tick in this table today means "SenseVoiceSmall loadable through the sherpa-onnx binding"; follow-up commits can expand the column without changing the binding dependency.
+
 ### Rerank
 
 | Model id | candle | Cohere (hosted) |
