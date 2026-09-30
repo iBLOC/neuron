@@ -18,6 +18,13 @@ neuron 是一个单 crate 的 Rust 项目，能力：
 
 `/v1/chat/completions`、`/v1/audio/speech`、`/v1/audio/transcriptions`、`/v1/embeddings`、`/v1/rerank`、`/v1/vision/*`、`/v1/messages` 等端点的 wire format 与 OpenAI / vLLM / ollama / llama.cpp server 完全一致——任何兼容客户端都可以无修改地对接 neuron。
 
+neuron 是 **纯库（library-only）**—— 没有独立可执行文件。Rust 宿主通过 `run_embedded()` 把它嵌入自己的进程,所以推理实际跑在宿主进程里。推理本身是本地的(模型权重落在 `$NEURON_MODEL_DIRS` 下、留在磁盘),但 neuron 暴露的 OpenAI 兼容 HTTP 表面并没有限制只能接本地引擎。后面的矩阵里有两种"非纯本地"列值得在开头说明,免得"既然是本地推理,为什么出现 Cohere"这种问题没有即时答案:
+
+- **Cohere Rerank(Rerank 矩阵里单独一列)。** Cohere 是 HTTP 协议适配器,不是本地推理引擎。设了 `NEURON_RERANK_RUNTIME=cohere` 后,`/v1/rerank` 会把请求转发到 Cohere 托管的 `/v1/rerank` API,再把响应字段映射回 OpenAI 风格的 `data` 信封。这是有意为之:已经接了 Cohere 云端 rerank 的宿主(或暂时还没下载本地 cross-encoder 的宿主),可以保持一份统一的 OpenAI 风格客户端表面,后端走云还是走本地完全用 env var 切换。业务代码不会因为后面换成本地家族而改动。Cohere 是唯一带出远程外发的适配器;矩阵里的其他列都是真正的本地推理后端。
+- **`ultralytics`(Vision 矩阵里单独一列)。** 一个薄薄的子进程层,转发到宿主已安装的 Python `ultralytics` 运行时。模型权重仍在宿主本地 ultralytics 模型目录下,neuron 只负责编排。
+
+这两个列都是**对本地或远程服务的协议适配器**,不在 neuron 的推理引擎框架里。矩阵里的其他列(candle / burn / litert / mistralrs / mage_vl / sherpa / tract / ort)都是真正的本地推理后端。
+
 ## 嵌入式库使用
 
 neuron **只以 library 形式发布**。宿主进程在自己的进程内通过 `run_embedded()` 启动 OpenAI 兼容的 HTTP 服务器，拿到 `NeuronHandle` 并完全掌控服务生命周期。这是**唯一受支持的部署形态**——没有独立的可执行文件。

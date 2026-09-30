@@ -12,6 +12,13 @@ A Rust inference engine for **LLM / TTS / ASR / Rerank / Embedding / Vision** th
 
 neuron is a single Rust crate that loads model weights, runs inference, and serves the result on OpenAI-compatible endpoints (`/v1/chat/completions`, `/v1/audio/speech`, `/v1/audio/transcriptions`, `/v1/embeddings`, `/v1/rerank`, `/v1/vision/*`, `/v1/messages`, …). The same wire format as OpenAI / vLLM / ollama / llama.cpp server means any compatible client can talk to neuron without modification.
 
+neuron is **library-only** — there is no standalone binary. Rust hosts embed it via `run_embedded()`, so the inference runs inside the host process. Inference itself is local (weights live under `$NEURON_MODEL_DIRS` and stay on disk), but the OpenAI-compatible HTTP surface that neuron exposes does not restrict itself to local engines. Two non-local cases show up in the matrices below and are worth calling out at the top so the "library is for local inference, why is there Cohere?" question has an immediate answer:
+
+- **Cohere Rerank (one column in the Rerank matrix).** Cohere is an HTTP protocol adapter, not a local inference engine. `NEURON_RERANK_RUNTIME=cohere` makes neuron's `/v1/rerank` endpoint forward requests to Cohere's hosted `/v1/rerank` API and translate the response back to OpenAI's `data` envelope. This is intentional: a host that already runs Cohere's cloud rerank (or doesn't yet have a local cross-encoder downloaded) can keep a single OpenAI-shaped client surface while still going to the cloud behind neuron's port. Business code does not change when the host flips the env var to a local rerank family later. Cohere is the only such cloud adapter shipped today; every other column in the matrices below is a local inference backend.
+- **`ultralytics` (one column in the Vision matrix).** A thin subprocess that shells out to a Python `ultralytics` runtime that the host already has installed. The model weights still live locally under the host's `ultralytics` model dir; neuron just orchestrates the call.
+
+Both of those columns are **protocol adapters over a local or remote service**, not rows in neuron's inference-engine framework. Everything else in the matrices — candle / burn / litert / mistralrs / mage_vl / sherpa / tract / ort — is a real local inference backend.
+
 ## Embedded library usage
 
 neuron only ships as a library. Hosts call `run_embedded()` to bind the
