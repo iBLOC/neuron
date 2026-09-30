@@ -800,7 +800,7 @@ Hosts can register their own engines and adapters by implementing the respective
 
 ## Status (2026-09)
 
-Highlights since the 2026-06 snapshot below. Counts and feature dates match `AGENTS.md` and a fresh `cargo test --lib` (628 passed / 0 failed / 5 ignored on default features; 658 with `--features voxcpm`, as of 2026-09-28).
+Highlights since the 2026-06 snapshot below. Counts and feature dates match `AGENTS.md` and a fresh `cargo test --lib` (657 passed / 0 failed / 5 ignored on default features; 687 with `--features voxcpm`, 688 with `--features tract`, as of 2026-10-01).
 
 **Completed** ✅ (2026-09):
 
@@ -818,13 +818,13 @@ Highlights since the 2026-06 snapshot below. Counts and feature dates match `AGE
 - VoxCPM2 model-level streaming: the patch-level pipeline (`generate_streaming` + stateful `StreamingVaeDecoder`) is implemented and unit-tested, but not yet wired to `/v1/audio/speech` — on the ndarray backend streamed output still deviates from the full decode beyond benign boundary taps (burn conv view/layout issue under investigation). `stream: true` currently returns chunked full-synthesis WAV, which is fidelity-safe.
 - MNN mobile/edge backend (Sprint 4 Phase 3, design spec [`docs/superpowers/specs/2026-09-01-mnn-mobile-backend-design.md`](docs/superpowers/specs/2026-09-01-mnn-mobile-backend-design.md)).
 
-**Verification commands** (2026-09-27):
+**Verification commands** (2026-10-01):
 
 ```bash
-cargo test --lib                                                       # 628 passed; 0 failed; 5 ignored
-cargo test --lib --features voxcpm                                     # 658 passed; 0 failed (adds VoxCPM2 suites; V1 audiovae roundtrip tests are slow)
-cargo test --lib --features tract                                      # same + tract tests
-cargo test --lib --features tract,sherpa                               # same + sherpa tests
+cargo test --lib                                                       # 657 passed; 0 failed; 5 ignored
+cargo test --lib --features voxcpm                                     # 687 passed; 0 failed (adds VoxCPM2 suites; V1 audiovae roundtrip tests are slow)
+cargo test --lib --features tract                                      # 688 passed; 0 failed
+cargo test --lib --features tract,sherpa                               # 695 passed; 0 failed (SherpaAsrRuntime + from_dir + wav/onnx_meta/fbank/sensevoice coverage; see AGENTS.md:208-211)
 cd docs && npm ci --no-audit --no-fund && npx vitepress build           # VitePress site builds
 ```
 
