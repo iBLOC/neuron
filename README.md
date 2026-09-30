@@ -251,37 +251,127 @@ v1 scope: the scheduler gates the LLM capability (the only one with multiple swa
 
 ## Supported Models
 
-| Model type | Engine | Default model | Architecture | Status | Notes |
+The matrix below splits models by capability (LLM / TTS / ASR / Rerank / Embedding / Vision / Chronos2 / Decision) and lists which inference backends can serve each one. A ✓ means the model is loadable on that backend today; a blank cell means not supported. Default models (per env-var registration in `ServerState::new`) are shown in **bold**; everything else is auto-registered when the corresponding weights directory exists under `$NEURON_MODEL_DIRS`. See [`src/capabilities/catalog.rs::default_capabilities`](src/capabilities/catalog.rs) for the source of truth.
+
+Legend: candle · burn · litert · mistralrs · mage_vl · sherpa · tract · ort · ultralytics · Cohere (hosted). Backends marked **opt** need an extra Cargo feature or external binary; see the footnotes below the matrices.
+
+### LLM (chat completions + Anthropic Messages v1)
+
+| Model id | candle | burn | litert | mistralrs | mage_vl |
 |---|---|---|---|---|---|
-| **LLM** | candle / litert / mistralrs | `qwen2.5-0.5b` (candle, 6-family support) / `gemma-3n-e2b-it` + `gemma-3n-e4b-it` + `gemma-3-12b-it` (litert) / any HF repo (mistralrs, 40+ families) / `minicpm5-1b` (candle, platform default, 1B edge-tier) / `minicpm5-2b` (candle, 2.52B server-tier) | Qwen 2/2.5/3/3.5 + Llama 2/3 + Phi-3 + Mistral + ChatGLM + MiniCPM5 (candle) / Gemma 3 (litert, via `lit` subprocess) / Qwen/Llama/Mistral/DeepSeek/GLM/Granite/GPT-OSS/Gemma 4/Qwen 3-VL/Phi 4 (mistralrs) | ✅ candle + litert + mistralrs all implemented | Apache-2.0 / MIT, [Qwen model card](https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct), [litert_lm 0.1](https://github.com/maceip/litert-lm-rs) shells out to the `lit` binary for Gemma, [mistral.rs v0.8.22](https://github.com/EricLBuehler/mistral.rs) provides the multi-family dispatcher, [MiniCPM5-1B / MiniCPM5-2B](https://huggingface.co/openbmb/MiniCPM5-1B) both ship `model_type = "llama"` and dispatch through the same candle (Llama) path — 2B requires ~6–7 GB VRAM, 1B targets the 2-core 4 GB edge tier |
-| **TTS** | burn (VoxCpm) | `voxcpm-0.5b` (loadable) / `voxcpm2` (loadable, 2B/48 kHz) | VoxCPM 0.5B (burn 0.21, vendored from voxcpm_rs) + VoxCPM2 (burn 0.21, in-house port) | ✅ burn implemented (requires `--features voxcpm`); **both `voxcpm-0.5b` and `voxcpm2` are loadable** (`NEURON_TTS_RUNTIME=voxcpm` / `voxcpm2`) | Chinese + English (0.5B) / 30 languages (VoxCPM2), voice cloning, [0.5B model card](https://huggingface.co/openbmb/VoxCPM-0.5B), Apache-2.0. VoxCPM2 is the OpenBMB 2026-04 release (2B params, 48 kHz AudioVAE V2, Voice Design + Controllable Cloning + Ultimate Cloning modes); loads the upstream checkpoints directly (no conversion); see the "VoxCPM2 (loadable)" section under TTS details below. |
-| **ASR** | candle (Whisper) | `whisper-base` (candle) | Whisper (candle-transformers) | ✅ candle implemented | WAV native; MP3 / FLAC / OGG-Vorbis via `--features asr-audio`. MIT, [Model card](https://huggingface.co/openai/whisper-base) |
-| **Rerank** | candle (bge / mxbai / jina) / cohere (API proxy) | `bge-reranker-base` (bge) / `mxbai-rerank-base-v2` (mxbai) / `jina-reranker-base-v2` (jina) / `rerank-english-v3.0` (cohere, no local weights) | XLM-RoBERTa cross-encoder (bge/jina) / Qwen2 + Linear(hidden, 1) head (mxbai) / Cohere `/v1/rerank` HTTP proxy (cohere) | ✅ bge + mxbai + jina + cohere all implemented | MIT (bge/mxbai/jina via XLM-R + Qwen2) + Cohere-hosted. [bge-reranker-base](https://huggingface.co/BAAI/bge-reranker-base), [mxbai-rerank-base-v2](https://huggingface.co/mixedbread-ai/mxbai-rerank-base-v2), [jina-reranker-base-v2](https://huggingface.co/jinaai/jina-reranker-base-v2) |
-| **Embedding** | candle (BERT) | `all-minilm-l6-v2` (candle) | MiniLM BERT bi-encoder | ✅ candle implemented | Apache-2.0, [Model card](https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2). Supports `encoding_format: "float"` (default) and `"base64"`. Batched forward via `BatchLongest` padding + single BERT pass. |
-| **Vision** | candle (YOLOv8 / RT-DETR / DETR) / ultralytics (Grounding DINO) / ONNX (pluggable: ort / tract / onnxruntime) | `yolov8n` / `yolov8s` / `yolov11n` (candle); `rtdetr-r50` / `detr-resnet50` (candle); `rf-detr-base` / `rf-detr-large` (ONNX, pluggable backend); `grounding-dino-base` (ultralytics); `florence-2-base` (ONNX, pluggable backend) | YOLOv8 CSPDarknet + PANet + decoupled head; RT-DETR / DETR transformer decoder (no NMS); RF-DETR query-based with DINOv2 backbone; Grounding DINO text-prompted; Florence-2 vision-language | ✅ `OrtVisionRuntime` with full task dispatch (detect / classify / segment / pose); pluggable ONNX session backend; **both YOLOv8 (anchor+NMS) and DETR/RF-DETR (query+sigmoid) output decoders** | COCO 80 base classes; **dynamic extension via LoRA adapters** (see `/v1/vision/lora/register`). 4 task endpoints (`/v1/vision/{detect,classify,segment,pose}`) + LoRA management endpoints. The ONNX backend decouples session construction (`OrtSession` type alias) from inference — replace `build_session` in `src/vision/ort_runtime.rs` to wire in `ort`, `tract`, `onnxruntime`, or any other ONNX executor. Apache-2.0 throughout (YOLOv8 is a clean-room architecture reimplementation in `src/vision/yolov8_arch.rs`; RT-DETR / DETR / RF-DETR / Florence-2 are architecture-only adaptations). |
-| **Vision-Language (Mage-VL)** | candle (neuron-native MageViT + Qwen3-4B decoder in `src/mage_vl/`) | `microsoft/Mage-VL` (multi-frame video + image) | MageViT (24-layer codec-native ViT, 3D RoPE, I/P-frame patch sparsity) + Qwen3-4B-Instruct-2507 decoder + StreamMind gate (~0.5B event classifier) | ✅ MageVLModel + MageViT + StreamMind gate + real tokenizer + KV-cache generation, gated HTTP e2e, multi-request KV isolation via `reset_cache` | Apache-2.0 (Mage-VL + Mage-ViT + StreamMind). Endpoints: OpenAI `/v1/chat/completions` + Anthropic `/v1/messages` (vision); `/v1/vision/gate/score` (event gate). 75% fewer visual tokens than uniform frame sampling via codec-driven anchor/predicted frame selection. |
-| **Chronos2 (time series)** | candle (T5 encoder/decoder + linear output head, vendored in `src/chronos2/vendor/`) | (no baked default; pass a Chronos2 checkpoint dir) | T5-style encoder + decoder (sinusoidal positional encoding, pre-norm, GELU), `Chronos2OutputHead` with interpolation modes (linear / cubic), per-token quantile support | ✅ `CandleChronos2Runtime` + `POST /v1/forecast` handler + `Chronos2Registry` (lazy load) + `StubChronos2Runtime` for shape validation | Apache-2.0 (Chronos2). Forecast API: `{context: [Number], horizon: usize, method?}` → `{forecast: [Number], quantiles?: {q: [[Number]]}, metrics?}`. |
+| **minicpm5-1b** (platform default, 1B Llama, edge tier) | ✓ | | | | |
+| **minicpm5-2b** (2.52B Llama, server tier) | ✓ | | | | |
+| **qwen2.5-0.5b** | ✓ | | | |
+| **qwen3-0.6b** | ✓ | | | |
+| llama-3-8b | ✓ | | | |
+| phi-3-mini | ✓ | | | |
+| mistral-7b | ✓ | | | |
+| chatglm-3-6b | ✓ | | | |
+| gemma-3n-e2b-it | | | ✓<sup>lit</sup> | | |
+| gemma-3n-e4b-it | | | ✓<sup>lit</sup> | | |
+| gemma-3-12b-it | | | ✓<sup>lit</sup> | | |
+| gemma-4-e2b-it | | | ✓<sup>lit</sup> | | |
+| gemma-4-e4b-it | | | ✓<sup>lit</sup> | | |
+| gemma-4-12b-it | | | ✓<sup>lit</sup> | | |
+| microsoft/Mage-VL (MageViT + Qwen3-4B VLM) | | | | | ✓ |
+| Qwen/Qwen3-0.6B, Qwen/Qwen3-4B, … (40+ families) | | | | ✓ |
 
-### All Supported Engines
+Architecture dispatch (candle): Qwen 2/2.5/3/3.5, Llama 2/3 / 3.1 / 3.2, Phi-3 (mini/small/medium), Mistral 7B, ChatGLM3 — auto-detected from `config.json` `model_type`. mistral.rs handles its own family list (Qwen/Llama/Mistral/DeepSeek/GLM/Granite/GPT-OSS/Gemma 4/Qwen 3-VL/Phi 4 multimodal, …). License: Apache-2.0 / MIT.
 
-neuron currently supports **6 inference engines** across **3 ML frameworks**, powering **7 model types** (LLM / TTS / ASR / Rerank / Embedding / Vision / Chronos2). A 9th capability — **Decision (Laya)** — is wired through `POST /v1/decisions` and tracked separately under the [Decision (Laya)](#decision-laya-discriminative-decision-scoring) section; it's not counted in the 7-model-type headline to keep the LLM/TTS-class-of-capabilities grouping clean:
+### TTS (audio speech)
 
-| Engine | Framework | Model types backed | Status | License | Build requirements |
-|---|---|---|---|---|---|
-| **candle** | [candle](https://github.com/huggingface/candle) 0.10.2 (Rust) | LLM (Qwen2/3, Llama2/3, Phi-3, Mistral, ChatGLM), ASR (Whisper), Rerank (BGE-reranker), Embedding (MiniLM), Vision (YOLOv8 / RT-DETR / DETR) | ✅ fully implemented | Apache-2.0 / MIT | None — built into the default `candle` feature; pulls candle-core/nn/transformers from git rev `a9667ca` |
-| **burn** | [burn](https://github.com/tracel-ai/burn) (Rust) | TTS (VoxCpm, vendored from [voxcpm_rs](https://github.com/madushan1000/voxcpm_rs)) | ✅ fully implemented (consumes pre-converted `.mpk` weights) | Apache-2.0 (in-house voxcpm_rs) | Optional `voxcpmm` Cargo feature; `bazel` not required (pure Rust ndarray backend) |
-| **litert_lm** | [litert_lm](https://github.com/maceip/litert-lm-rs) 0.1 (process pool, shells out to the `lit` binary) | LLM only (Gemma 3 family, via Google LiteRT-LM) | ✅ fully implemented | Apache-2.0 | Optional `litert` Cargo feature; needs the `lit` binary on `PATH` (downloads Gemma weights on first `load()`) |
-| **mistralrs** | [mistral.rs](https://github.com/EricLBuehler/mistral.rs) v0.8.22 (candle-based) | LLM only (40+ model families: Qwen, Llama, Mistral, DeepSeek, GLM, Granite, GPT-OSS, Gemma 4, Qwen 3-VL, Phi 4 multimodal, etc.) | ✅ fully implemented (LLM only) | MIT | Optional `mistralrs` Cargo feature; pulls `candle`; network access required for HuggingFace model downloads on first `load()` |
-| **mage_vl** | neuron-native (candle port of [Microsoft Mage-VL](https://huggingface.co/microsoft/Mage-VL): MageViT + Qwen3-4B + StreamMind gate) | VLM only (`microsoft/Mage-VL` — image + multi-frame video understanding, gated by `StreamMind` event classifier) | ✅ fully implemented (MageViT encoder, Qwen3-4B decoder, real tokenizer, KV-cache generation, multi-request KV isolation via `reset_cache`, gated HTTP e2e) | Apache-2.0 (Mage-VL + Mage-ViT) | No extra Cargo feature; set `NEURON_LLM_RUNTIME=mage_vl` + `NEURON_MAGE_VL_SHARD_DIR=/path/to/shards` (must contain `model-00001-of-00002.safetensors` + `model-00002-of-00002.safetensors`). Reaches both OpenAI `/v1/chat/completions` and Anthropic `/v1/messages` via the `adapter_dispatch` system. |
-| **ONNX (pluggable)** | Pluggable — `ort`, `tract`, `onnxruntime`, or any other executor implementing the `OrtSession` contract | Vision (Florence-2, RT-DETR-ONNX, DETR-ONNX, custom ONNX exports) | ✅ `OrtVisionRuntime` + postprocessing wired; backend plug-in point at `build_session` in `src/vision/ort_runtime.rs` | Apache-2.0 / MIT (per executor) | Bring your own ONNX executor; the runtime handles all I/O, letterbox preprocessing, output decoding, and NMS |
+| Model id | burn |
+|---|---|
+| **voxcpm-0.5b** | ✓ |
+| **voxcpm2** (2B/48 kHz, loadable) | ✓ |
 
-**Summary of what each engine does**:
+License: Apache-2.0 (OpenBMB). VoxCPM2 loads the upstream checkpoints directly (no conversion) and needs ~10 GB RAM.
 
-- **candle** — Hugging Face's pure-Rust ML framework, used for four of the five model types. Selected as the default for LLM/ASR/Rerank/Embedding because it has zero system dependencies and excellent Rust integration.
+### ASR (audio transcriptions)
 
-- **burn** — Tracel.ai's pure-Rust ML framework, used for TTS because VoxCpm is not in candle-transformers. The full VoxCpm architecture (MiniCPM-4 + Local Encoder + Local DiT + AudioVAE) is vendored from the [madushan1000/voxcpm_rs](https://github.com/madushan1000/voxcpm_rs) project and adapted to burn 0.21. **Neuron consumes pre-converted `.mpk` weights directly** — pull them from a HuggingFace repo that ships the burn format, or convert offline with the upstream voxcpm_rs utility and drop the result into `NEURON_TTS_MODEL_PATH`. Weight conversion is not in neuron's scope.
+| Model id | candle | sherpa | tract |
+|---|---|---|---|
+| **whisper-base** | ✓ | | |
+| **sensevoice-small** | | ✓ | ✓ |
 
-- **litert_lm** — Uses the [litert_lm](https://github.com/maceip/litert-lm-rs) 0.1 crate's `LitManager` API, which spawns the `lit` binary as a subprocess pool (one process per model, with `tokio` mpsc control channel inside each process for prompt + token streaming). Targeted at on-device / edge inference scenarios. The current `lit` registry ships Gemma 3 at three size classes (E2B, E4B, 12B); neuron validates the model name against this set in `LitertLlmRuntime::validate_model_name` before calling `lit pull`. Native streaming is supported via `run_completion_stream`. The `lit` binary must be on `PATH`; neuron does not bundle it.
+Audio formats: WAV out of the box; MP3/FLAC/OGG-Vorbis via `--features asr-audio`. License: MIT (Whisper), Apache-2.0 (SenseVoice).
+
+### Rerank
+
+| Model id | candle | Cohere (hosted) |
+|---|---|---|
+| **bge-reranker-base** | ✓ | |
+| **mxbai-rerank-base-v2** | ✓ | |
+| **jina-reranker-base-v2** | ✓ | |
+| rerank-english-v3.0 (or any Cohere model id) | | ✓ |
+
+Cohere adapter is an HTTP proxy to the hosted `/v1/rerank` API — no local weights, requires `NEURON_COHERE_API_KEY`.
+
+### Embedding
+
+| Model id | candle |
+|---|---|
+| **all-minilm-l6-v2** | ✓ |
+
+### Vision (detect / classify / segment / pose)
+
+| Model id | candle | ultralytics | ort / tract / onnxruntime (pluggable) |
+|---|---|---|---|
+| **yolov8n** | ✓ | | |
+| **yolov8s** | ✓ | | |
+| **yolov11n** | ✓ | | |
+| **rtdetr-r50** | ✓ | | |
+| **detr-resnet50** | ✓ | | |
+| **rf-detr-base** | | | ✓ |
+| **rf-detr-large** | | | ✓ |
+| **florence-2-base** | | | ✓ |
+| **grounding-dino-base** | | ✓ | |
+
+ONNX backend is pluggable: replace `build_session` in `src/vision/ort_runtime.rs` to wire in `ort`, `tract`, `onnnxruntime`, or any executor implementing the `OrtSession` contract. COCO 80 base classes; dynamic extension via LoRA adapters (`/v1/vision/lora/register`).
+
+### Chronos2 (time series forecast)
+
+| Model id | candle |
+|---|---|
+| (pass a Chronos2 checkpoint dir; no baked default) | ✓ |
+
+### Decision (Laya discriminative scoring)
+
+| Model id | tract | ort (optional, bit-exact with onnxruntime) |
+|---|---|---|
+| **laya** (int8 ONNX, ~500 MB) | ✓ | ✓ |
+
+Laya's upstream ships **safetensors only**, so a tract-loaded graph requires the upstream `scripts/export_onnx.py` + this repo's `scripts/prep-laya-onnx.py` first. Tract cannot be bit-exact with onnxruntime due to codegen differences (parity contract documented in [`docs/superpowers/specs/2026-09-24-laya-decision.md`](docs/superpowers/specs/2026-09-24-laya-decision.md)).
+
+### Engine → capability cross-reference
+
+The same engines also broken down by what they serve, with build flags:
+
+| Engine | Framework | Capabilities backed | Cargo feature / build requirement |
+|---|---|---|---|
+| **candle** | candle 0.11 (git rev `aebc405`) | LLM (candle families), ASR (Whisper), Rerank (bge/mxbai/jina), Embedding (MiniLM), Vision (YOLOv8 / RT-DETR / DETR), Chronos2 | `candle` (default) |
+| **burn** | burn 0.21 (ndarray backend) | TTS (VoxCPM 0.5B + VoxCPM2) | `voxcpm` |
+| **litert_lm** | litert_lm 0.1 (subprocess) | LLM only (Gemma 3/4 via `lit` binary) | `litert` + `lit` on PATH |
+| **mistralrs** | mistral.rs v0.8.22 (candle-based) | LLM only (40+ families) | `mistralrs` |
+| **mage_vl** | neuron-native candle port | VLM only (`microsoft/Mage-VL`) | included with `candle` |
+| **sherpa** | sherpa-onnx 1.13.x | ASR (SenseVoiceSmall) | `sherpa` |
+| **tract** | tract-onnx 0.21 | ASR (SenseVoiceSmall), Decision (Laya), Vision (ONNX pluggable) | `tract` |
+| **ort** | onnxruntime | Vision (RF-DETR / Florence-2 / custom), Decision (Laya, bit-exact path) | opt-in `ort` integration or `tract` fallback |
+| **ultralytics** | ultralytics Python subprocess | Vision (Grounding DINO) | host wires its own `ultralytics` runtime |
+| **Cohere (hosted)** | HTTP proxy | Rerank | none (no local weights) |
+
+### Engine overview
+
+The matrices above replace the older "one big model-type table + one engine table" pair. Quick summary:
+
+- **candle** — Hugging Face's pure-Rust ML framework, the default for LLM / ASR / Rerank / Embedding / Chronos2 / Vision (YOLO family). Zero system dependencies, single Cargo feature.
+- **burn** — Tracel.ai's pure-Rust ML framework, used for TTS (VoxCPM 0.5B + VoxCPM2 vendored from [voxcpm_rs](https://github.com/madushan1000/voxcpm_rs)). `--features voxcpm`.
+- **litert_lm** — Google LiteRT-LM via the `litert_lm` Rust binding (subprocess pool around the `lit` binary). `--features litert` + `lit` on PATH; serves Gemma 3/4.
+- **mistralrs** — [mistral.rs](https://github.com/EricLBuehler/mistral.rs) v0.8.22; one unified dispatcher that handles 40+ model families with PagedAttention + ISQ quantization. `--features mistralrs`.
+- **mage_vl** — neuron-native candle port of [Microsoft Mage-VL](https://huggingface.co/microsoft/Mage-VL); MageViT + Qwen3-4B decoder + StreamMind gate. Bundled with the default `candle` feature; activated with `NEURON_LLM_RUNTIME=mage_vl` + `NEURON_MAGE_VL_SHARD_DIR`.
+- **sherpa / tract / ort** — three engines for ONNX-based models (ASR SenseVoice, Vision Florence-2 / RF-DETR, Decision Laya). `tract` is pure-Rust ONNX (`--features tract`); `sherpa` is the official onnxruntime-backed Rust binding (`--features sherpa`); `ort` is the onnxruntime binding (host-wired). Specs: [`docs/superpowers/specs/2026-09-26-sherpa-onnx-asr-backend.md`](docs/superpowers/specs/2026-09-26-sherpa-onnx-asr-backend.md), [`docs/superpowers/specs/2026-09-01-mobile-phase-2-tract-onnx.md`](docs/superpowers/specs/2026-09-01-mobile-phase-2-tract-onnx.md).
+- **ultralytics** — Python subprocess for open-vocabulary detection (Grounding DINO). The host wires its own `ultralytics` runtime; neuron only orchestrates.
+- **Cohere (hosted)** — HTTP proxy for `/v1/rerank`. No local weights; just `NEURON_COHERE_API_KEY`.
 
 ### How to load real model weights
 

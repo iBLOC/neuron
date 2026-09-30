@@ -252,37 +252,125 @@ v1 范围：调度器仅覆盖 LLM 能力（这是目前唯一存在多模型常
 
 ## 支持的模型
 
-| 模型类型 | 引擎 | 默认模型 | 架构 | 状态 | 备注 |
+下面的矩阵按能力拆分（LLM / TTS / ASR / Rerank / Embedding / Vision / Chronos2 / Decision），逐行列出每个模型可以跑在哪些推理后端上。✓ 表示该后端今天即可加载该模型；空白格表示不支持。**加粗**的 model id 是在 `ServerState::new` 中按 env var 注册的默认模型；其余模型会在对应权重目录存在于 `$NEURON_MODEL_DIRS` 时被自动注册。源码真值在 [`src/capabilities/catalog.rs::default_capabilities`](src/capabilities/catalog.rs)。
+
+图例：candle · burn · litert · mistralrs · mage_vl · sherpa · tract · ort · ultralytics · Cohere（托管）。标记 **opt** 的后端需要额外的 Cargo feature 或外部二进制；具体见下方脚注。
+
+### LLM（chat completions + Anthropic Messages v1）
+
+| 模型 id | candle | burn | litert | mistralrs | mage_vl |
 |---|---|---|---|---|---|
-| **LLM** | candle / litert / mistralrs | `qwen2.5-0.5b`（candle，6 大家族支持） / `gemma-3n-e2b-it` + `gemma-3n-e4b-it` + `gemma-3-12b-it`（litert） / 任意 HF 仓库（mistralrs，40+ 家族） / `minicpm5-1b`（candle，平台默认，1B 边缘档） / `minicpm5-2b`（candle，2.52B 服务档） | Qwen 2/2.5/3/3.5 + Llama 2/3 + Phi-3 + Mistral + ChatGLM + MiniCPM5（candle） / Gemma 3（litert，通过 `lit` 子进程） / Qwen/Llama/Mistral/DeepSeek/GLM/Granite/GPT-OSS/Gemma 4/Qwen 3-VL/Phi 4（mistralrs） | ✅ candle + litert + mistralrs 全部实现 | Apache-2.0 / MIT，[Qwen 模型卡](https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct)，[litert_lm 0.1](https://github.com/maceip/litert-lm-rs) 用 `lit` 子进程跑 Gemma，[mistral.rs v0.8.22](https://github.com/EricLBuehler/mistral.rs) 提供多家族分发，[MiniCPM5-1B / MiniCPM5-2B](https://huggingface.co/openbmb/MiniCPM5-1B) 都是 `model_type = "llama"`，走同一个 candle（Llama）路径——2B 需要 ~6–7 GB VRAM，1B 面向 2 核 4 GB 边缘档 |
-| **TTS** | burn（VoxCpm） | `voxcpm-0.5b`（可加载） / `voxcpm2`（可加载，2B/48 kHz） | VoxCPM 0.5B（burn 0.21，来自 voxcpm_rs）+ VoxCPM2（burn 0.21，自研移植） | ✅ burn 已实现（需要 `--features voxcpm`）；**`voxcpm-0.5b` 与 `voxcpm2` 都可加载**（`NEURON_TTS_RUNTIME=voxcpm` / `voxcpm2`） | 中英（0.5B） / 30 种语言（VoxCPM2），支持声音克隆。[0.5B 模型卡](https://huggingface.co/openbmb/VoxCPM-0.5B)，Apache-2.0。VoxCPM2 是 OpenBMB 2026-04 发布版（2B 参数，48 kHz AudioVAE V2，Voice Design + Controllable Cloning + Ultimate Cloning 三种模式）；直接加载上游 checkpoint（无需格式转换）。 |
-| **ASR** | candle（Whisper） | `whisper-base`（candle） | Whisper（candle-transformers） | ✅ candle 已实现 | 原生 WAV；MP3 / FLAC / OGG-Vorbis 需开启 `--features asr-audio`。MIT，[模型卡](https://huggingface.co/openai/whisper-base) |
-| **Rerank** | candle（bge / mxbai / jina） / cohere（API 代理） | `bge-reranker-base`（bge） / `mxbai-rerank-base-v2`（mxbai） / `jina-reranker-base-v2`（jina） / `rerank-english-v3.0`（cohere，无本地权重） | XLM-RoBERTa cross-encoder（bge/jina） / Qwen2 + Linear(hidden, 1) 头（mxbai） / Cohere `/v1/rerank` HTTP 代理（cohere） | ✅ bge + mxbai + jina + cohere 全部实现 | MIT（bge/mxbai/jina 基于 XLM-R + Qwen2）+ Cohere 托管。[bge-reranker-base](https://huggingface.co/BAAI/bge-reranker-base)，[mxbai-rerank-base-v2](https://huggingface.co/mixedbread-ai/mxbai-rerank-base-v2)，[jina-reranker-base-v2](https://huggingface.co/jinaai/jina-reranker-base-v2) |
-| **Embedding** | candle（BERT） | `all-minilm-l6-v2`（candle） | MiniLM BERT bi-encoder | ✅ candle 已实现 | Apache-2.0，[模型卡](https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2)。支持 `encoding_format: "float"`（默认）与 `"base64"`。通过 `BatchLongest` padding + 一次 BERT forward 完成批处理。 |
-| **Vision** | candle（YOLOv8 / RT-DETR / DETR） / ultralytics（Grounding DINO） / ONNX（可插拔：ort / tract / onnxruntime） | `yolov8n` / `yolov8s` / `yolov11n`（candle）；`rtdetr-r50` / `detr-resnet50`（candle）；`rf-detr-base` / `rf-detr-large`（ONNX，可插拔后端）；`grounding-dino-base`（ultralytics）；`florence-2-base`（ONNX，可插拔后端） | YOLOv8 CSPDarknet + PANet + 解耦头；RT-DETR / DETR transformer decoder（无需 NMS）；RF-DETR query-based（带 DINOv2 backbone）；Grounding DINO 文本驱动；Florence-2 视觉语言 | ✅ `OrtVisionRuntime` 完整任务分发（detect / classify / segment / pose）；可插拔的 ONNX session 后端；**YOLOv8（anchor+NMS） 和 DETR/RF-DETR（query+sigmoid）双输出解码器** | COCO 80 基础类；**LoRA 适配器动态扩展**（见 `/v1/vision/lora/register`）。4 个任务端点（`/v1/vision/{detect,classify,segment,pose}`） + LoRA 管理端点。ONNX 后端把 session 构造（`OrtSession` 类型别名）与推理解耦——要接入 `ort` / `tract` / `onnnxruntime` 或其他 ONNX 执行器，只需替换 `src/vision/ort_runtime.rs` 中的 `build_session`。 |
-| **Vision-Language（Mage-VL）** | candle（`src/mage_vl/` 内的 neuron 原生 MageViT + Qwen3-4B 解码器） | `microsoft/Mage-VL`（多帧视频 + 图像） | MageViT（24 层 codec-native ViT，3D RoPE，I/P 帧 patch 稀疏） + Qwen3-4B-Instruct-2507 解码器 + StreamMind gate（~0.5B 事件分类器） | ✅ MageVLModel + MageViT + StreamMind gate + 真实 tokenizer + KV-cache 生成，端到端 HTTP 通过 `reset_cache` 隔离多请求 | Apache-2.0（Mage-VL + Mage-ViT + StreamMind）。端点：OpenAI `/v1/chat/completions` + Anthropic `/v1/messages`（视觉）；`/v1/vision/gate/score`（事件门）。通过 codec 驱动的 anchor/predicted 帧选择，比均匀采样减少约 75% 的视觉 token。 |
-| **Chronos2（时序预测）** | candle（T5 encoder/decoder + linear 输出头，vendored 于 `src/chronos2/vendor/`） | （无内置默认；传入 Chronos2 checkpoint 目录） | T5 风格 encoder + decoder（正弦位置编码、pre-norm、GELU），`Chronos2OutputHead` 支持线性/三次插值，支持 per-token quantile | ✅ `CandleChronos2Runtime` + `POST /v1/forecast` handler + `Chronos2Registry`（懒加载） + `StubChronos2Runtime`（shape 校验） | Apache-2.0（Chronos2）。预测 API：`{context: [Number], horizon: usize, method?}` → `{forecast: [Number], quantiles?: {q: [[Number]]}, metrics?}` |
+| **minicpm5-1b**（平台默认，1B Llama，边缘档） | ✓ | | | | |
+| **minicpm5-2b**（2.52B Llama，服务档） | ✓ | | | | |
+| **qwen2.5-0.5b** | ✓ | | | |
+| **qwen3-0.6b** | ✓ | | | |
+| llama-3-8b | ✓ | | | |
+| phi-3-mini | ✓ | | | |
+| mistral-7b | ✓ | | | |
+| chatglm-3-6b | ✓ | | | |
+| gemma-3n-e2b-it | | | ✓<sup>lit</sup> | | |
+| gemma-3n-e4b-it | | | ✓<sup>lit</sup> | | |
+| gemma-3-12b-it | | | ✓<sup>lit</sup> | | |
+| gemma-4-e2b-it | | | ✓<sup>lit</sup> | | |
+| gemma-4-e4b-it | | | ✓<sup>lit</sup> | | |
+| gemma-4-12b-it | | | ✓<sup>lit</sup> | | |
+| microsoft/Mage-VL（MageViT + Qwen3-4B VLM） | | | | | ✓ |
+| Qwen/Qwen3-0.6B、Qwen/Qwen3-4B……（40+ 家族） | | | | ✓ |
 
-### 所有支持的引擎
+架构分发（candle）：Qwen 2/2.5/3/3.5、Llama 2/3 / 3.1 / 3.2、Phi-3（mini/small/medium）、Mistral 7B、ChatGLM3 —— 按 `config.json` 中的 `model_type` 自动识别。mistral.rs 自带家族覆盖（Qwen/Llama/Mistral/DeepSeek/GLM/Granite/GPT-OSS/Gemma 4/Qwen 3-VL/Phi 4 多模态 等）。许可证：Apache-2.0 / MIT。
 
-neuron 当前在 **3 种 ML 框架**上支持 **6 个推理引擎**，覆盖 **7 个模型类型**（LLM / TTS / ASR / Rerank / Embedding / Vision / Chronos2）。第 9 个能力 ——**Decision (Laya)**—— 通过 `POST /v1/decisions` 暴露，按 [Decision (Laya)](#decision-laya-判别式决策打分) 一节独立追踪；不计入上述 7 类计数以保持 LLM/TTS 等"一类能力"分组的干净：
+### TTS（audio speech）
 
-| 引擎 | 框架 | 支持的模型类型 | 状态 | 许可证 | 构建要求 |
-|---|---|---|---|---|---|
-| **candle** | [candle](https://github.com/huggingface/candle) 0.10.2（Rust） | LLM（Qwen2/3、Llama2/3、Phi-3、Mistral、ChatGLM）、ASR（Whisper）、Rerank（BGE-reranker）、Embedding（MiniLM）、Vision（YOLOv8 / RT-DETR / DETR） | ✅ 全部实现 | Apache-2.0 / MIT | 无——已包含在默认 `candle` feature 中；从 git rev `a9667ca` 拉取 candle-core/nn/transformers |
-| **burn** | [burn](https://github.com/tracel-ai/burn)（Rust） | TTS（VoxCpm，vendored 自 [voxcpm_rs](https://github.com/madushan1000/voxcpm_rs)） | ✅ 全部实现（消费预转换的 `.mpk` 权重） | Apache-2.0（自研 voxcpm_rs） | 可选 `voxcpmm` Cargo feature；无需 `bazel`（纯 Rust ndarray 后端） |
-| **litert_lm** | [litert_lm](https://github.com/maceip/litert-lm-rs) 0.1（进程池，对外启动 `lit` 子进程） | 仅 LLM（Gemma 3 家族，通过 Google LiteRT-LM） | ✅ 全部实现 | Apache-2.0 | 可选 `litert` Cargo feature；需要 `lit` 二进制在 `PATH` 上（首次 `load()` 会下载 Gemma 权重） |
-| **mistralrs** | [mistral.rs](https://github.com/EricLBuehler/mistral.rs) v0.8.22（基于 candle） | 仅 LLM（40+ 模型家族：Qwen、Llama、Mistral、DeepSeek、GLM、Granite、GPT-OSS、Gemma 4、Qwen 3-VL、Phi 4 多模态 等） | ✅ 全部实现（仅 LLM） | MIT | 可选 `mistralrs` Cargo feature；会顺带启用 `candle`；首次 `load()` 需要联网从 HuggingFace 下载权重 |
-| **mage_vl** | neuron 原生（[Microsoft Mage-VL](https://huggingface.co/microsoft/Mage-VL) 的 candle 移植：MageViT + Qwen3-4B + StreamMind gate） | 仅 VLM（`microsoft/Mage-VL` —— 图像 + 多帧视频理解，由 `StreamMind` 事件分类器门控） | ✅ 全部实现（MageViT 编码器、Qwen3-4B 解码器、真实 tokenizer、KV-cache 生成、通过 `reset_cache` 实现多请求 KV 隔离、端到端 HTTP 已门控） | Apache-2.0（Mage-VL + Mage-ViT） | 无额外 Cargo feature；设 `NEURON_LLM_RUNTIME=mage_vl` + `NEURON_MAGE_VL_SHARD_DIR=/path/to/shards`（目录下必须有 `model-00001-of-00002.safetensors` + `model-00002-of-00002.safetensors`）。同时支持 OpenAI `/v1/chat/completions` 与 Anthropic `/v1/messages`。 |
-| **ONNX（可插拔）** | 可插拔 —— `ort` / `tract` / `onnnxruntime` 或实现 `OrtSession` 契约的任何执行器 | Vision（Florence-2、RT-DETR-ONNX、DETR-ONNX、自定义 ONNX 导出） | ✅ `OrtVisionRuntime` + 后处理已接通；后端插入点位于 `src/vision/ort_runtime.rs` 中的 `build_session` | Apache-2.0 / MIT（依执行器） | 自带 ONNX 执行器；运行时统一处理所有 I/O、letterbox 预处理、输出解码与 NMS |
+| 模型 id | burn |
+|---|---|
+| **voxcpm-0.5b** | ✓ |
+| **voxcpm2**（2B/48 kHz，可加载） | ✓ |
 
-**每个引擎做了什么：**
+许可证：Apache-2.0（OpenBMB）。VoxCPM2 直接加载上游 checkpoint（无需格式转换），需要约 10 GB RAM。
 
-- **candle** —— Hugging Face 的纯 Rust ML 框架，覆盖 4 类模型。选为 LLM/ASR/Rerank/Embedding 的默认引擎，因为它没有系统依赖且与 Rust 集成极佳。
+### ASR（audio transcriptions）
 
-- **burn** —— Tracel.ai 的纯 Rust ML 框架，用于 TTS，因为 VoxCpm 不在 candle-transformers 中。完整的 VoxCpm 架构（MiniCPM-4 + Local Encoder + Local DiT + AudioVAE）vendored 自 [madushan1000/voxcpm_rs](https://github.com/madushan1000/voxcpm_rs) 项目并适配到 burn 0.21。**neuron 直接消费预转换的 `.mpk` 权重**——从一个本身就发 burn 格式的 HuggingFace 仓库拉取，或者用上游 voxcpm_rs 的转换工具离线转换后放进 `NEURON_TTS_MODEL_PATH`。权重转换不在 neuron 的职责内。
+| 模型 id | candle | sherpa | tract |
+|---|---|---|---|
+| **whisper-base** | ✓ | | |
+| **sensevoice-small** | | ✓ | ✓ |
 
-- **litert_lm** —— 用 [litert_lm](https://github.com/maceip/litert-lm-rs) 0.1 crate 的 `LitManager` API，它把 `lit` 二进制作为子进程池启动（每个模型一个进程，进程内部用 tokio mpsc 控制通道传 prompt 和 token 流）。面向端上 / 边缘推理。当前 `lit` 注册表自带 3 个尺寸的 Gemma 3（E2B、E4B、12B）；neuron 在 `LitertLlmRuntime::validate_model_name` 里先校验模型名属于这个集合，再调用 `lit pull`。原生流式由 `run_completion_stream` 支持。`lit` 二进制必须在 `PATH` 上，neuron 不打包它。
+音频格式：WAV 默认即可；MP3/FLAC/OGG-Vorbis 需开启 `--features asr-audio`。许可证：MIT（Whisper）、Apache-2.0（SenseVoice）。
+
+### Rerank
+
+| 模型 id | candle | Cohere（托管） |
+|---|---|---|
+| **bge-reranker-base** | ✓ | |
+| **mxbai-rerank-base-v2** | ✓ | |
+| **jina-reranker-base-v2** | ✓ | |
+| rerank-english-v3.0（或任意 Cohere 模型 id） | | ✓ |
+
+Cohere 适配器是到 Cohere 托管 `/v1/rerank` API 的 HTTP 代理——无本地权重，需要 `NEURON_COHERE_API_KEY`。
+
+### Embedding
+
+| 模型 id | candle |
+|---|---|
+| **all-minilm-l6-v2** | ✓ |
+
+### Vision（detect / classify / segment / pose）
+
+| 模型 id | candle | ultralytics | ort / tract / onnxruntime（可插拔） |
+|---|---|---|---|
+| **yolov8n** | ✓ | | |
+| **yolov8s** | ✓ | | |
+| **yolov11n** | ✓ | | |
+| **rtdetr-r50** | ✓ | | |
+| **detr-resnet50** | ✓ | | |
+| **rf-detr-base** | | | ✓ |
+| **rf-detr-large** | | | ✓ |
+| **florence-2-base** | | | ✓ |
+| **grounding-dino-base** | | ✓ | |
+
+ONNX 后端可插拔：替换 `src/vision/ort_runtime.rs` 中的 `build_session` 即可接入 `ort`、`tract`、`onnnxruntime` 或任何实现 `OrtSession` 契约的执行器。COCO 80 基础类；通过 LoRA 适配器动态扩展（`/v1/vision/lora/register`）。
+
+### Chronos2（时序预测）
+
+| 模型 id | candle |
+|---|---|
+| （无内置默认；传入 Chronos2 checkpoint 目录） | ✓ |
+
+### Decision（Laya 判别式决策打分）
+
+| 模型 id | tract | ort（可选，与 onnxruntime bit-exact） |
+|---|---|---|
+| **laya**（int8 ONNX，约 500 MB） | ✓ | ✓ |
+
+Laya 上游**只发 safetensors**，所以要 tract 加载的图需要先跑上游 `scripts/export_onnx.py` 再跑本仓库的 `scripts/prep-laya-onnx.py`。由于 codegen 差异，tract 与 onnxruntime 不能 bit-exact 对齐（parity 合约见 [`docs/superpowers/specs/2026-09-24-laya-decision.md`](docs/superpowers/specs/2026-09-24-laya-decision.md)）。
+
+### 引擎 × 能力 速查
+
+| 引擎 | 框架 | 支持的能力 | Cargo feature / 构建要求 |
+|---|---|---|---|
+| **candle** | candle 0.11（git rev `aebc405`） | LLM（candle 家族）、ASR（Whisper）、Rerank（bge/mxbai/jina）、Embedding（MiniLM）、Vision（YOLOv8 / RT-DETR / DETR）、Chronos2 | `candle`（默认） |
+| **burn** | burn 0.21（ndarray 后端） | TTS（VoxCPM 0.5B + VoxCPM2） | `voxcpm` |
+| **litert_lm** | litert_lm 0.1（子进程） | 仅 LLM（Gemma 3/4，通过 `lit` 二进制） | `litert` + `lit` 在 PATH 上 |
+| **mistralrs** | mistral.rs v0.8.22（基于 candle） | 仅 LLM（40+ 家族） | `mistralrs` |
+| **mage_vl** | neuron 原生 candle 移植 | 仅 VLM（`microsoft/Mage-VL`） | 随 `candle` feature 一并提供 |
+| **sherpa** | sherpa-onnx 1.13.x | ASR（SenseVoiceSmall） | `sherpa` |
+| **tract** | tract-onnx 0.21 | ASR（SenseVoiceSmall）、Decision（Laya）、Vision（ONNX 可插拔） | `tract` |
+| **ort** | onnxruntime | Vision（RF-DETR / Florence-2 / 自定义）、Decision（Laya，bit-exact 路径） | opt-in `ort` 集成或 `tract` 回退 |
+| **ultralytics** | ultralytics Python 子进程 | Vision（Grounding DINO） | 宿主自带 `ultralytics` |
+| **Cohere（托管）** | HTTP 代理 | Rerank | 无（无本地权重） |
+
+### 引擎概览
+
+上面的矩阵取代了旧的"一张总表 + 一张引擎表"。要点速览：
+
+- **candle** —— Hugging Face 的纯 Rust ML 框架，LLM / ASR / Rerank / Embedding / Chronos2 / Vision（YOLO 家族）的默认引擎。零系统依赖，单 Cargo feature。
+- **burn** —— Tracel.ai 的纯 Rust ML 框架，用于 TTS（VoxCPM 0.5B + VoxCPM2，vendored 自 [voxcpm_rs](https://github.com/madushan1000/voxcpm_rs)）。`--features voxcpm`。
+- **litert_lm** —— Google LiteRT-LM 通过 `litert_lm` Rust 绑定（围绕 `lit` 二进制的子进程池）。`--features litert` + `lit` 在 PATH 上；服务 Gemma 3/4。
+- **mistralrs** —— [mistral.rs](https://github.com/EricLBuehler/mistral.rs) v0.8.22；一个统一分发器，覆盖 40+ 家族，PagedAttention + ISQ 量化开箱即用。`--features mistralrs`。
+- **mage_vl** —— neuron 原生 candle 移植的 [Microsoft Mage-VL](https://huggingface.co/microsoft/Mage-VL)；MageViT + Qwen3-4B 解码器 + StreamMind gate。随默认 `candle` feature 一并提供；通过 `NEURON_LLM_RUNTIME=mage_vl` + `NEURON_MAGE_VL_SHARD_DIR` 激活。
+- **sherpa / tract / ort** —— 三个跑 ONNX 模型的引擎（ASR SenseVoice、Vision Florence-2 / RF-DETR、Decision Laya）。`tract` 是纯 Rust ONNX（`--features tract`）；`sherpa` 是官方的 onnxruntime 后端 Rust 绑定（`--features sherpa`）；`ort` 是 onnxruntime 绑定（由宿主集成）。规范见 [`docs/superpowers/specs/2026-09-26-sherpa-onnx-asr-backend.md`](docs/superpowers/specs/2026-09-26-sherpa-onnx-asr-backend.md)、[`docs/superpowers/specs/2026-09-01-mobile-phase-2-tract-onnx.md`](docs/superpowers/specs/2026-09-01-mobile-phase-2-tract-onnx.md)。
+- **ultralytics** —— Python 子进程，用于开放词汇检测（Grounding DINO）。宿主自带 `ultralytics`，neuron 只负责编排。
+- **Cohere（托管）** —— `/v1/rerank` 的 HTTP 代理。无本地权重，只要 `NEURON_COHERE_API_KEY`。
 
 ### 如何加载真实权重
 

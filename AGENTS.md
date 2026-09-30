@@ -352,7 +352,18 @@ Catalog dedup: the same `(engine, id)` may appear multiple times in `SUPPORTED_C
 - **Runtime**: `candle` — same `model_type = "llama"` dispatch as MiniCPM5-1B. `candle_arch::detect_arch` returns `CausalArch::Llama` and the structural fields (42 layers, GQA 2, hidden_size 2048, intermediate_size 6144, vocab_size 130560, `rope_theta=5_000_000`, `tie_word_embeddings=false`) are preserved end-to-end. Verified by `src/llm/candle_arch.rs::test_detect_arch_minicpm5_2b_dispatches_to_llama` against a synthetic config blob mirroring OpenBMB's published checkpoint spec (see `src/capabilities/catalog.rs` top-of-file doc-comment for the side-by-side 1B/2B field table).
 - **Hybrid `<think>`**: same `enable_thinking` chat-template flag as MiniCPM5-1B — no per-model code change needed.
 
-Other catalog families: Gemma 4 / Gemma 3n / Gemma 3 (litert runtime; gated on HF — requires license agreement in the user's HF account), Qwen 2.5 / Qwen 3 (candle), Llama 3 (candle), Phi-3 (candle), Mistral 7B (candle), ChatGLM-3 (candle), VoxCPM 0.5B (burn TTS), Whisper base (candle ASR), BGE / mxbai / jina rerankers (candle), all-MiniLM-L6-v2 (candle embedding), YOLO v8 / v11 / RT-DETR / DETR / RF-DETR / Florence-2 / Grounding DINO (vision).
+Other catalog families — loadable by capability, by backend. ✓ = the model is served by that backend today; the source of truth is `default_capabilities()` in `src/capabilities/catalog.rs` (see the README's "Supported Models" section for the full table including defaults + build flags):
+
+| Capability | candle | burn | litert | mistralrs | mage_vl | sherpa | tract | ort | ultralytics | Cohere |
+|---|---|---|---|---|---|---|---|---|---|---|
+| LLM | ✓ (Qwen2/3, Llama2/3, Phi-3, Mistral, ChatGLM, MiniCPM5) | | ✓ (Gemma 3/4) | ✓ (40+ families) | ✓ (`microsoft/Mage-VL`) | | | | | |
+| TTS | | ✓ (VoxCPM 0.5B + VoxCPM2) | | | | | | | | |
+| ASR | ✓ (Whisper) | | | | | ✓ | ✓ | | | |
+| Rerank | ✓ (BGE / mxbai / jina) | | | | | | | | | ✓ (hosted) |
+| Embedding | ✓ (MiniLM) | | | | | | | | | |
+| Vision | ✓ (YOLOv8 / RT-DETR / DETR) | | | | | | ✓ | ✓ | ✓ (Grounding DINO) | |
+| Chronos2 | ✓ | | | | | | | | | |
+| Decision | | | | | | | ✓ | ✓ (bit-exact path) | | |
 
 ## Open TODOs (in source)
 
