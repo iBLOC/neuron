@@ -278,6 +278,8 @@ Legend: candle · burn · litert · mistralrs · mage_vl · sherpa · tract · o
 
 Architecture dispatch (candle): Qwen 2/2.5/3/3.5, Llama 2/3 / 3.1 / 3.2, Phi-3 (mini/small/medium), Mistral 7B, ChatGLM3 — auto-detected from `config.json` `model_type`. mistral.rs handles its own family list (Qwen/Llama/Mistral/DeepSeek/GLM/Granite/GPT-OSS/Gemma 4/Qwen 3-VL/Phi 4 multimodal, …). License: Apache-2.0 / MIT.
 
+> **Why is `mage_vl` its own column instead of a row under `candle`?** `MageVlRuntime` (`src/mage_vl/runtime.rs`) implements `engine::LlmRuntime` directly on top of candle — its own MageViT vision tower (24-layer codec-native ViT, 3D RoPE, I/P-frame patch sparsity) plus a Mage-specific multimodal token sequencer (`build_qwen3_inputs`) plus per-request KV-cache reset. candle-transformers ships none of those, so the model is not loadable by the generic candle LLM runtime; the `mage_vl` engine is a one-model dedicated runtime that happens to call candle ops underneath. The column is the cleanest way to express "this model id has its own engine, even though both columns share the same candle primitives".
+
 ### TTS (audio speech)
 
 | Model id | burn |

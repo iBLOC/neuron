@@ -365,6 +365,8 @@ Other catalog families — loadable by capability, by backend. ✓ = the model i
 | Chronos2 | ✓ | | | | | | | | | |
 | Decision | | | | | | | ✓ | ✓ (bit-exact path) | | |
 
+**`mage_vl` is a dedicated column even though it sits on candle.** `MageVlRuntime` (`src/mage_vl/runtime.rs`) implements `engine::LlmRuntime` on top of candle directly — its own MageViT vision tower + Mage-specific multimodal token sequencer + per-request KV-cache reset. candle-transformers ships none of those, so the generic candle LLM runtime cannot serve `microsoft/Mage-VL`. Listing it as a candle row would be misleading; the dedicated column expresses "this model id has its own engine, even though both share the candle primitives".
+
 ## Open TODOs (in source)
 
 _The runtime registry refactor (2026-06-12) added `LlmRuntimeRegistry`, `TtsRuntimeRegistry`, `AsrRuntimeRegistry`, `RerankRuntimeRegistry`, `EmbeddingRuntimeRegistry` — each with lazy load + resource checking. The previous singleton-runtime era entries (streaming, weight-conversion) were completed in `d9e131d` and `11fe410`. All three post-refactor gaps (capability-aware registration processing, shortcut reflecting first registered model, `embedding_loaded` in `NeuronHealth`) were closed in the 2026-06-16 follow-up commit._

@@ -279,6 +279,8 @@ v1 范围：调度器仅覆盖 LLM 能力（这是目前唯一存在多模型常
 
 架构分发（candle）：Qwen 2/2.5/3/3.5、Llama 2/3 / 3.1 / 3.2、Phi-3（mini/small/medium）、Mistral 7B、ChatGLM3 —— 按 `config.json` 中的 `model_type` 自动识别。mistral.rs 自带家族覆盖（Qwen/Llama/Mistral/DeepSeek/GLM/Granite/GPT-OSS/Gemma 4/Qwen 3-VL/Phi 4 多模态 等）。许可证：Apache-2.0 / MIT。
 
+> **为什么 `mage_vl` 是单独一列,而不是 candle 那行下的一个 model id?** `MageVlRuntime`（`src/mage_vl/runtime.rs`）在 candle 之上自己实现 `engine::LlmRuntime`：自研 MageViT 视觉塔（24 层 codec-native ViT、3D RoPE、I/P 帧 patch 稀疏）+ Mage 专属的多模态 token 排序（`build_qwen3_inputs`）+ 每请求 KV cache 重置。candle-transformers 都没提供这些，所以通用 candle LLM 运行时跑不动这个模型；`mage_vl` 引擎就是一个面向单模型的专用运行时,底层调用的是同一套 candle 算子。这样单列比在 candle 那行塞一个 model id 更准确。
+
 ### TTS（audio speech）
 
 | 模型 id | burn |
