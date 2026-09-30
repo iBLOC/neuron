@@ -19,6 +19,12 @@ mod error;
 mod handlers;
 mod state;
 
+// In-process inference entry — embedding hosts (telencephalon →
+// encephalon → shadow) call this directly instead of looping an HTTP
+// request back to the listener. Same wire contract as the POST
+// routes (`/v1/chat/completions`, `/v1/messages`).
+pub use dispatch::adapter_dispatch;
+pub use dispatch::adapter_dispatch_at;
 pub use error::ServerError;
 pub use handlers::{
     audio_speech, audio_transcriptions, chat_completions, decisions, embedding_handler, forecast,
