@@ -23,9 +23,10 @@
       "note": "2.52B bf16 ~6-7 GB VRAM per OpenBMB's published spec"
     },
     "qwen3-0.6b": {
-      "bytes": { "cpu": 3900000000, "cuda": 1950000000, "metal": 1950000000, "default": 3900000000 },
-      "source": "derived",
-      "params_billion": 0.75
+      "bytes": { "cpu": 2945822990, "cuda": 1950000000, "metal": 1950000000, "default": 3900000000 },
+      "source": "bench",
+      "params_billion": 0.75,
+      "note": "cpu value measured 2026-09-30: scheduler unload RSS delta, f32 dtype, EWMA of two observations"
     },
     "Qwen/Qwen3-0.6B": {
       "bytes": { "cpu": 3900000000, "cuda": 1950000000, "metal": 1950000000, "default": 3900000000 },
@@ -34,9 +35,10 @@
       "note": "mistralrs registry id for the same weights"
     },
     "qwen2.5-0.5b": {
-      "bytes": { "cpu": 2600000000, "cuda": 1300000000, "metal": 1300000000, "default": 2600000000 },
-      "source": "derived",
-      "params_billion": 0.5
+      "bytes": { "cpu": 2424637184, "cuda": 1300000000, "metal": 1300000000, "default": 2600000000 },
+      "source": "bench",
+      "params_billion": 0.5,
+      "note": "cpu value measured 2026-09-30: scheduler unload RSS delta, bf16 checkpoint loaded as f32"
     },
     "qwen3-1.7b": {
       "bytes": { "cpu": 9400000000, "cuda": 4700000000, "metal": 4700000000, "default": 9400000000 },

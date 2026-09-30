@@ -213,6 +213,7 @@ cargo build --bench asr_speed --features tract,sherpa  # in-process tract-vs-she
 cargo bench  --bench asr_speed --features tract,sherpa  # writes target/asr-speed-compare.md
 cargo build --bench model_matrix --features "candle,tract,sherpa,voxcpm"  # per-cap × per-engine matrix harness compiles
 cargo bench  --bench model_matrix --features "candle,tract,sherpa,voxcpm"  # writes target/model-matrix.md (requires neuron_server on :18083)
+cargo run --release --example scheduler_smoke --features candle  # optional real-weights scheduler verification: coexistence + drain-then-swap + admin evict + RSS observation (needs 2 downloaded LLM models)
 cargo build --lib                                 # library-only build (no standalone binary)
 cargo bench --no-run --bench perf                 # 14 Criterion benchmarks compile
 cargo bench --bench perf -- --quick               # fast CI smoke
