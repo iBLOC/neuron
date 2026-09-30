@@ -3,8 +3,8 @@
 //! VoxCPM (https://huggingface.co/openbmb/VoxCpm-0.5B) is a zero-shot TTS model
 //! supporting Chinese and English with voice cloning.
 //!
-//! Enable with: `NEURON_TTS_RUNTIME=candle` and set `NEURON_TTS_MODEL_PATH` to a
-//! directory containing:
+//! Enable with: `NEURON_TTS_RUNTIME=burn` (or the historical alias `voxcpm`) and
+//! set `NEURON_TTS_MODEL_PATH` to a directory containing:
 //! - config.json (VoxCPMConfig)
 //! - tokenizer.json
 //! - model.mpk (pre-converted burn weights)
@@ -233,7 +233,8 @@ impl TtsRuntime for VoxCpmTtsRuntime {
             let loaded = inner.as_ref().ok_or_else(|| {
                 NeuronError::not_initialized(
                     "VoxCpmTtsRuntime not loaded. Call load() first or check that \
-                     NEURON_TTS_RUNTIME=candle and NEURON_TTS_MODEL_PATH is valid."
+                     NEURON_TTS_RUNTIME=burn (alias: voxcpm) and \
+                     NEURON_TTS_MODEL_PATH is valid."
                         .to_string(),
                 )
             })?;
@@ -308,7 +309,8 @@ impl TtsRuntime for VoxCpmTtsRuntime {
             inner.as_ref().cloned().ok_or_else(|| {
                 NeuronError::not_initialized(
                     "VoxCpmTtsRuntime not loaded. Call load() first or check that \
-                     NEURON_TTS_RUNTIME=candle and NEURON_TTS_MODEL_PATH is valid."
+                     NEURON_TTS_RUNTIME=burn (alias: voxcpm) and \
+                     NEURON_TTS_MODEL_PATH is valid."
                         .to_string(),
                 )
             })?
