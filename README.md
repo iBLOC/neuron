@@ -1,5 +1,7 @@
 # neuron
 
+> **English** · [中文](./README.zh-CN.md)
+
 A Rust inference engine for **LLM / TTS / ASR / Rerank / Embedding / Vision** that exposes a **standard OpenAI-compatible API** (plus Anthropic Messages v1 for chat). Designed as an in-process library that Rust hosts embed into their own process to serve the API — any host that wants OpenAI-compatible inference without standing up a separate daemon can use neuron.
 
 > **neuron** = neuron (神经元)
