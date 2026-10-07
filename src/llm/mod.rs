@@ -197,6 +197,13 @@ pub enum LlmImpl {
     Litert,
     #[cfg(feature = "mistralrs")]
     MistralRs,
+    /// Stub backend used by `LlmRuntimeRegistry` unit tests so they
+    /// can drive `runtime_for`'s cache path without real weights on
+    /// disk. `parse("stub")` accepts it; `runtime_for` with a stub
+    /// entry produces the explicit "not implemented" error rather
+    /// than trying to load a non-existent model. Never registered by
+    /// production code paths.
+    Stub,
 }
 
 impl LlmImpl {
@@ -208,6 +215,7 @@ impl LlmImpl {
             Self::Litert => "litert",
             #[cfg(feature = "mistralrs")]
             Self::MistralRs => "mistralrs",
+            Self::Stub => "stub",
         }
     }
 
@@ -219,6 +227,7 @@ impl LlmImpl {
             "litert" => Ok(Self::Litert),
             #[cfg(feature = "mistralrs")]
             "mistralrs" => Ok(Self::MistralRs),
+            "stub" => Ok(Self::Stub),
             other => Err(format!("unknown LlmImpl: {other}")),
         }
     }
@@ -470,6 +479,18 @@ mod tests {
     #[test]
     fn test_llm_impl_parse_unknown_error() {
         assert!(LlmImpl::parse("nonexistent").is_err());
+    }
+
+    #[test]
+    fn test_llm_impl_stub_roundtrip() {
+        // `stub` is the test-only backend identifier used by
+        // LlmRuntimeRegistry's unload-and-reload invariant
+        // tests; verify it parses + stringifies consistently so
+        // future contributors don't accidentally break either
+        // direction.
+        let parsed = LlmImpl::parse("stub").expect("stub is a valid impl id");
+        assert_eq!(parsed.as_str(), "stub");
+        assert_eq!(parsed, LlmImpl::Stub);
     }
 
     #[cfg(feature = "candle")]
