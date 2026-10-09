@@ -138,6 +138,22 @@ Load-bearing points:
    `×(800/W, 800/H)` to reach source pixels. The op set (GridSample,
    ScatterND, dynamic Range) exceeds tract 0.21 — tract-only builds ignore
    the file with a warning. `NEURON_OCR_LAYOUT=false` skips it.
+9. **Table structure: SLANet_plus export is broken, use SLANeXt** (spiked
+   2026-10-09, scratch under `target/ocr-table-spike/`): the official
+   `PaddlePaddle/SLANet_plus_onnx` ONNX runs but its Loop-based
+   autoregressive decoder is decoupled from the image — white noise, a
+   blank canvas and a real table all decode to the same degenerate
+   `<tr> rowspan="20" </tr>` sequence (RGB vs BGR identical too). The
+   working PP-StructureV3 stack is **SLANeXt** (non-autoregressive, no
+   Loop — that's why it exports cleanly): HF `PaddlePaddle/SLANeXt_wired_onnx`
+   / `SLANeXt_wireless_onnx` (~368 MB each, wired = bordered tables),
+   `PP-LCNet_x1_0_table_cls_onnx` (6.8 MB, wired/wireless router) and
+   `RT-DETR-L_wireless_table_cell_det_onnx` (129 MB). Reference decode:
+   ppocr-rs (`github.com/dariofinardi/PaddleOCR-OCR-rs`, Apache-2.0) —
+   512 square canvas, ImageNet norm on **RGB** (the table ymls also lie
+   about BGR), `<td`-like tokens carry the loc regression; the SLANeXt
+   vocab is `table_structure_dict.txt`-shaped with merged `<td></td>`
+   tokens. Not wired yet — next increment.
 
 ### VoxCPM2 (loadable, 2026-09-27)
 
