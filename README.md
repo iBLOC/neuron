@@ -67,7 +67,7 @@ let config = NeuronConfig::new()
 | `/v1/audio/transcriptions` | POST | OpenAI Audio | Speech-to-text (multipart) |
 | `/v1/rerank` | POST | OpenAI Rerank | Rerank documents by relevance to a query |
 | `/v1/embeddings` | POST | OpenAI Embeddings | Text embeddings (single string or batch) |
-| `/v1/vision/detect` | POST | neuron (YOLO-shaped) | YOLOv8 / RT-DETR / DETR / Grounding DINO object detection (with optional LoRA-merged classes) |
+| `/v1/vision/detect` | POST | neuron (YOLO-shaped) | YOLOv8 / RT-DETR / DETR object detection (with optional LoRA-merged classes) |
 | `/v1/vision/classify` | POST | neuron | Image classification (top-K class probabilities) |
 | `/v1/vision/segment` | POST | neuron | Instance segmentation (per-pixel masks) |
 | `/v1/vision/pose` | POST | neuron | Pose estimation (COCO 17-keypoint skeleton) |
@@ -75,7 +75,7 @@ let config = NeuronConfig::new()
 | `/v1/vision/lora/list` | GET | neuron | List all registered LoRA adapters |
 | `/v1/vision/lora/{id}` | GET / DELETE | neuron | Inspect / remove a LoRA adapter |
 | `/v1/vision/gate/score` | POST | neuron | StreamMind gate score (Mage-VL event gate — p_speak per codec window) |
-| `/v1/ocr/recognize` | POST | neuron | PP-OCR text detection + recognition (lines + boxes + confidence, reading order; `tract` feature) |
+| `/v1/ocr/recognize` | POST | neuron | PP-OCR text detection + recognition (lines + boxes + confidence, reading order; optional layout regions + table HTML; `ocr` feature — `tract` or `ort`) |
 | `/v1/forecast` | POST | neuron | Chronos2 zero-shot time-series forecast |
 | `/v1/decisions` | POST | neuron (Laya-shaped) | Score a question's options and return a calibrated decision |
 | `/v1/catalog/sources` | GET | neuron | List registered download sources (`huggingface` / `hf-mirror` / `modelscope`) |
@@ -253,6 +253,7 @@ curl -X DELETE http://localhost:8083/v1/scheduler/models/qwen3-0.6b
 | `NEURON_SCHEDULER_MAX_CONCURRENCY` | `4` | Concurrent leases per resident model |
 | `NEURON_SCHEDULER_MAX_QUEUE_WAIT_SECS` | `300` | Queue dwell time before `503 queue_timeout` |
 | `NEURON_SCHEDULER_PLATFORM` | from `NEURON_DEVICE` | Platform key into the memory profile (`cpu` / `cuda` / `metal`) |
+| `NEURON_SCHEDULER_PROFILE_PATH` | (unset) | Override where observed memory-profile overrides persist (default `<first model dir>/scheduler/observed_profiles.json`) |
 
 v1 scope: the scheduler gates the LLM capability (the only one with multiple swappable resident weights today). See `docs/superpowers/specs/2026-09-29-model-scheduler.md` for the full design.
 
@@ -382,7 +383,7 @@ curl -X POST http://localhost:8083/v1/ocr/recognize \
   -d '{"model":"ppocrv6-medium","image":{"type":"image_url","image_url":{"url":"file:///tmp/invoice.png"}}}'
 ```
 
-Performance note: the tract executor pays a per-shape plan compile and runs these CNNs 5-12× slower than onnxruntime on CPU. The `ort` executor (`--features ort`, `NEURON_OCR_EXECUTOR=ort`) runs dynamic shapes natively — measured 10.3× faster end-to-end on the smoke workload (526 ms vs 5.4 s including first compiles) with byte-identical recognition output. It links onnxruntime dynamically: the host supplies `onnxruntime.dll` via `ORT_DYLIB_PATH` (or `PATH`) — the static `download-binaries` mode conflicts with /MT CRT objects emitted by cc-based deps on Windows (LNK2038).
+Performance note: the tract executor pays a per-shape plan compile and runs these CNNs 5-12× slower than onnxruntime on CPU. The `ort` executor (`--features ort`, `NEURON_OCR_EXECUTOR=ort`) runs dynamic shapes natively — measured 10.3× faster end-to-end on the smoke workload (526 ms vs 5.4 s including first compiles) with byte-identical recognition output. It links onnxruntime dynamically: the host supplies `onnxruntime.dll` via `ORT_DYLIB_PATH` (or `PATH`) — the static `download-binaries` mode conflicts with /MT CRT objects emitted by cc-based deps on Windows (LNK2038). ort sessions live in a fixed pool (`NEURON_OCR_SESSIONS`, default 2) because its `run` takes `&mut self`; tract plans are shared through `Arc` and need no pool.
 
 ### Engine → capability cross-reference
 
@@ -409,7 +410,7 @@ The matrices above replace the older "one big model-type table + one engine tabl
 - **litert_lm** — Google LiteRT-LM via the `litert_lm` Rust binding (subprocess pool around the `lit` binary). `--features litert` + `lit` on PATH; serves Gemma 3/4.
 - **mistralrs** — [mistral.rs](https://github.com/EricLBuehler/mistral.rs) v0.8.22; one unified dispatcher that handles 40+ model families with PagedAttention + ISQ quantization. `--features mistralrs`.
 - **mage_vl** — neuron-native candle port of [Microsoft Mage-VL](https://huggingface.co/microsoft/Mage-VL); MageViT + Qwen3-4B decoder + StreamMind gate. Bundled with the default `candle` feature; activated with `NEURON_LLM_RUNTIME=mage_vl` + `NEURON_MAGE_VL_SHARD_DIR`.
-- **sherpa / tract / ort** — three engines for ONNX-based models (ASR SenseVoice, Vision Florence-2 / RF-DETR, Decision Laya). `tract` is pure-Rust ONNX (`--features tract`); `sherpa` is the official onnxruntime-backed Rust binding (`--features sherpa`); `ort` is the onnxruntime binding (host-wired). Specs: [`docs/superpowers/specs/2026-09-26-sherpa-onnx-asr-backend.md`](docs/superpowers/specs/2026-09-26-sherpa-onnx-asr-backend.md), [`docs/superpowers/specs/2026-09-01-mobile-phase-2-tract-onnx.md`](docs/superpowers/specs/2026-09-01-mobile-phase-2-tract-onnx.md).
+- **sherpa / tract / ort** — three engines for ONNX-based models (ASR SenseVoice, Vision Florence-2 / RF-DETR, Decision Laya, OCR PP-OCR). `tract` is pure-Rust ONNX (`--features tract`); `sherpa` is the official onnxruntime-backed Rust binding (`--features sherpa`); `ort` is the onnxruntime binding (host-wired). Specs: [`docs/superpowers/specs/2026-09-26-sherpa-onnx-asr-backend.md`](docs/superpowers/specs/2026-09-26-sherpa-onnx-asr-backend.md), [`docs/superpowers/specs/2026-09-01-mobile-phase-2-tract-onnx.md`](docs/superpowers/specs/2026-09-01-mobile-phase-2-tract-onnx.md).
 - **Cohere (hosted)** — HTTP proxy for `/v1/rerank`. No local weights; just `NEURON_COHERE_API_KEY`.
 
 Note: the previous release advertised an `ultralytics` Python-subprocess backend for Grounding DINO. That column is **removed** — neuron is pure-Rust and does not shell out to Python; the Grounding DINO catalog entry was dropped with it. Open-vocabulary detection stays on the `ort`/`tract`/`onnxruntime` line (Florence-2 is the working vision-language model in that column).
@@ -576,7 +577,7 @@ NEURON_LLM_RUNTIME=mistralrs NEURON_LLM_DEFAULT_MODEL="Qwen/Qwen3-0.6B" ./neuron
 - **Status (2026-07-03)**:
   - All preprocessing + per-task dispatch + response shape wired
   - LoRA class extension end-to-end (class-ID allocation, runtime validation, `lora_id` source attribution)
-  - YOLOv8 / RT-DETR / DETR / Florence-2 / Grounding DINO forward-pass architectures are placeholders pending real weights — call sites return `not_implemented` until the architecture is implemented
+  - YOLOv8 / RT-DETR / DETR / Florence-2 forward-pass architectures are placeholders pending real weights — call sites return `not_implemented` until the architecture is implemented
   - 7 model families ready to be wired into runtimes: each requires only the architecture + safetensors loader
 - **Dynamic class extension via LoRA**: register custom YOLO LoRA adapters at runtime to recognize new classes beyond the 80 base COCO classes (see below)
 
@@ -850,11 +851,12 @@ Highlights since the 2026-06 snapshot below. Counts and feature dates match `AGE
 - VoxCPM2 model-level streaming: the patch-level pipeline (`generate_streaming` + stateful `StreamingVaeDecoder`) is implemented and unit-tested, but not yet wired to `/v1/audio/speech` — on the ndarray backend streamed output still deviates from the full decode beyond benign boundary taps (burn conv view/layout issue under investigation). `stream: true` currently returns chunked full-synthesis WAV, which is fidelity-safe.
 - MNN mobile/edge backend (Sprint 4 Phase 3, design spec [`docs/superpowers/specs/2026-09-01-mnn-mobile-backend-design.md`](docs/superpowers/specs/2026-09-01-mnn-mobile-backend-design.md)).
 
-**Verification commands** (2026-10-08):
+**Verification commands** (2026-10-09):
 
 ```bash
 cargo test --lib                                                       # 679 passed; 0 failed; 5 ignored
-cargo test --lib --features tract                                      # 733 passed; 0 failed (adds decision + vision-ONNX + sensevoice + full PP-OCR pipeline suites)
+cargo test --lib --features tract                                      # 739 passed; 0 failed (adds decision + vision-ONNX + sensevoice + full PP-OCR pipeline suites)
+cargo test --lib --features tract,ort                                  # 750 passed; 0 failed (adds the ort-executor OCR + layout suites)
 cargo test --lib --features voxcpm                                     # (adds VoxCPM2 suites; V1 audiovae roundtrip tests are slow)
 cd docs && npm ci --no-audit --no-fund && npx vitepress build           # VitePress site builds
 ```

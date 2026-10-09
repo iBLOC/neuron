@@ -1,6 +1,6 @@
 # neuron (神经元) — AGENTS guide
 
-**Status:** READ-ONLY contributor reference. Updated 2026-10-09 (**OCR capability (PP-OCR) landed** — `POST /v1/ocr/recognize`, config-driven registration, tract **and ort** executors behind the `ocr` meta feature (`NEURON_OCR_EXECUTOR`), DB++ postprocess + CTC, multilingual rec packs routed by `languages`, optional PP-DocLayoutV3 layout model (`layout.onnx`, ort only), ort measured 10.3× faster end-to-end, see the "OCR (PP-OCR, loadable)" section; **679 lib tests** default / **739 with `--features tract`** / **715 with `--features ort`** / **746 with `tract,ort`** as of 2026-10-09; prior 2026-09-27 baseline: post-candle 0.11 upgrade per `huggingface/candle.git#aebc405`; post-`f643c1c` LLM auto-registration + USERPROFILE fallback on Windows GUI processes; **VoxCPM2 (2B/48 kHz) local inference landed** — `NEURON_TTS_RUNTIME=voxcpm2`, direct checkpoint load, see the "VoxCPM2 (loadable)" section; **model scheduler landed** — bounded-memory LLM swap queue behind `/v1/chat/completions` + `/v1/messages`, see the "Model scheduler" bullet and `docs/superpowers/specs/2026-09-29-model-scheduler.md`; GitHub Pages CI now base-URL-configured + adds a `lychee` link-check job; prior 2026-09-25 baseline: post-rename `neure → neuron` per commit `e3d2c41` (2026-09-21); `AppState::register_engine` capability per `bccef7c`; earlier 2026-07-19 baseline: license switch + Shadow decoupling).
+**Status:** READ-ONLY contributor reference. Updated 2026-10-09 (**OCR capability (PP-OCR) landed** — `POST /v1/ocr/recognize`, config-driven registration, tract **and ort** executors behind the `ocr` meta feature (`NEURON_OCR_EXECUTOR`), DB++ postprocess + CTC, multilingual rec packs routed by `languages`, optional PP-DocLayoutV3 layout model (`layout.onnx`, ort only), ort measured 10.3× faster end-to-end, see the "OCR (PP-OCR, loadable)" section; **679 lib tests** default / **739 with `--features tract`** / **715 with `--features ort`** / **750 with `tract,ort`** as of 2026-10-09; prior 2026-09-27 baseline: post-candle 0.11 upgrade per `huggingface/candle.git#aebc405`; post-`f643c1c` LLM auto-registration + USERPROFILE fallback on Windows GUI processes; **VoxCPM2 (2B/48 kHz) local inference landed** — `NEURON_TTS_RUNTIME=voxcpm2`, direct checkpoint load, see the "VoxCPM2 (loadable)" section; **model scheduler landed** — bounded-memory LLM swap queue behind `/v1/chat/completions` + `/v1/messages`, see the "Model scheduler" bullet and `docs/superpowers/specs/2026-09-29-model-scheduler.md`; GitHub Pages CI now base-URL-configured + adds a `lychee` link-check job; prior 2026-09-25 baseline: post-rename `neure → neuron` per commit `e3d2c41` (2026-09-21); `AppState::register_engine` capability per `bccef7c`; earlier 2026-07-19 baseline: license switch + Shadow decoupling).
 
 ## What neuron is
 
@@ -137,8 +137,9 @@ Load-bearing points:
    `im_shape`=(h,w), `scale_factor`=(800/h, 800/w), output boxes
    `×(800/W, 800/H)` to reach source pixels. The op set (GridSample,
    ScatterND, dynamic Range) exceeds tract 0.21 — tract-only builds ignore
-   the file with a warning. `NEURON_OCR_LAYOUT=false` skips it.
-10. **Table structure (SLANeXt wired, `ort` only)**: `table.onnx`
+   the file with a warning. (No runtime kill-switch — omitting the file is
+   the way to skip it.)
+9. **Table structure (SLANeXt wired, `ort` only)**: `table.onnx`
    (`PaddlePaddle/SLANeXt_wired_onnx`, ~368 MB) in the model dir + layout
    running turns every `table` layout region into assembled `<table>` HTML
    on `LayoutRegion::html`: the region is re-cropped, SLANeXt predicts one
@@ -154,9 +155,9 @@ Load-bearing points:
    table ymls lie about BGR like layout's does), keep-ratio into 512²,
    top-left paste, `/255` + ImageNet. Known v1 limits: overlapping quads
    can duplicate/merge cells on synthetic tables (dedupe needs real-world
-   tuning); colspan/rowspan spans are not reconstructed.
-   `NEURON_OCR_TABLES=false` skips it.
-9. **Table structure: SLANet_plus export is broken, use SLANeXt** (spiked
+   tuning); colspan/rowspan spans are not reconstructed. Omitting
+   `table.onnx` skips it (no runtime kill-switch).
+10. **Table structure: SLANet_plus export is broken, use SLANeXt** (spiked
    2026-10-09, scratch under `target/ocr-table-spike/`): the official
    `PaddlePaddle/SLANet_plus_onnx` ONNX runs but its Loop-based
    autoregressive decoder is decoupled from the image — white noise, a
@@ -205,7 +206,7 @@ The OpenBMB 2026-04 release of VoxCPM (2B params, 48 kHz AudioVAE V2, 30 languag
 
 6. **Models live under `$NEURON_MODEL_DIRS` (default `~/.neuron/models/`)** in `{engine}/{id}/` subdirectories. `NEURON_MODEL_DIRS` is a colon-separated list of roots; the first root containing a given model wins on collision. The legacy single-root `NEURON_MODEL_DIR` is still honored for backward compatibility. Each engine knows how to find its own files inside the subtree.
 
-7. **The HTTP endpoints are stable**. Adding a new endpoint means adding a route + handler + (for OpenAI/Anthropic-compat ones) preserving the byte-for-byte shape. The dispatch endpoint `/v1/messages` is currently the only endpoint routed through the `ApiAdapter` system; all other endpoints still go through their dedicated handlers. Future work will move the OpenAI endpoints through `adapter_dispatch` too.
+7. **The HTTP endpoints are stable**. Adding a new endpoint means adding a route + handler + (for OpenAI/Anthropic-compat ones) preserving the byte-for-byte shape. `/v1/chat/completions` and `/v1/messages` are routed through the `ApiAdapter` (`adapter_dispatch`) system; all other endpoints still go through their dedicated handlers. Future work will move the remaining OpenAI endpoints through `adapter_dispatch` too.
 
    Current routes (in `src/server/mod.rs`):
    - `GET /health`, `GET /v1/info` — liveness
@@ -329,7 +330,7 @@ points if you touch it:
 ```bash
 cargo test --lib                                  # 679 unit tests (src/**/mod.rs) — 0 failures (2026-10-09; +15 OCR capability/DTO/registry/handler tests on the 2026-10-08 baseline of 664)
 cargo test --lib --features voxcpm                # 709 unit tests — 0 failures (VoxCPM2 adds the weights/model/runtime/clone-audio/streaming suites; two pre-existing V1 audiovae roundtrip tests are slow, ~5 min, on ndarray)
-cargo test --lib --features tract                 # 733 unit tests — 0 failures (tract adds the decision + vision-ONNX + sensevoice paths + the full PP-OCR pipeline suites: DB++ postprocess, CTC decode, preprocess, paddle runtime)
+cargo test --lib --features tract                 # 739 unit tests — 0 failures (tract adds the decision + vision-ONNX + sensevoice paths + the full PP-OCR pipeline suites: DB++ postprocess, CTC decode, preprocess, paddle runtime)
 cargo test --lib --features ort                   # 715 unit tests — 0 failures (the PP-OCR pipeline suites on the ort executor + the layout suites; needs ORT_DYLIB_PATH only for the runtime, not the tests)
 cargo test --lib --features tract,sherpa          # 695 unit tests — 0 failures (sherpa adds SherpaAsrRuntime + from_dir + the wav/onnx_meta/fbank/sensevoice coverage)
 cargo build --bench asr_speed --features tract,sherpa  # in-process tract-vs-sherpa benchmark compiles
@@ -358,13 +359,23 @@ Run all three before submitting a PR. **All must pass**.
 | `asr_registry` | `Arc<AsrRuntimeRegistry>` | Primary ASR model registry |
 | `rerank_registry` | `Arc<RerankRuntimeRegistry>` | Primary Rerank model registry |
 | `embedding_registry` | `Arc<EmbeddingRuntimeRegistry>` | Primary Embedding model registry |
-| `engines` | `Arc<CapabilityRegistries>` | New (post-plugin-architecture): per-capability engine registry with `Arc<dyn AnyCapabilityEngine>` entries. Populated via `register_engine(...)` on `NeuronHandle`. Used by `adapter_dispatch` for `/v1/messages` and any future adapter-routed endpoint. |
+| `vision_registry` | `Arc<VisionRuntimeRegistry>` | Primary Vision model registry |
+| `ocr_registry` | `Arc<OcrRuntimeRegistry>` | Primary OCR (PP-OCR) model registry |
+| `decision_registry` | `Arc<DecisionRuntimeRegistry>` | Primary Decision (Laya) model registry |
+| `chronos2_registry` | `Arc<Chronos2Registry>` | Chronos2 forecasting registry (backing `/v1/forecast`) |
+| `vision_lora_registry` | `Arc<vision::LoraRegistry>` | Dynamically registered Vision LoRA adapters |
+| `llm_scheduler` | `Arc<scheduler::ModelScheduler>` | Bounded-memory LLM scheduler (leases, queue, evictions) |
+| `mage_vl_gate` | `Arc<mage_vl::http::GateRuntime>` | Mage-VL StreamMind event-gate runtime (`/v1/vision/gate/score`) |
+| `engines` | `Arc<CapabilityRegistries>` | New (post-plugin-architecture): per-capability engine registry with `Arc<dyn AnyCapabilityEngine>` entries. Populated via `register_engine(...)` on `NeuronHandle`. Used by `adapter_dispatch` for `/v1/chat/completions` + `/v1/messages` and any future adapter-routed endpoint. |
 | `adapters` | `Arc<AdapterRegistry>` | New (post-plugin-architecture): per-path `Arc<dyn ApiAdapter>` entries. Built-in adapters: `OpenAiChatAdapter` (`/v1/chat/completions`), `AnthropicMessagesAdapter` (`/v1/messages`). Hosts can register additional adapters via `register_adapter(...)`. |
 | `llm` | `Arc<dyn LlmRuntime>` | Shortcut: first registered LLM (backward compat) |
 | `tts` | `Arc<dyn TtsRuntime>` | Shortcut: first registered TTS (backward compat) |
 | `asr` | `Arc<dyn AsrRuntime>` | Shortcut: first registered ASR (backward compat) |
 | `rerank` | `Arc<dyn RerankRuntime>` | Shortcut: first registered Rerank (backward compat) |
 | `embedding` | `Arc<dyn EmbeddingRuntime>` | Shortcut: first registered Embedding (backward compat) |
+| `vision` | `Arc<dyn VisionRuntime>` | Shortcut: first registered Vision (backward compat) |
+| `ocr` | `Arc<dyn OcrRuntime>` | Shortcut: first registered OCR (backward compat) |
+| `decision` | `Arc<dyn DecisionRuntime>` | Shortcut: first registered Decision (backward compat) |
 | `config` | `NeuronConfig` | Effective config |
 | `puller` | `Arc<Puller>` | Download job manager |
 | `catalog` | `Arc<Catalog>` | Model registry (supported + available models) |
@@ -428,17 +439,15 @@ neuron has **no direct dependency** on any particular host — the integration c
 | `NEURON_SCHEDULER_MAX_CONCURRENCY` | `4` | Concurrent leases per resident model |
 | `NEURON_SCHEDULER_MAX_QUEUE_WAIT_SECS` | `300` | Queue dwell time before `503 queue_timeout` (`0` = forever) |
 | `NEURON_SCHEDULER_PLATFORM` | from `NEURON_DEVICE` | Platform key into the memory profile (`cpu` \| `cuda` \| `metal`); RSS observation runs on `cpu` only |
+| `NEURON_SCHEDULER_PROFILE_PATH` | (unset) | Override where observed memory-profile overrides persist (default `<first model dir>/scheduler/observed_profiles.json`) |
 | `NEURON_OCR_MODEL_PATH` | (unset) | Path to the PP-OCR pipeline directory (`det.prepped.onnx` + `rec.prepped.onnx` + `dict.txt`, all prepped with `scripts/prep-ppocr-onnx.py`); falls back to scanning `<model_root>/ocr/<model_id>`. Requires the `ocr` feature (`tract` or `ort`) |
 | `NEURON_OCR_EXECUTOR` | `tract` | `tract` \| `ort` — PP-OCR session executor. `ort` is ~10× faster on CPU but loads onnxruntime at runtime |
-| `NEURON_OCR_LAYOUT` | `true` | `false` skips an optional `layout.onnx` (PP-DocLayoutV3) even when present in the model dir |
-| `NEURON_OCR_TABLES` | `true` | `false` skips an optional `table.onnx` (SLANeXt wired) even when present; needs layout for the table regions |
 | `NEURON_OCR_SESSIONS` | `2` | ort sessions per graph (its `run` takes `&mut`, so concurrent requests need one session each; tract plans are `run(&self)` and ignore this) |
 | `ORT_DYLIB_PATH` | (unset) | Path to `onnxruntime.dll` for the `ort` crate's load-dynamic linking (needed by the OCR `ort` executor; falls back to `PATH` lookup) |
 
 ## Where the design specs live
 
-- `docs/superpowers/specs/` — current design docs (7+). These are **maintainer-facing**: spec rationales, design pivots, and post-mortems for major features. End users do not need them.
-- `docs/superpowers/plans/` — implementation plans (commit-by-commit task breakdowns). Used by contributors driving a spec to completion.
+- `docs/superpowers/specs/` — current design docs (8). These are **maintainer-facing**: spec rationales, design pivots, and post-mortems for major features. End users do not need them.
 
 When you add a new model type or engine, write a one-page spec under `docs/superpowers/specs/` and link it from the README.
 

@@ -1,6 +1,6 @@
 # Architecture
 
-`neuron` is a **library-only** Rust crate that exposes an OpenAI-compatible (and Anthropic Messages v1) HTTP API on top of three ML frameworks — **candle** (LLM, ASR, Rerank, Embedding, Vision, Mage-VL VLM, Chronos2 forecasting), **burn** (TTS), and **litert_lm** (on-device LLM subprocess). Decision scoring (Laya) sits outside those three: it runs on the pure-Rust **tract** ONNX executor behind the `tract` Cargo feature.
+`neuron` is a **library-only** Rust crate that exposes an OpenAI-compatible (and Anthropic Messages v1) HTTP API on top of three ML frameworks — **candle** (LLM, ASR, Rerank, Embedding, Vision, Mage-VL VLM, Chronos2 forecasting), **burn** (TTS), and **litert_lm** (on-device LLM subprocess). Everything ONNX-shaped runs on pluggable executors: **tract** (pure Rust) serves Laya decision scoring, the vision ONNX line, SenseVoiceSmall ASR, and the PP-OCR pipeline; **ort** (host-supplied onnxruntime, load-dynamic) is the fast executor for the same graphs; **sherpa-onnx** is the official binding for SenseVoiceSmall. The model scheduler (`src/scheduler/`) bounds resident LLM weights to a memory budget with on-demand swaps.
 
 ## High-level data flow
 
@@ -20,14 +20,17 @@
 │         │                        ├─→ LitertLlmRuntime      (Gemma 3 via `lit` subprocess)
 │         │                        ├─→ MistralRsLlmRuntime   (40+ families, PagedAttention, ISQ)
 │         │                        └─→ MageVlRuntime         (Microsoft Mage-VL — MageViT + Qwen3-4B + StreamMind gate)
-│         ├─→ TtsRuntimeRegistry  ───→ VoxCpmTtsRuntime     (vendored burn model, .mpk weights; voxcpm-0.5b loadable, voxcpm2 planned)
-│         ├─→ AsrRuntimeRegistry  ───→ WhisperAsrRuntime     (candle Whisper)
+│         ├─→ TtsRuntimeRegistry  ───→ VoxCpmTtsRuntime     (burn; 0.5B .mpk weights + VoxCPM2 direct checkpoint load)
+│         ├─→ AsrRuntimeRegistry  ─┬─→ WhisperAsrRuntime     (candle Whisper)
+│         │                        ├─→ SherpaAsrRuntime      (SenseVoiceSmall via sherpa-onnx)
+│         │                        └─→ TractSenseVoiceRuntime (SenseVoiceSmall via neuron's tract ONNX stack)
 │         ├─→ RerankRuntimeRegistry ──→ CandleRerankRuntime  (BGE / mxbai / jina / cohere)
 │         ├─→ EmbeddingRuntimeRegistry ─→ CandleEmbeddingRuntime (MiniLM BERT, batched, base64)
 │         ├─→ VisionRuntime        ─┬─→ CandleYoloRuntime  (YOLOv8 / RT-DETR / DETR)
 │         │                        └─→ OrtVisionRuntime   (YOLOv8 / RT-DETR / DETR / RF-DETR / Florence-2)
 │         ├─→ Chronos2Registry   ────→ CandleChronos2Runtime (T5-style encoder + decoder + output head, vendored)
-│         └─→ DecisionRuntimeRegistry → TractDecisionRuntime (Laya int8 ONNX — options + act/escalate, calibrated confidence)
+│         ├─→ DecisionRuntimeRegistry → TractDecisionRuntime (Laya int8 ONNX — options + act/escalate, calibrated confidence)
+│         └─→ OcrRuntimeRegistry  ───→ PaddleOcrRuntime     (PP-OCR det+rec; optional layout + table models; tract or ort executor)
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -38,20 +41,22 @@ src/
 ├── lib.rs                       # Re-exports `neuron::{run_embedded, NeuronHandle, ...}`
 ├── embedded.rs                  # `run_embedded()` entry point — owns axum server lifetime
 ├── server/                      # axum Router + OpenAI/Anthropic shape handlers
-├── capabilities/                # Capability registries (LLM / TTS / ASR / Rerank / Embedding / Vision / Chronos2 / Decision)
+├── capabilities/                # Capability registries (LLM / TTS / ASR / Rerank / Embedding / Vision / OCR / Chronos2 / Decision)
 ├── canonical/                   # Canonical request/response DTOs (OpenAI + Anthropic shapes)
-├── adapter/                     # ApiAdapter dispatch (Anthropic /v1/messages, future OpenAI routes)
+├── adapter/                     # ApiAdapter dispatch (OpenAI /v1/chat/completions + Anthropic /v1/messages)
 ├── llm/                         # LLM runtimes (candle / litert_lm / mistralrs)
 │   └── vendor/                  # Vendored upstream model architectures
 ├── mage_vl/                     # Mage-VL VLM runtime (MageViT + Qwen3-4B + StreamMind gate, neuron-native candle port)
 ├── tts/
 │   └── voxcpm_burn/             # Vendored VoxCpm (burn, .mpk weights; in-house, Apache-2.0)
-├── asr/                         # Whisper ASR runtime + audio decode
+├── asr/                         # Whisper + SenseVoice ASR runtimes + audio decode
 ├── rerank/                      # BGE / mxbai / jina (candle) + cohere (HTTP proxy)
 ├── embedding/                   # MiniLM BERT, batched + base64 encoding
-├── vision/                      # YOLOv8 / RT-DETR / DETR / RF-DETR / Florence-2 / Grounding DINO
+├── vision/                      # YOLOv8 / RT-DETR / DETR / RF-DETR / Florence-2
 │   ├── memory_pool.rs           # TensorPool (Sprint 4 Phase 1 — mobile memory optimization)
 │   └── ort_backends/            # Pluggable ONNX executors (ort / tract / onnxruntime)
+├── ocr/                         # PP-OCR pipeline (DB++ det + SVTR rec, CTC, layout, table structure; tract/ort executors)
+├── scheduler/                   # Model scheduler — bounded-memory resident set, request queue, eviction, RSS correction
 ├── decision/                    # Laya discriminative decision scoring (int8 ONNX via tract)
 │   ├── tract_session.rs         # Multi-input/multi-output tract session + shape-aware batching
 │   ├── prompt.rs                # Prompt grammar port (bit-exact vs upstream across 17 golden vectors)
@@ -89,9 +94,10 @@ Each capability uses a `*RuntimeRegistry` (e.g. `LlmRuntimeRegistry`) that holds
 
 ## HTTP wire format
 
-- **OpenAI-compatible**: every `/v1/*` endpoint is byte-for-byte compatible with OpenAI's wire format (chat completions, audio speech, audio transcriptions, embeddings, rerank, vision detect/classify/segment/pose, vision LoRA register/list, models, models/pull, catalog/sources, info).
+- **OpenAI-compatible**: the OpenAI-shaped endpoints are byte-for-byte compatible with OpenAI's wire format (chat completions, audio speech, audio transcriptions, embeddings, rerank, models, models/pull, catalog/sources, info).
 - **Anthropic Messages v1**: `/v1/messages` speaks the Anthropic Messages wire format (vision, tool_use, cache_control, extended thinking, streaming SSE), backed by the same engines as the OpenAI endpoint via the `ApiAdapter` dispatch system.
-- **Neuron-specific forecast, gate + decisions**: `POST /v1/forecast` (Chronos2 zero-shot time-series forecasting), `POST /v1/vision/gate/score` (Mage-VL StreamMind event gate — `p_speak` per codec window), and `POST /v1/decisions` (Laya discriminative decision scoring — per-option probabilities plus an act/escalate head).
+- **Neuron-specific OCR / forecast / gate + decisions**: `POST /v1/ocr/recognize` (PP-OCR detection + recognition — lines + boxes + reading order; optional PP-DocLayoutV3 layout regions and SLANeXt table HTML with the `ort` executor), `POST /v1/forecast` (Chronos2 zero-shot time-series forecasting), `POST /v1/vision/gate/score` (Mage-VL StreamMind event gate — `p_speak` per codec window), and `POST /v1/decisions` (Laya discriminative decision scoring — per-option probabilities plus an act/escalate head).
+- **Scheduler ops**: `GET /v1/scheduler/status` (residents, queue, budget, correction stats) + `DELETE /v1/scheduler/models/{id}` (administratively evict a resident).
 - **Liveness**: `GET /health` + `GET /v1/info`.
 
 ## Multi-source model registry
@@ -135,6 +141,11 @@ LoRA adapters are dynamically registerable via `POST /v1/vision/lora/register` f
 | `litert` | `litert-lm` | — |
 | `asr-audio` | `symphonia`, `rubato` (MP3 / FLAC / OGG-Vorbis decoding) | — |
 | `mistralrs` | `mistralrs` + (re-uses candle) | — |
+| `tract` | `tract-onnx`, `ndarray`, `tokenizers`, `rustfft` (enables the `ocr` meta feature) | — |
+| `ort` | `ort` crate, load-dynamic (host supplies `onnxruntime.dll` via `ORT_DYLIB_PATH` / `PATH`; enables `ocr`) | — |
+| `ocr` | `image`, `base64` (PP-OCR pipeline; pulled in by `tract` or `ort`) | — |
+| `sherpa` | `sherpa-onnx` (SenseVoiceSmall ASR) | — |
+| `ndarray` | `ndarray` | — |
 
 Hosts pick exactly the engines they need; the rest stays out of the binary.
 

@@ -67,7 +67,7 @@ let config = NeuronConfig::new()
 | `/v1/audio/transcriptions` | POST | OpenAI Audio | 语音转文本（multipart） |
 | `/v1/rerank` | POST | OpenAI Rerank | 按相关性重排文档 |
 | `/v1/embeddings` | POST | OpenAI Embeddings | 文本 embedding（单串或批量） |
-| `/v1/vision/detect` | POST | neuron（YOLO 风格） | YOLOv8 / RT-DETR / DETR / Grounding DINO 目标检测（可选 LoRA 合并类） |
+| `/v1/vision/detect` | POST | neuron（YOLO 风格） | YOLOv8 / RT-DETR / DETR 目标检测（可选 LoRA 合并类） |
 | `/v1/vision/classify` | POST | neuron | 图像分类（top-K 类别概率） |
 | `/v1/vision/segment` | POST | neuron | 实例分割（逐像素 mask） |
 | `/v1/vision/pose` | POST | neuron | 姿态估计（COCO 17 关键点骨架） |
@@ -75,10 +75,11 @@ let config = NeuronConfig::new()
 | `/v1/vision/lora/list` | GET | neuron | 列出已注册的 LoRA 适配器 |
 | `/v1/vision/lora/{id}` | GET / DELETE | neuron | 检查 / 删除 LoRA 适配器 |
 | `/v1/vision/gate/score` | POST | neuron | StreamMind gate 评分（Mage-VL 事件门——按 codec 窗口返回 p_speak） |
+| `/v1/ocr/recognize` | POST | neuron | PP-OCR 文本检测 + 识别（行 + 边框 + 置信度、阅读顺序；可选版面区域 + 表格 HTML；`ocr` feature——`tract` 或 `ort`） |
 | `/v1/forecast` | POST | neuron | Chronos2 零样本时序预测 |
 | `/v1/decisions` | POST | neuron（Laya 风格） | 对问题的选项打分并给出校准后的决策 |
 | `/v1/catalog/sources` | GET | neuron | 列出已注册的下载源（`huggingface` / `hf-mirror` / `modelscope`） |
-| `/v1/models` | GET | neuron | 列出已加载与已下载的模型（覆盖 LLM/TTS/ASR/Rerank） |
+| `/v1/models` | GET | neuron | 列出已加载与已下载的模型（覆盖 LLM/TTS/ASR/Rerank/Vision/OCR/Decision） |
 | `/v1/models/{engine}/{id}` | GET | neuron | 查看本地模型文件的详情（大小、文件、兼容引擎） |
 | `/v1/models/pull` | POST | neuron | 启动异步下载任务（返回 202 + job_id） |
 | `/v1/models/pull/{job_id}` | GET | neuron | 查询下载任务进度 |
@@ -337,6 +338,22 @@ Cohere 适配器是到 Cohere 托管 `/v1/rerank` API 的 HTTP 代理——无�
 
 ONNX 后端可插拔：替换 `src/vision/ort_runtime.rs` 中的 `build_session` 即可接入 `ort`、`tract`、`onnnxruntime` 或任何实现 `OrtSession` 契约的执行器。COCO 80 基础类；通过 LoRA 适配器动态扩展（`/v1/vision/lora/register`）。
 
+### OCR（PP-OCR 检测 + 识别）
+
+| 模型 id（catalog） | 权重（Apache-2.0） | tract（默认） | ort（`NEURON_OCR_EXECUTOR=ort`，约快 10 倍） |
+|---|---|---|---|
+| **ppocrv5-mobile** | `PaddlePaddle/PP-OCRv5_mobile_{det,rec}_onnx` | ✓ | ✓ |
+| **ppocrv5-server** | `PaddlePaddle/PP-OCRv5_server_{det,rec}_onnx` | ✓ | ✓ |
+| **ppocrv6-medium** | `PaddlePaddle/PP-OCRv6_medium_{det,rec}_onnx` | ✓ | ✓ |
+
+`POST /v1/ocr/recognize` 跑完整管线——DB++ 文本检测 → 行裁剪 → SVTR-LCNet 识别 → CTC 贪心解码 → 几何阅读顺序——返回 `{text, regions: [{bbox, text, confidence, line}], image_size, inference_time_ms}`；请求的 `image` 字段沿用 OpenAI Chat Completions 的 image content part 形状。需要 `ocr` meta feature（`tract` 或 `ort` 任一启用）+ 用 `scripts/prep-ppocr-onnx.py` 预处理过的模型目录（`det.prepped.onnx` + `rec.prepped.onnx` + `dict.txt`）。
+
+**多语言包**：模型目录下可选的 `rec-<pack>/` 子目录放各语种识别权重 + 对应 `ppocrv5_<script>_dict.txt`（来自 HF `PaddlePaddle/<script>_PP-OCRv5_mobile_rec_onnx`，预处理方式相同）。请求的 `languages` 字段路由到其中一个包——`"fr"`→`rec-latin`、`"ko"`→`rec-korean`、`"ru"`→`rec-cyrillic`、`"ar"`→`rec-arabic`、`"hi"`→`rec-devanagari`，另有 `"th"`/`"el"`/`"te"`/`"ta"`；`zh`/`en`/`ja` 与未路由的代码留在默认 rec，精确包名（`"latin"`）可作为逃生口。包在首次使用时惰性加载；响应的 `languages` 字段报告实际使用的包。
+
+**版面分析（可选，`ort` 执行器）**：把 `layout.onnx`（PP-DocLayoutV3，约 130 MB，HF `PaddlePaddle/PP-DocLayoutV3_onnx`）放进模型目录，响应多出 `layout[]` 数组——25 个区域类（text / table / image / display_formula / doc_title / header / footer / seal / …）的框与分数，外加每行文本所在区域类 `kind`。文件存在即启用，无运行时开关。
+
+**表格结构（可选，`ort` 执行器，需要 layout）**：再加 `table.onnx`（SLANeXt wired，约 368 MB，HF `PaddlePaddle/SLANeXt_wired_onnx`），每个 `table` 区域额外携带 `html` 字段——组装好的 `<table>`，识别文本填入单元格。注意：流传较广的 `SLANet_plus_onnx` 导出是坏的（其自回归解码器与图像解耦——白噪声和真表格解码出相同结果），SLANeXt 才是可用路径。
+
 ### Chronos2（时序预测）
 
 | 模型 id | candle |
@@ -361,8 +378,8 @@ Laya 上游**只发 safetensors**，所以要 tract 加载的图需要先跑上�
 | **mistralrs** | mistral.rs v0.8.22（基于 candle） | 仅 LLM（40+ 家族） | `mistralrs` |
 | **mage_vl** | neuron 原生 candle 移植 | 仅 VLM（`microsoft/Mage-VL`） | 随 `candle` feature 一并提供 |
 | **sherpa** | sherpa-onnx 1.13.x | ASR（SenseVoiceSmall） | `sherpa` |
-| **tract** | tract-onnx 0.21 | ASR（SenseVoiceSmall）、Decision（Laya）、Vision（ONNX 可插拔） | `tract` |
-| **ort** | onnxruntime | Vision（RF-DETR / Florence-2 / 自定义）、Decision（Laya，bit-exact 路径） | opt-in `ort` 集成或 `tract` 回退 |
+| **tract** | tract-onnx 0.21 | ASR（SenseVoiceSmall）、Decision（Laya）、Vision（ONNX 可插拔）、OCR（PP-OCRv5/v6 检测+识别） | `tract` |
+| **ort** | onnxruntime | Vision（RF-DETR / Florence-2 / 自定义）、Decision（Laya，bit-exact 路径）、OCR（指定快速执行器——已对 `ort` 2.0.0-rc.13 验证） | opt-in `ort` 集成或 `tract` 回退 |
 | **Cohere（托管）** | HTTP 代理 | Rerank | 无（无本地权重） |
 
 ### 引擎概览
@@ -374,7 +391,7 @@ Laya 上游**只发 safetensors**，所以要 tract 加载的图需要先跑上�
 - **litert_lm** —— Google LiteRT-LM 通过 `litert_lm` Rust 绑定（围绕 `lit` 二进制的子进程池）。`--features litert` + `lit` 在 PATH 上；服务 Gemma 3/4。
 - **mistralrs** —— [mistral.rs](https://github.com/EricLBuehler/mistral.rs) v0.8.22；一个统一分发器，覆盖 40+ 家族，PagedAttention + ISQ 量化开箱即用。`--features mistralrs`。
 - **mage_vl** —— neuron 原生 candle 移植的 [Microsoft Mage-VL](https://huggingface.co/microsoft/Mage-VL)；MageViT + Qwen3-4B 解码器 + StreamMind gate。随默认 `candle` feature 一并提供；通过 `NEURON_LLM_RUNTIME=mage_vl` + `NEURON_MAGE_VL_SHARD_DIR` 激活。
-- **sherpa / tract / ort** —— 三个跑 ONNX 模型的引擎（ASR SenseVoice、Vision Florence-2 / RF-DETR、Decision Laya）。`tract` 是纯 Rust ONNX（`--features tract`）；`sherpa` 是官方的 onnxruntime 后端 Rust 绑定（`--features sherpa`）；`ort` 是 onnxruntime 绑定（由宿主集成）。规范见 [`docs/superpowers/specs/2026-09-26-sherpa-onnx-asr-backend.md`](docs/superpowers/specs/2026-09-26-sherpa-onnx-asr-backend.md)、[`docs/superpowers/specs/2026-09-01-mobile-phase-2-tract-onnx.md`](docs/superpowers/specs/2026-09-01-mobile-phase-2-tract-onnx.md)。
+- **sherpa / tract / ort** —— 三个跑 ONNX 模型的引擎（ASR SenseVoice、Vision Florence-2 / RF-DETR、Decision Laya、OCR PP-OCR）。`tract` 是纯 Rust ONNX（`--features tract`）；`sherpa` 是官方的 onnxruntime 后端 Rust 绑定（`--features sherpa`）；`ort` 是 onnxruntime 绑定（由宿主集成）。规范见 [`docs/superpowers/specs/2026-09-26-sherpa-onnx-asr-backend.md`](docs/superpowers/specs/2026-09-26-sherpa-onnx-asr-backend.md)、[`docs/superpowers/specs/2026-09-01-mobile-phase-2-tract-onnx.md`](docs/superpowers/specs/2026-09-01-mobile-phase-2-tract-onnx.md)。
 - **Cohere（托管）** —— `/v1/rerank` 的 HTTP 代理。无本地权重，只要 `NEURON_COHERE_API_KEY`。
 
 注：旧版 README 宣传过 `ultralytics` Python 子进程后端（用于 Grounding DINO）。该列**已移除** —— neuron 是纯 Rust 库，不发任何 Python 子进程；Grounding DINO 的 catalog 条目也已一并删除。开放词汇检测继续走 `ort / tract / onnxruntime` 列（Florence-2 是这一列里已经在跑的多模态视觉模型）。
