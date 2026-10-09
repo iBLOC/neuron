@@ -607,7 +607,13 @@ pub async fn ocr_recognize(
         .ocr_registry
         .runtime_for(&model)
         .await
-        .unwrap_or_else(|_| state.ocr.clone());
+        .unwrap_or_else(|e| {
+            // Same fallback shape as the vision handler — but log the load
+            // error: a silent swap for the unavailable stub turns a missing
+            // onnxruntime.dll into a baffling 501.
+            tracing::warn!(model = %model, error = %e, "ocr: registry load failed, serving the unavailable stub");
+            state.ocr.clone()
+        });
 
     rt.run(req)
         .await

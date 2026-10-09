@@ -51,6 +51,12 @@ rubato = { version = "3", optional = true }
 
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"], optional = true }
 base64 = { version = "0.22", optional = true }
+# Fast ONNX executor for the OCR pipeline (`ort` feature). rc.13 wraps
+# onnxruntime 1.28; the vitis.rs load-dynamic gating bug (#547) was rc.12.
+# load-dynamic (host supplies onnxruntime.dll via ORT_DYLIB_PATH or PATH) —
+# the static download-binaries build links /MD CRT objects, which conflicts
+# with the /MT objects cc-based deps (esaxx_rs) emit on Windows (LNK2038).
+ort = { version = "=2.0.0-rc.13", optional = true, default-features = false, features = ["load-dynamic"] }
 safetensors = { version = "0.4", optional = true }
 wide = { version = "0.7", optional = true }
 ndarray = { version = "0.16", optional = true }
@@ -124,7 +130,7 @@ harness = false
 
 [[example]]
 name = "ocr_smoke"
-required-features = ["tract"]
+required-features = ["ocr"]
 
 [features]
 default = ["candle"]
@@ -140,9 +146,14 @@ mistralrs = ["dep:mistralrs", "candle"]
 ndarray = ["dep:ndarray"]
 # Own-ONNX ASR (SenseVoice via tract) reuses the tract feature; rustfft
 # backs the kaldi-style fbank extraction in src/asr/fbank.rs.
-# The PP-OCR pipeline (src/ocr/paddle_runtime.rs) also lives under `tract`
-# and needs image decode (JPEG/PNG) + base64 for the request image source.
-tract = ["dep:tract-onnx", "dep:ndarray", "dep:tokenizers", "dep:rustfft", "dep:image", "dep:base64"]
+# The PP-OCR pipeline (src/ocr/) lives behind the `ocr` meta feature (image
+# decode + base64 for the request image source), which `tract` and `ort`
+# both enable: `tract` is the pure-Rust executor, `ort` the fast one
+# (verified against ort 2.0.0-rc.13, where the rc.12 vitis.rs load-dynamic
+# gating bug is fixed).
+tract = ["dep:tract-onnx", "dep:ndarray", "dep:tokenizers", "dep:rustfft", "ocr"]
+ort = ["dep:ort", "ocr"]
+ocr = ["dep:image", "dep:base64"]
 sherpa = ["dep:sherpa-onnx"]
 
 

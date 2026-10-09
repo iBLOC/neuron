@@ -355,15 +355,15 @@ Laya's upstream ships **safetensors only**, so a tract-loaded graph requires the
 
 ### OCR (PP-OCR detection + recognition)
 
-| Model id (catalog) | Weights (Apache-2.0) | tract | ort (designated fast executor) |
+| Model id (catalog) | Weights (Apache-2.0) | tract (default) | ort (`NEURON_OCR_EXECUTOR=ort`, ~10× faster) |
 |---|---|---|---|
-| **ppocrv5-mobile** | `PaddlePaddle/PP-OCRv5_mobile_{det,rec}_onnx` | ✓ | verified, wiring pending |
-| **ppocrv5-server** | `PaddlePaddle/PP-OCRv5_server_{det,rec}_onnx` | ✓ | verified, wiring pending |
-| **ppocrv6-medium** | `PaddlePaddle/PP-OCRv6_medium_{det,rec}_onnx` | ✓ | verified, wiring pending |
+| **ppocrv5-mobile** | `PaddlePaddle/PP-OCRv5_mobile_{det,rec}_onnx` | ✓ | ✓ |
+| **ppocrv5-server** | `PaddlePaddle/PP-OCRv5_server_{det,rec}_onnx` | ✓ | ✓ |
+| **ppocrv6-medium** | `PaddlePaddle/PP-OCRv6_medium_{det,rec}_onnx` | ✓ | ✓ |
 
 `POST /v1/ocr/recognize` runs the full pipeline — DB++ text detection → line crops → SVTR-LCNet recognition → CTC greedy decode → geometric reading order — and returns `{text, regions: [{bbox, text, confidence, line}], image_size, inference_time_ms}`. English + Simplified/Traditional Chinese in one rec model (v6 adds 46 more Latin scripts); all six v5/v6 exports were verified numerically against onnxruntime on 2026-10-09 (max abs diff ≤ 2e-6 detection maps, ≤ 2e-4 recognition softmax).
 
-Requires the `tract` feature and a model directory prepped with `scripts/prep-ppocr-onnx.py` (metadata-only: tract's TDim parser rejects Paddle2ONNX's dotted symbol names and `floor(...)` shape hints):
+Requires the `ocr` meta feature — enabled by either executor, `tract` (pure Rust, default) or `ort` — and a model directory prepped with `scripts/prep-ppocr-onnx.py` (metadata-only: tract's TDim parser rejects Paddle2ONNX's dotted symbol names and `floor(...)` shape hints):
 
 ```bash
 NEURON_OCR_MODEL_PATH=/path/to/dir-with-det+rec+dict \
@@ -376,7 +376,7 @@ curl -X POST http://localhost:8083/v1/ocr/recognize \
   -d '{"model":"ppocrv6-medium","image":{"type":"image_url","image_url":{"url":"file:///tmp/invoice.png"}}}'
 ```
 
-Performance note: tract CPU runs these CNNs 5-12× slower than onnxruntime on this workload class (measured: v6 medium det 3.7 s vs 0.5 s at 736 px; recognition 120-233 ms vs 10-35 ms per line). The `ort` crate 2.0.0-rc.13 compiles and matches onnxruntime speed on Windows (the rc.12 `vitis.rs` `load-dynamic` gating bug is fixed in rc.13) and is the designated fast executor for a follow-up backend.
+Performance note: the tract executor pays a per-shape plan compile and runs these CNNs 5-12× slower than onnxruntime on CPU. The `ort` executor (`--features ort`, `NEURON_OCR_EXECUTOR=ort`) runs dynamic shapes natively — measured 10.3× faster end-to-end on the smoke workload (526 ms vs 5.4 s including first compiles) with byte-identical recognition output. It links onnxruntime dynamically: the host supplies `onnxruntime.dll` via `ORT_DYLIB_PATH` (or `PATH`) — the static `download-binaries` mode conflicts with /MT CRT objects emitted by cc-based deps on Windows (LNK2038).
 
 ### Engine → capability cross-reference
 

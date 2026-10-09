@@ -21,15 +21,20 @@
 pub mod registry;
 pub use registry::OcrRuntimeRegistry;
 
-#[cfg(feature = "tract")]
+// The pipeline's pure halves (post-processing, CTC, preprocessing) ride the
+// `ocr` meta feature; an executor (`tract` or `ort`) is what makes the
+// runtime loadable.
+#[cfg(feature = "ocr")]
 pub mod ctc;
-#[cfg(feature = "tract")]
+#[cfg(feature = "ocr")]
 pub mod db_postprocess;
-#[cfg(feature = "tract")]
+#[cfg(any(feature = "tract", feature = "ort"))]
 pub mod paddle_runtime;
-#[cfg(feature = "tract")]
+#[cfg(feature = "ocr")]
 pub mod preprocess;
-#[cfg(feature = "tract")]
+#[cfg(feature = "ort")]
+pub mod ort_session;
+#[cfg(any(feature = "tract", feature = "ort"))]
 pub use paddle_runtime::PaddleOcrRuntime;
 
 use async_trait::async_trait;

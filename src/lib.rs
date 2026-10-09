@@ -49,7 +49,7 @@ pub use embedding::{
 #[cfg(feature = "candle")]
 pub use embedding::MiniLmL6V2EmbeddingRuntime;
 pub use ocr::{OcrImpl, OcrRegistryKey, OcrRequest, OcrResponse, OcrRuntime, OcrRuntimeRegistry};
-#[cfg(feature = "tract")]
+#[cfg(any(feature = "tract", feature = "ort"))]
 pub use ocr::PaddleOcrRuntime;
 pub use llm::{
     ChatChunk, ChatMessage, ChatRequest, ChatResponse, ChatResult, Choice, DeltaMessage,

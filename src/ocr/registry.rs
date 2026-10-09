@@ -85,7 +85,7 @@ impl OcrRuntimeRegistry {
         // only on success so a failed load is retried on the next request
         // instead of poisoning the cache.
         let rt: Arc<dyn OcrRuntime> = match entry.impl_id {
-            #[cfg(feature = "tract")]
+            #[cfg(any(feature = "tract", feature = "ort"))]
             OcrImpl::PaddleOcr => {
                 let loaded_box: Box<dyn OcrRuntime> =
                     super::PaddleOcrRuntime::load(&entry.model_id, &entry.device)
@@ -93,10 +93,10 @@ impl OcrRuntimeRegistry {
                         .map_err(|e| NeuronError::new(format!("PaddleOcrRuntime load failed: {e}")))?;
                 Arc::from(loaded_box)
             }
-            #[cfg(not(feature = "tract"))]
+            #[cfg(not(any(feature = "tract", feature = "ort")))]
             OcrImpl::PaddleOcr => {
                 return Err(NeuronError::not_implemented(
-                    "PaddleOcr pipeline requires the `tract` feature (rebuild with \
+                    "PaddleOcr pipeline requires the `tract` or `ort` feature (rebuild with \
                      --features tract); the graphs must also be prepped with \
                      scripts/prep-ppocr-onnx.py",
                 ));
@@ -196,15 +196,15 @@ mod tests {
         .expect("register within default resource budget");
         assert_eq!(reg.list_registered(), vec!["ppocrv5-mobile".to_string()]);
         let err = reg.runtime_for("ppocrv5-mobile").await.err().unwrap();
-        #[cfg(not(feature = "tract"))]
+        #[cfg(not(any(feature = "tract", feature = "ort")))]
         {
-            // Scaffold contract: without the pipeline the load surfaces a
+            // Scaffold contract: without any executor the load surfaces a
             // clear 501.
             assert_eq!(err.error_type, "not_implemented", "{err:?}");
         }
-        #[cfg(feature = "tract")]
+        #[cfg(any(feature = "tract", feature = "ort"))]
         {
-            // With the pipeline wired, the load proceeds to model discovery
+            // With an executor wired, the load proceeds to model discovery
             // and fails on missing weights (nothing registered on disk in CI).
             assert_ne!(err.error_type, "not_implemented", "{err:?}");
         }

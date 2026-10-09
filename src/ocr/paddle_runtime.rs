@@ -26,6 +26,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use async_trait::async_trait;
+
+#[cfg(feature = "tract")]
 use tract_onnx::prelude::*;
 
 use crate::config::DeviceSelection;
@@ -39,30 +41,112 @@ use super::preprocess::{
 };
 use super::{OcrRequest, OcrResponse, OcrRuntime, OcrTextRegion};
 
+#[cfg(feature = "tract")]
 type RunnablePlan = Arc<TypedRunnableModel<TypedModel>>;
 
 const REC_TARGET_H: u32 = 48;
 /// Maximum plans (concrete input shapes) kept compiled per graph.
 const PLAN_CACHE_CAP: usize = 8;
 
+fn executor_name(e: OcrExecutor) -> &'static str {
+    match e {
+        OcrExecutor::Tract => "tract",
+        OcrExecutor::Ort => "ort",
+    }
+}
+
+/// Executor-agnostic forward for one PP-OCR graph: `[1, 3, h, w]` CHW f32
+/// input in, flattened output + declared output shape out. Implemented by
+/// [`TractPlanCache`] (per-shape compiled plans) and
+/// [`super::ort_session::OrtGraphSession`] (native dynamic shapes).
+pub trait OcrSession: Send + Sync {
+    fn run(&self, chw: Vec<f32>, h: u32, w: u32)
+        -> Result<(Vec<f32>, Vec<usize>), NeuronError>;
+    fn name(&self) -> &'static str;
+}
+
+/// Which executor backs the two graphs. Selected at load time via
+/// `NEURON_OCR_EXECUTOR` (`tract` | `ort`). Default is tract — pure Rust,
+/// no external runtime binary — with `ort` as the explicit fast path
+/// (onnxruntime runs these CNNs 5-12× faster than tract on CPU).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OcrExecutor {
+    Tract,
+    Ort,
+}
+
+/// Resolve the executor from an explicit request (the `NEURON_OCR_EXECUTOR`
+/// env value, already read). Pure so tests can cover it without env mutation.
+pub fn choose_executor(explicit: Option<&str>) -> Result<OcrExecutor, NeuronError> {
+    match explicit.map(str::trim).filter(|s| !s.is_empty()) {
+        Some("tract") => {
+            #[cfg(feature = "tract")]
+            {
+                Ok(OcrExecutor::Tract)
+            }
+            #[cfg(not(feature = "tract"))]
+            {
+                Err(NeuronError::invalid_input(
+                    "NEURON_OCR_EXECUTOR=tract but this build was compiled without the `tract` feature",
+                ))
+            }
+        }
+        Some("ort") => {
+            #[cfg(feature = "ort")]
+            {
+                Ok(OcrExecutor::Ort)
+            }
+            #[cfg(not(feature = "ort"))]
+            {
+                Err(NeuronError::invalid_input(
+                    "NEURON_OCR_EXECUTOR=ort but this build was compiled without the `ort` feature",
+                ))
+            }
+        }
+        Some(other) => Err(NeuronError::invalid_input(format!(
+            "unknown NEURON_OCR_EXECUTOR '{other}' (want tract | ort)"
+        ))),
+        None => {
+            #[cfg(feature = "tract")]
+            {
+                Ok(OcrExecutor::Tract)
+            }
+            #[cfg(all(not(feature = "tract"), feature = "ort"))]
+            {
+                Ok(OcrExecutor::Ort)
+            }
+            #[cfg(not(any(feature = "tract", feature = "ort")))]
+            {
+                Err(NeuronError::not_implemented(
+                    "the PP-OCR pipeline requires the `tract` or `ort` feature",
+                ))
+            }
+        }
+    }
+}
+
 pub struct PaddleOcrRuntime {
     model_id: String,
-    det: PlanCache,
-    rec: PlanCache,
+    det: Arc<dyn OcrSession>,
+    rec: Arc<dyn OcrSession>,
+    executor: OcrExecutor,
     vocab: Vocab,
     det_params: DbParams,
     det_max_side: u32,
 }
 
-/// Compiled-plan cache keyed by concrete `(h, w)` input extents.
-struct PlanCache {
+/// tract-backed session: compiles (and FIFO-caches) one optimized plan per
+/// concrete (h, w) input, since both PP-OCR graphs declare dynamic extents.
+#[cfg(feature = "tract")]
+pub struct TractPlanCache {
     model_path: PathBuf,
     plans: Mutex<HashMap<(u32, u32), RunnablePlan>>,
     order: Mutex<VecDeque<(u32, u32)>>,
 }
 
-impl PlanCache {
-    fn new(model_path: PathBuf) -> Self {
+#[cfg(feature = "tract")]
+impl TractPlanCache {
+    pub fn new(model_path: PathBuf) -> Self {
         Self {
             model_path,
             plans: Mutex::new(HashMap::new()),
@@ -108,6 +192,35 @@ impl PlanCache {
     }
 }
 
+#[cfg(feature = "tract")]
+impl OcrSession for TractPlanCache {
+    fn run(
+        &self,
+        chw: Vec<f32>,
+        h: u32,
+        w: u32,
+    ) -> Result<(Vec<f32>, Vec<usize>), NeuronError> {
+        let plan = self.plan_for(h, w)?;
+        let arr = ndarray::ArrayD::<f32>::from_shape_vec(
+            ndarray::IxDyn(&[1usize, 3, h as usize, w as usize]),
+            chw,
+        )
+        .map_err(|e| NeuronError::invalid_input(format!("det input shape: {e}")))?;
+        let outputs = plan
+            .run(tvec![arr.into_tvalue()])
+            .map_err(|e| NeuronError::new(format!("tract run: {e}")))?;
+        let view = outputs[0]
+            .to_array_view::<f32>()
+            .map_err(|e| NeuronError::new(format!("tract extract: {e}")))?;
+        let shape: Vec<usize> = view.shape().to_vec();
+        Ok((view.iter().copied().collect(), shape))
+    }
+
+    fn name(&self) -> &'static str {
+        "tract"
+    }
+}
+
 impl PaddleOcrRuntime {
     pub async fn load(model_id: &str, _device: &DeviceSelection) -> ChatResult<Box<dyn OcrRuntime>> {
         let dir = resolve_model_dir(model_id).ok_or_else(|| {
@@ -149,43 +262,41 @@ impl PaddleOcrRuntime {
         })?;
 
         let vocab = Vocab::load(&dict_path)?;
+        let executor = choose_executor(crate::config::env_var("OCR_EXECUTOR").as_deref())?;
+        let build_session = |path: &Path| -> Result<Arc<dyn OcrSession>, NeuronError> {
+            match executor {
+                #[cfg(feature = "tract")]
+                OcrExecutor::Tract => Ok(Arc::new(TractPlanCache::new(path.to_path_buf()))),
+                #[cfg(not(feature = "tract"))]
+                OcrExecutor::Tract => Err(NeuronError::invalid_input(
+                    "tract executor selected but this build was compiled without the `tract` feature",
+                )),
+                #[cfg(feature = "ort")]
+                OcrExecutor::Ort => Ok(Arc::new(super::ort_session::OrtGraphSession::open(path)?)),
+                #[cfg(not(feature = "ort"))]
+                OcrExecutor::Ort => Err(NeuronError::invalid_input(
+                    "ort executor selected but this build was compiled without the `ort` feature",
+                )),
+            }
+        };
+        let det = build_session(&det_path)?;
+        let rec = build_session(&rec_path)?;
         tracing::info!(
             model_id,
             dir = %dir.display(),
             vocab = vocab.tokens.len(),
+            executor = executor_name(executor),
             "ocr: loaded PP-OCR pipeline manifest"
         );
         Ok(Box::new(PaddleOcrRuntime {
             model_id: model_id.to_string(),
-            det: PlanCache::new(det_path),
-            rec: PlanCache::new(rec_path),
+            det,
+            rec,
+            executor,
             vocab,
             det_params: DbParams::default(),
             det_max_side: 960,
         }))
-    }
-
-    /// Run one graph forward with a CHW f32 input; returns the flattened
-    /// output plus its `[h, w]`-style trailing extents.
-    fn forward(
-        plan: &RunnablePlan,
-        chw: Vec<f32>,
-        h: u32,
-        w: u32,
-    ) -> Result<(Vec<f32>, Vec<usize>), NeuronError> {
-        let arr = ndarray::ArrayD::<f32>::from_shape_vec(
-            ndarray::IxDyn(&[1usize, 3, h as usize, w as usize]),
-            chw,
-        )
-        .map_err(|e| NeuronError::invalid_input(format!("det input shape: {e}")))?;
-        let outputs = plan
-            .run(tvec![arr.into_tvalue()])
-            .map_err(|e| NeuronError::new(format!("tract run: {e}")))?;
-        let view = outputs[0]
-            .to_array_view::<f32>()
-            .map_err(|e| NeuronError::new(format!("tract extract: {e}")))?;
-        let shape: Vec<usize> = view.shape().to_vec();
-        Ok((view.iter().copied().collect(), shape))
     }
 }
 
@@ -215,8 +326,7 @@ impl OcrRuntime for PaddleOcrRuntime {
         let max_side = req.det_max_side.unwrap_or(self.det_max_side);
         let (det_w, det_h) = det_resize_dims(src_w, src_h, max_side);
         let det_chw = det_to_chw(&rgb, src_w, src_h, det_w, det_h)?;
-        let det_plan = self.det.plan_for(det_h, det_w)?;
-        let (prob, prob_shape) = Self::forward(&det_plan, det_chw, det_h, det_w)?;
+        let (prob, prob_shape) = self.det.run(det_chw, det_h, det_w)?;
         let (map_h, map_w) = match prob_shape.as_slice() {
             [_, _, h, w] => (*h, *w),
             other => {
@@ -236,8 +346,7 @@ impl OcrRuntime for PaddleOcrRuntime {
             let needed = rec_needed_w(line_w, line_h, REC_TARGET_H);
             let bucket = rec_bucket_w(needed);
             let rec_chw = rec_to_chw(&line, line_w, line_h, bucket, REC_TARGET_H)?;
-            let rec_plan = self.rec.plan_for(REC_TARGET_H, bucket)?;
-            let (probs, shape) = Self::forward(&rec_plan, rec_chw, REC_TARGET_H, bucket)?;
+            let (probs, shape) = self.rec.run(rec_chw, REC_TARGET_H, bucket)?;
             let (t, vocab) = match shape.as_slice() {
                 [_, t, v] => (*t, *v),
                 other => {
@@ -446,6 +555,34 @@ fn find_file(dir: &Path, names: &[&str]) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn choose_executor_resolves_default_and_validates_names() {
+        // Default: tract when compiled, else ort.
+        let default = choose_executor(None).unwrap();
+        #[cfg(feature = "tract")]
+        assert_eq!(default, OcrExecutor::Tract);
+        #[cfg(all(not(feature = "tract"), feature = "ort"))]
+        assert_eq!(default, OcrExecutor::Ort);
+
+        // Empty / whitespace values fall through to the default.
+        assert_eq!(choose_executor(Some("")).unwrap(), default);
+        assert_eq!(choose_executor(Some("  ")).unwrap(), default);
+
+        // Unknown names are a clear input error.
+        assert!(choose_executor(Some("tesseract")).is_err());
+
+        // Explicit names only resolve when their feature is compiled in.
+        #[cfg(feature = "tract")]
+        assert_eq!(choose_executor(Some("tract")).unwrap(), OcrExecutor::Tract);
+        #[cfg(feature = "ort")]
+        assert_eq!(choose_executor(Some("ort")).unwrap(), OcrExecutor::Ort);
+        #[cfg(not(feature = "ort"))]
+        {
+            let err = choose_executor(Some("ort")).err().unwrap();
+            assert!(err.message.contains("`ort` feature"), "{err:?}");
+        }
+    }
 
     fn region(x: f32, y: f32, w: f32, h: f32, text: &str) -> OcrTextRegion {
         OcrTextRegion {
