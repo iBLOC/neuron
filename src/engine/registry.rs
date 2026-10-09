@@ -141,4 +141,98 @@ mod tests {
         assert!(regs.lookup(Capability::Tts, "qwen3").is_none());
         assert!(regs.lookup(Capability::Llm, "missing").is_none());
     }
+
+    // -- unregister / Arc-drop invariants ----------------------------------
+    //
+    // `unregister` is the canonical-engine side of the scheduler's
+    // drain-then-swap policy. The contract is:
+    //   1. unregister(model_id) returns true iff the id was registered.
+    //   2. After unregister, subsequent lookup(model_id) returns None.
+    //   3. unregister does NOT eagerly drop weights — the engine Arc
+    //      stays alive until the last clone (e.g. an in-flight HTTP
+    //      request) drops. Verified by holding an extra clone and
+    //      checking `lookup` from before vs after unregister.
+    //   4. A second unregister of the same id is idempotent (false).
+    //   5. list() reflects the post-unregister view.
+
+    #[test]
+    fn test_unregister_returns_true_when_present_false_otherwise() {
+        let reg: EngineRegistry<dyn AnyCapabilityEngine> = EngineRegistry::new();
+        let e: Arc<dyn AnyCapabilityEngine> = Arc::new(MockEngine { id: "m".into() });
+        reg.register("a".into(), e);
+        assert!(reg.unregister("a"));
+        assert!(!reg.unregister("a"), "second unregister is idempotent (false)");
+        assert!(!reg.unregister("never-registered"));
+    }
+
+    #[test]
+    fn test_unregister_makes_lookup_return_none_but_keeps_existing_arc_alive() {
+        let reg: EngineRegistry<dyn AnyCapabilityEngine> = EngineRegistry::new();
+        let e: Arc<dyn AnyCapabilityEngine> = Arc::new(MockEngine { id: "m".into() });
+        reg.register("a".into(), e);
+        // Caller may still hold an Arc (e.g. an in-flight HTTP handler
+        // cloning the engine after `register` returned). unregister
+        // does NOT take that Arc away from the caller.
+        let held = reg.lookup("a").expect("registered");
+        assert_eq!(held.name(), "m");
+        // After unregister, the registry has no record of "a" anymore.
+        assert!(reg.unregister("a"));
+        assert!(reg.lookup("a").is_none());
+        // The Arc the caller held is still valid — they can finish
+        // the request it was handed into without panicking on a
+        // dangling trait object.
+        assert_eq!(held.name(), "m");
+    }
+
+    #[test]
+    fn test_unregister_then_re_register_under_same_id() {
+        // After eviction the scheduler may admit a different engine
+        // under the same id later (e.g. a different weight file
+        // backed by a different runtime). Verify the registry
+        // accepts a fresh registration under a previously-evicted
+        // id without state from the old engine bleeding through.
+        let reg: EngineRegistry<dyn AnyCapabilityEngine> = EngineRegistry::new();
+        reg.register("a".into(), Arc::new(MockEngine { id: "first".into() }));
+        assert!(reg.unregister("a"));
+        assert!(reg.lookup("a").is_none());
+        reg.register("a".into(), Arc::new(MockEngine { id: "second".into() }));
+        let after = reg.lookup("a").expect("re-registered");
+        assert_eq!(after.name(), "second");
+        assert_eq!(reg.list(), vec!["a".to_string()]);
+    }
+
+    #[test]
+    fn test_unregister_isolates_per_capability_registry() {
+        // unregister on the LLM engine table must NOT touch the
+        // TTS / ASR / … tables — capability isolation is the
+        // scheduler's load-bearing invariant.
+        let regs = CapabilityRegistries::new();
+        regs.llm.register("shared-id".into(), Arc::new(MockEngine { id: "llm".into() }));
+        regs.tts.register("shared-id".into(), Arc::new(MockEngine { id: "tts".into() }));
+
+        assert!(regs.llm.unregister("shared-id"));
+        assert!(regs.lookup(Capability::Llm, "shared-id").is_none());
+        // TTS entry is untouched.
+        assert_eq!(
+            regs.lookup(Capability::Tts, "shared-id").unwrap().name(),
+            "tts"
+        );
+        // Unregistering the same id from the TTS table now returns true.
+        assert!(regs.tts.unregister("shared-id"));
+    }
+
+    #[test]
+    fn test_set_default_is_independent_of_unregister() {
+        // unregister removes a model_id mapping but does not touch
+        // the default_shortcut. This matters for the scheduler's
+        // "registered model id is gone, fall back to the default
+        // engine" path — the default survives any unregister.
+        let reg: EngineRegistry<dyn AnyCapabilityEngine> = EngineRegistry::new();
+        let e_default: Arc<dyn AnyCapabilityEngine> = Arc::new(MockEngine { id: "default".into() });
+        reg.set_default(e_default);
+        reg.register("a".into(), Arc::new(MockEngine { id: "a".into() }));
+        assert!(reg.unregister("a"));
+        assert!(reg.default().is_some(), "default survives unregister");
+        assert_eq!(reg.default().unwrap().name(), "default");
+    }
 }
