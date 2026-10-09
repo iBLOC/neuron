@@ -1,6 +1,6 @@
 # neuron (神经元) — AGENTS guide
 
-**Status:** READ-ONLY contributor reference. Updated 2026-09-27 (post-candle 0.11 upgrade per `huggingface/candle.git#aebc405`; post-`f643c1c` LLM auto-registration + USERPROFILE fallback on Windows GUI processes; **VoxCPM2 (2B/48 kHz) local inference landed** — `NEURON_TTS_RUNTIME=voxcpm2`, direct checkpoint load, see the "VoxCPM2 (loadable)" section; **658 lib tests as of 2026-09-29** on default features (+30 model-scheduler/profile/dispatch/config tests), **688 with `--features voxcpm`**, 689 with `tract`, 695 with `tract,sherpa`; **model scheduler landed** — bounded-memory LLM swap queue behind `/v1/chat/completions` + `/v1/messages`, see the "Model scheduler" bullet and `docs/superpowers/specs/2026-09-29-model-scheduler.md`; GitHub Pages CI now base-URL-configured + adds a `lychee` link-check job; prior 2026-09-25 baseline: post-rename `neure → neuron` per commit `e3d2c41` (2026-09-21); `AppState::register_engine` capability per `bccef7c`; 618 lib tests as of 2026-09-24; earlier 2026-07-19 baseline: license switch + Shadow decoupling).
+**Status:** READ-ONLY contributor reference. Updated 2026-10-09 (**OCR capability (PP-OCR) landed** — `POST /v1/ocr/recognize`, `NEURON_OCR_RUNTIME`-free registration via config, tract pipeline + DB++ postprocess + CTC, see the "OCR (PP-OCR, loadable)" section; **679 lib tests** default / **733 with `--features tract`** as of 2026-10-09; prior 2026-09-27 baseline: post-candle 0.11 upgrade per `huggingface/candle.git#aebc405`; post-`f643c1c` LLM auto-registration + USERPROFILE fallback on Windows GUI processes; **VoxCPM2 (2B/48 kHz) local inference landed** — `NEURON_TTS_RUNTIME=voxcpm2`, direct checkpoint load, see the "VoxCPM2 (loadable)" section; **model scheduler landed** — bounded-memory LLM swap queue behind `/v1/chat/completions` + `/v1/messages`, see the "Model scheduler" bullet and `docs/superpowers/specs/2026-09-29-model-scheduler.md`; GitHub Pages CI now base-URL-configured + adds a `lychee` link-check job; prior 2026-09-25 baseline: post-rename `neure → neuron` per commit `e3d2c41` (2026-09-21); `AppState::register_engine` capability per `bccef7c`; earlier 2026-07-19 baseline: license switch + Shadow decoupling).
 
 ## What neuron is
 
@@ -50,7 +50,58 @@ neuron is a **library-only** Rust crate (no standalone binary) that host process
 | Add a new ASR audio format (e.g. AAC) | `src/asr/audio.rs` | Add a `detect_format` arm + decode path via symphonia |
 | Add a new SenseVoice engine | `src/asr/{sherpa,sensevoice}.rs` + `scripts/prep-sensevoice-onnx.py` | sherpa runs the export unchanged (`NEURON_ASR_RUNTIME=sherpa`); the tract path needs the prep script first because tract 0.21 cannot translate the export's dynamic `Range` PE chain |
 | Add a new decision model / scorer | `src/decision/tract_session.rs` (`from_dir`) + `scripts/prep-laya-onnx.py` | The graph must be prepped first (grounded dims + `DynamicQuantizeLinear` decomposition) or tract cannot load it. Keep `OUTPUT_NAMES` in sync with the export's `graph.output` order — tract discards output tensor names. |
+| Add a new PP-OCR model variant (e.g. v5 mobile tiers, multilingual rec) | `src/capabilities/catalog.rs` (catalog entry) + the model dir layout | A model dir = `det.prepped.onnx` + `rec.prepped.onnx` + `dict.txt` (all prepped with `scripts/prep-ppocr-onnx.py` — metadata-only: dotted TDim symbols + `floor(...)` value_info hints break tract). Register with `capability = "ocr"`, `engine = "paddle-ocr"` |
+| Add a new OCR engine (e.g. `ort` executor, PP-Structure layout) | `src/ocr/paddle_runtime.rs` (`PlanCache` session) or a new `OcrImpl` variant in `src/ocr/mod.rs` + registry arm | The det/rec graphs take dynamic H×W / W, so tract plans are compiled per concrete shape — keep the det (H,W) plan cache and the 64 px rec width-bucketing, or compile time dominates |
 | Extend the model scheduler to another capability | handler: `acquire` → execute with the lease (streaming: `HoldingStream`); add an `Arc<ModelScheduler>` + unload handle in `ServerState::new` | The scheduler is capability-generic (`Capability` keyed); v1 wires LLM only. The unload handle must reach every cache holding that capability's weights. |
+
+### OCR (PP-OCR, loadable, 2026-10-09)
+
+`POST /v1/ocr/recognize` serves a two-stage PP-OCR pipeline (DB++ text
+detection + SVTR-LCNet recognition) over tract, gated by the `tract` feature.
+Weights are the official ONNX exports from the HF `PaddlePaddle/PP-OCRv5_*_onnx`
+/ `PP-OCRv6_*_onnx` repos (Apache-2.0), prepped with
+`scripts/prep-ppocr-onnx.py` — a metadata-only rewrite (Paddle2ONNX emits
+`DynamicDimension.0` dotted symbol names and `floor(...)` value_info shape
+hints that tract's TDim parser rejects; the export graphs themselves are pure
+CNN + MatMul/Softmax with no `Range`/custom ops). Verified 2026-10-09 against
+onnxruntime on all six v5-mobile/server + v6-medium det/rec exports
+(max abs diff ≤ 2e-6 det maps, ≤ 2e-4 rec softmax) — parity spikes under
+`target/ocr-spike/` + `target/ort-spike/` are scratch, not tracked.
+
+Load-bearing points:
+
+1. **`OcrRuntimeRegistry::default_runtime` never loads** — it always returns
+   `UnavailableOcrRuntime`. Blocking on `runtime_for` from `ServerState::new`
+   panics with "Cannot start a runtime from within a runtime" (every
+   `#[tokio::main]` host); the lazy load happens on the handler's
+   `runtime_for` async path. Same shape as the decision registry.
+2. **Plan caches bound tract's per-shape compile cost.** Both graphs have
+   dynamic extents; `PlanCache` compiles one plan per concrete (h, w), capped
+   at 8 entries with FIFO eviction. rec widths are bucketed to multiples of
+   64 (`rec_bucket_w`) so line crops don't multiply cache misses.
+3. **DB++ post-processing is pure Rust** (`src/ocr/db_postprocess.rs`):
+   binarize → 8-connected components → convex hull → min-area rect (rotating
+   calipers) → box-thresh filter → unclip expansion
+   (`offset = area·ratio/perimeter`). Output boxes are axis-aligned; rotated
+   text crops keep their background (acceptable v1 trade-off vs OpenCV's
+   polygon clipping).
+4. **CTC layout mirrors `CTCLabelDecode`**: token 0 = blank, last = space,
+   dict lines between. `ppocrv5_dict.txt` (18383) + 2 = the 18385-vocab
+   export; v6 = 18710. The runtime errors (`invalid_input`) on vocab/graph
+   mismatch instead of decoding garbage. Rec outputs are batch-major
+   `[B, T, vocab]` in these exports (not Paddle's native `[T, B, V]`).
+5. **Preprocessing replicates PaddleOCR verbatim, including BGR**: det uses
+   ImageNet means applied to B, G, R in that order (channel 0 ← rgb[2]);
+   rec uses `(x/255 − 0.5)/0.5` with zero-pad in normalized space, right-padded
+   to the 64 px bucket. `DetResizeForTest` caps the longest side at
+   `det_max_side` (default 960; v6 medium release default is 736) and rounds
+   both sides to the *nearest* multiple of 32.
+6. **Perf note**: tract CPU runs these CNNs 5-12× slower than onnxruntime
+   (measured 2026-10-09: v6 medium det 3.7 s vs 0.5 s at 736²; rec 120-233 ms
+   vs 10-35 ms per line). The `ort` 2.0.0-rc.13 crate compiles and matches
+   onnxruntime speed on Windows (both static-download and `load-dynamic` —
+   the rc.12 vitis.rs gating bug is fixed) and is the designated fast
+   executor; wire it as a second `PlanCache`-style session behind a feature.
 
 ### VoxCPM2 (loadable, 2026-09-27)
 
@@ -96,6 +147,7 @@ The OpenBMB 2026-04 release of VoxCPM (2B params, 48 kHz AudioVAE V2, 30 languag
    - `POST /v1/chat/completions`, `POST /v1/audio/speech`, `POST /v1/audio/transcriptions`, `POST /v1/rerank`, `POST /v1/embeddings` — OpenAI-compat inference
    - `POST /v1/vision/detect`, `/classify`, `/segment`, `/pose` — Vision tasks
    - `POST /v1/vision/lora/register`, `GET /v1/vision/lora/list` — LoRA management
+   - `POST /v1/ocr/recognize` — PP-OCR text detection + recognition (lines + boxes + reading order)
    - `POST /v1/decisions` — Laya discriminative decision scoring (options + act/escalate)
    - `POST /v1/forecast` — Chronos2 zero-shot time-series forecast
    - `POST /v1/vision/gate/score` — Mage-VL StreamMind gate score
@@ -205,9 +257,9 @@ points if you touch it:
 ## Conformance tests
 
 ```bash
-cargo test --lib                                  # 658 unit tests (src/**/mod.rs) — 0 failures (2026-09-29; +30 scheduler/profile/mem_probe/dispatch/config tests)
-cargo test --lib --features voxcpm                # 688 unit tests — 0 failures (VoxCPM2 adds the weights/model/runtime/clone-audio/streaming suites; two pre-existing V1 audiovae roundtrip tests are slow, ~5 min, on ndarray)
-cargo test --lib --features tract                 # 689 unit tests — 0 failures (tract adds the decision + vision-ONNX + sensevoice paths)
+cargo test --lib                                  # 679 unit tests (src/**/mod.rs) — 0 failures (2026-10-09; +15 OCR capability/DTO/registry/handler tests on the 2026-10-08 baseline of 664)
+cargo test --lib --features voxcpm                # 709 unit tests — 0 failures (VoxCPM2 adds the weights/model/runtime/clone-audio/streaming suites; two pre-existing V1 audiovae roundtrip tests are slow, ~5 min, on ndarray)
+cargo test --lib --features tract                 # 733 unit tests — 0 failures (tract adds the decision + vision-ONNX + sensevoice paths + the full PP-OCR pipeline suites: DB++ postprocess, CTC decode, preprocess, paddle runtime)
 cargo test --lib --features tract,sherpa          # 695 unit tests — 0 failures (sherpa adds SherpaAsrRuntime + from_dir + the wav/onnx_meta/fbank/sensevoice coverage)
 cargo build --bench asr_speed --features tract,sherpa  # in-process tract-vs-sherpa benchmark compiles
 cargo bench  --bench asr_speed --features tract,sherpa  # writes target/asr-speed-compare.md
@@ -305,6 +357,7 @@ neuron has **no direct dependency** on any particular host — the integration c
 | `NEURON_SCHEDULER_MAX_CONCURRENCY` | `4` | Concurrent leases per resident model |
 | `NEURON_SCHEDULER_MAX_QUEUE_WAIT_SECS` | `300` | Queue dwell time before `503 queue_timeout` (`0` = forever) |
 | `NEURON_SCHEDULER_PLATFORM` | from `NEURON_DEVICE` | Platform key into the memory profile (`cpu` \| `cuda` \| `metal`); RSS observation runs on `cpu` only |
+| `NEURON_OCR_MODEL_PATH` | (unset) | Path to the PP-OCR pipeline directory (`det.prepped.onnx` + `rec.prepped.onnx` + `dict.txt`, all prepped with `scripts/prep-ppocr-onnx.py`); falls back to scanning `<model_root>/ocr/<model_id>`. Requires `--features tract` |
 
 ## Where the design specs live
 

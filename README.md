@@ -10,7 +10,7 @@ A Rust inference engine for **LLM / TTS / ASR / Rerank / Embedding / Vision** th
 
 ## Why neuron exists
 
-neuron is a single Rust crate that loads model weights, runs inference, and serves the result on OpenAI-compatible endpoints (`/v1/chat/completions`, `/v1/audio/speech`, `/v1/audio/transcriptions`, `/v1/embeddings`, `/v1/rerank`, `/v1/vision/*`, `/v1/messages`, …). The same wire format as OpenAI / vLLM / ollama / llama.cpp server means any compatible client can talk to neuron without modification.
+neuron is a single Rust crate that loads model weights, runs inference, and serves the result on OpenAI-compatible endpoints (`/v1/chat/completions`, `/v1/audio/speech`, `/v1/audio/transcriptions`, `/v1/embeddings`, `/v1/rerank`, `/v1/vision/*`, `/v1/ocr/*`, `/v1/messages`, …). The same wire format as OpenAI / vLLM / ollama / llama.cpp server means any compatible client can talk to neuron without modification.
 
 neuron is **library-only, pure Rust** — there is no standalone binary. Rust hosts embed it via `run_embedded()`, so the inference runs inside the host process. Inference itself is local (weights live under `$NEURON_MODEL_DIRS` and stay on disk), but the OpenAI-compatible HTTP surface that neuron exposes does not restrict itself to local engines. Two non-local cases show up in the matrices below and are worth calling out at the top so the "library is for local inference, why is there Cohere?" question has an immediate answer:
 
@@ -75,6 +75,7 @@ let config = NeuronConfig::new()
 | `/v1/vision/lora/list` | GET | neuron | List all registered LoRA adapters |
 | `/v1/vision/lora/{id}` | GET / DELETE | neuron | Inspect / remove a LoRA adapter |
 | `/v1/vision/gate/score` | POST | neuron | StreamMind gate score (Mage-VL event gate — p_speak per codec window) |
+| `/v1/ocr/recognize` | POST | neuron | PP-OCR text detection + recognition (lines + boxes + confidence, reading order; `tract` feature) |
 | `/v1/forecast` | POST | neuron | Chronos2 zero-shot time-series forecast |
 | `/v1/decisions` | POST | neuron (Laya-shaped) | Score a question's options and return a calibrated decision |
 | `/v1/catalog/sources` | GET | neuron | List registered download sources (`huggingface` / `hf-mirror` / `modelscope`) |
@@ -352,6 +353,31 @@ ONNX backend is pluggable: replace `build_session` in `src/vision/ort_runtime.rs
 
 Laya's upstream ships **safetensors only**, so a tract-loaded graph requires the upstream `scripts/export_onnx.py` + this repo's `scripts/prep-laya-onnx.py` first. Tract cannot be bit-exact with onnxruntime due to codegen differences (parity contract documented in [`docs/superpowers/specs/2026-09-24-laya-decision.md`](docs/superpowers/specs/2026-09-24-laya-decision.md)).
 
+### OCR (PP-OCR detection + recognition)
+
+| Model id (catalog) | Weights (Apache-2.0) | tract | ort (designated fast executor) |
+|---|---|---|---|
+| **ppocrv5-mobile** | `PaddlePaddle/PP-OCRv5_mobile_{det,rec}_onnx` | ✓ | verified, wiring pending |
+| **ppocrv5-server** | `PaddlePaddle/PP-OCRv5_server_{det,rec}_onnx` | ✓ | verified, wiring pending |
+| **ppocrv6-medium** | `PaddlePaddle/PP-OCRv6_medium_{det,rec}_onnx` | ✓ | verified, wiring pending |
+
+`POST /v1/ocr/recognize` runs the full pipeline — DB++ text detection → line crops → SVTR-LCNet recognition → CTC greedy decode → geometric reading order — and returns `{text, regions: [{bbox, text, confidence, line}], image_size, inference_time_ms}`. English + Simplified/Traditional Chinese in one rec model (v6 adds 46 more Latin scripts); all six v5/v6 exports were verified numerically against onnxruntime on 2026-10-09 (max abs diff ≤ 2e-6 detection maps, ≤ 2e-4 recognition softmax).
+
+Requires the `tract` feature and a model directory prepped with `scripts/prep-ppocr-onnx.py` (metadata-only: tract's TDim parser rejects Paddle2ONNX's dotted symbol names and `floor(...)` shape hints):
+
+```bash
+NEURON_OCR_MODEL_PATH=/path/to/dir-with-det+rec+dict \
+cargo run --release --example ocr_smoke --features tract -- /path/to/image.png
+```
+
+```bash
+curl -X POST http://localhost:8083/v1/ocr/recognize \
+  -H "Content-Type: application/json" \
+  -d '{"model":"ppocrv6-medium","image":{"type":"image_url","image_url":{"url":"file:///tmp/invoice.png"}}}'
+```
+
+Performance note: tract CPU runs these CNNs 5-12× slower than onnxruntime on this workload class (measured: v6 medium det 3.7 s vs 0.5 s at 736 px; recognition 120-233 ms vs 10-35 ms per line). The `ort` crate 2.0.0-rc.13 compiles and matches onnxruntime speed on Windows (the rc.12 `vitis.rs` `load-dynamic` gating bug is fixed in rc.13) and is the designated fast executor for a follow-up backend.
+
 ### Engine → capability cross-reference
 
 The same engines also broken down by what they serve, with build flags:
@@ -364,8 +390,8 @@ The same engines also broken down by what they serve, with build flags:
 | **mistralrs** | mistral.rs v0.8.22 (candle-based) | LLM only (40+ families) | `mistralrs` |
 | **mage_vl** | neuron-native candle port | VLM only (`microsoft/Mage-VL`) | included with `candle` |
 | **sherpa** | sherpa-onnx 1.13.x | ASR (SenseVoiceSmall) | `sherpa` |
-| **tract** | tract-onnx 0.21 | ASR (SenseVoiceSmall), Decision (Laya), Vision (ONNX pluggable) | `tract` |
-| **ort** | onnxruntime | Vision (RF-DETR / Florence-2 / custom), Decision (Laya, bit-exact path) | opt-in `ort` integration or `tract` fallback |
+| **tract** | tract-onnx 0.21 | ASR (SenseVoiceSmall), Decision (Laya), Vision (ONNX pluggable), OCR (PP-OCRv5/v6 det+rec) | `tract` |
+| **ort** | onnxruntime | Vision (RF-DETR / Florence-2 / custom), Decision (Laya, bit-exact path), OCR (designated fast executor — verified against `ort` 2.0.0-rc.13) | opt-in `ort` integration or `tract` fallback |
 | **Cohere (hosted)** | HTTP proxy | Rerank | none (no local weights) |
 
 ### Engine overview
@@ -800,7 +826,7 @@ Hosts can register their own engines and adapters by implementing the respective
 
 ## Status (2026-09)
 
-Highlights since the 2026-06 snapshot below. Counts and feature dates match `AGENTS.md` and a fresh `cargo test --lib` (664 passed / 0 failed / 5 ignored on default features; 694 with `--features voxcpm`, as of 2026-10-08).
+Highlights since the 2026-06 snapshot below. Counts and feature dates match `AGENTS.md` and a fresh `cargo test --lib` (679 passed / 0 failed / 5 ignored on default features; 709 with `--features voxcpm`, 733 with `--features tract`, as of 2026-10-09).
 
 **Completed** ✅ (2026-09):
 
@@ -821,8 +847,9 @@ Highlights since the 2026-06 snapshot below. Counts and feature dates match `AGE
 **Verification commands** (2026-10-08):
 
 ```bash
-cargo test --lib                                                       # 664 passed; 0 failed; 5 ignored
-cargo test --lib --features voxcpm                                     # 694 passed; 0 failed (adds VoxCPM2 suites; V1 audiovae roundtrip tests are slow)
+cargo test --lib                                                       # 679 passed; 0 failed; 5 ignored
+cargo test --lib --features tract                                      # 733 passed; 0 failed (adds decision + vision-ONNX + sensevoice + full PP-OCR pipeline suites)
+cargo test --lib --features voxcpm                                     # (adds VoxCPM2 suites; V1 audiovae roundtrip tests are slow)
 cd docs && npm ci --no-audit --no-fund && npx vitepress build           # VitePress site builds
 ```
 
