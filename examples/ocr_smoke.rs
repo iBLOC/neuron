@@ -37,12 +37,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             return Ok(());
         }
     };
+    // Optional second arg: comma-separated languages routed to a rec pack
+    // (e.g. "fr" → rec-latin, "ko" → rec-korean).
+    let languages: Vec<String> = std::env::args()
+        .nth(2)
+        .map(|s| s.split(',').map(|l| l.trim().to_string()).collect())
+        .unwrap_or_default();
     if !std::path::Path::new(&image_path).is_file() {
         eprintln!("[smoke:ocr] skipping: image {image_path} does not exist");
         return Ok(());
     }
     eprintln!("[smoke:ocr] model dir: {model_path}");
     eprintln!("[smoke:ocr] image: {image_path}");
+    if !languages.is_empty() {
+        eprintln!("[smoke:ocr] languages: {languages:?}");
+    }
 
     let model_id = "ppocr-smoke";
     let config = NeuronConfig::new().with_registration_for_capability(
@@ -62,10 +71,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("[smoke:ocr] server bound on 127.0.0.1:{port}");
 
     let image_url = format!("file://{image_path}");
-    let body = serde_json::json!({
+    let mut body = serde_json::json!({
         "model": model_id,
         "image": { "type": "image_url", "image_url": { "url": image_url } }
     });
+    if !languages.is_empty() {
+        body["languages"] = serde_json::json!(languages);
+    }
 
     let client = reqwest::Client::new();
     let url = format!("http://127.0.0.1:{port}/v1/ocr/recognize");

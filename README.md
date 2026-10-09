@@ -363,6 +363,8 @@ Laya's upstream ships **safetensors only**, so a tract-loaded graph requires the
 
 `POST /v1/ocr/recognize` runs the full pipeline — DB++ text detection → line crops → SVTR-LCNet recognition → CTC greedy decode → geometric reading order — and returns `{text, regions: [{bbox, text, confidence, line}], image_size, inference_time_ms}`. English + Simplified/Traditional Chinese in one rec model (v6 adds 46 more Latin scripts); all six v5/v6 exports were verified numerically against onnxruntime on 2026-10-09 (max abs diff ≤ 2e-6 detection maps, ≤ 2e-4 recognition softmax).
 
+**Multilingual packs**: optional `rec-<pack>/` subdirectories of the model dir hold per-script recognition weights + their `ppocrv5_<script>_dict.txt` (from HF `PaddlePaddle/<script>_PP-OCRv5_mobile_rec_onnx`, prepped the same way). A request's `languages` field routes to one pack — `"fr"` → `rec-latin`, `"ko"` → `rec-korean`, `"ru"` → `rec-cyrillic`, `"ar"` → `rec-arabic`, `"hi"` → `rec-devanagari`, plus `"th"`/`"el"`/`"te"`/`"ta"`; `zh`/`en`/`ja` and anything unrouted stay on the default rec, and an exact pack name (`"latin"`) works as an escape hatch. Packs load lazily on first use; the response's `languages` field reports the pack actually used.
+
 Requires the `ocr` meta feature — enabled by either executor, `tract` (pure Rust, default) or `ort` — and a model directory prepped with `scripts/prep-ppocr-onnx.py` (metadata-only: tract's TDim parser rejects Paddle2ONNX's dotted symbol names and `floor(...)` shape hints):
 
 ```bash

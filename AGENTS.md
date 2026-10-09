@@ -50,7 +50,7 @@ neuron is a **library-only** Rust crate (no standalone binary) that host process
 | Add a new ASR audio format (e.g. AAC) | `src/asr/audio.rs` | Add a `detect_format` arm + decode path via symphonia |
 | Add a new SenseVoice engine | `src/asr/{sherpa,sensevoice}.rs` + `scripts/prep-sensevoice-onnx.py` | sherpa runs the export unchanged (`NEURON_ASR_RUNTIME=sherpa`); the tract path needs the prep script first because tract 0.21 cannot translate the export's dynamic `Range` PE chain |
 | Add a new decision model / scorer | `src/decision/tract_session.rs` (`from_dir`) + `scripts/prep-laya-onnx.py` | The graph must be prepped first (grounded dims + `DynamicQuantizeLinear` decomposition) or tract cannot load it. Keep `OUTPUT_NAMES` in sync with the export's `graph.output` order — tract discards output tensor names. |
-| Add a new PP-OCR model variant (e.g. v5 mobile tiers, multilingual rec) | `src/capabilities/catalog.rs` (catalog entry) + the model dir layout | A model dir = `det.prepped.onnx` + `rec.prepped.onnx` + `dict.txt` (all prepped with `scripts/prep-ppocr-onnx.py` — metadata-only: dotted TDim symbols + `floor(...)` value_info hints break tract). Register with `capability = "ocr"`, `engine = "paddle-ocr"` |
+| Add a new PP-OCR model variant (e.g. v5 mobile tiers, multilingual rec) | `src/capabilities/catalog.rs` (catalog entry) + the model dir layout | A model dir = `det.prepped.onnx` + `rec.prepped.onnx` + `dict.txt`, optional `rec-<pack>/` language-pack subdirs (all prepped with `scripts/prep-ppocr-onnx.py` — metadata-only: dotted TDim symbols + `floor(...)` value_info hints break tract). Register with `capability = "ocr"`, `engine = "paddle-ocr"`. Pack dicts are `ppocr/utils/dict/ppocrv5_<script>_dict.txt`, not the v3-era `<script>_dict.txt` |
 | Add a new OCR engine (e.g. `ort` executor, PP-Structure layout) | `src/ocr/paddle_runtime.rs` (`PlanCache` session) or a new `OcrImpl` variant in `src/ocr/mod.rs` + registry arm | The det/rec graphs take dynamic H×W / W, so tract plans are compiled per concrete shape — keep the det (H,W) plan cache and the 64 px rec width-bucketing, or compile time dominates |
 | Extend the model scheduler to another capability | handler: `acquire` → execute with the lease (streaming: `HoldingStream`); add an `Arc<ModelScheduler>` + unload handle in `ServerState::new` | The scheduler is capability-generic (`Capability` keyed); v1 wires LLM only. The unload handle must reach every cache holding that capability's weights. |
 
@@ -111,6 +111,20 @@ Load-bearing points:
    rc.13) — do NOT switch to static `download-binaries`: its /MD CRT
    objects conflict with the /MT objects cc-based deps (`esaxx_rs`) emit on
    Windows and fail linking with LNK2038.
+7. **Multilingual rec packs** (`src/ocr/lang_route.rs`): optional
+   `rec-<pack>/` subdirectories of the model dir hold per-script rec graph
+   + dict pairs (HF `PaddlePaddle/<script>_PP-OCRv5_mobile_rec_onnx`). A
+   request's `languages` field routes the request to ONE rec model: BCP-47
+   codes through the static table (`fr`→`rec-latin`, `ko`→`rec-korean`,
+   `ru`→`rec-cyrillic`, `ar`→`rec-arabic`, `hi`→`rec-devanagari`, plus
+   `th`/`el`/`te`/`ta`; `zh`/`en`/`ja` and unrouted codes stay on the
+   default rec), or an exact pack name (`"latin"`) as the escape hatch.
+   Packs build lazily on first routed request and cache. **Dict gotcha**:
+   the v5 language packs pair with `ppocr/utils/dict/ppocrv5_<script>_dict.txt`
+   (latin: 836 lines → the 838-vocab export), NOT the older v3-era
+   `<script>_dict.txt` files — the runtime's vocab/graph size check rejects
+   the wrong pairing with a clear error. Response `languages` reports the
+   pack actually used (`"default"` / `"latin"` / …).
 
 ### VoxCPM2 (loadable, 2026-09-27)
 

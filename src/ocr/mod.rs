@@ -28,6 +28,8 @@ pub use registry::OcrRuntimeRegistry;
 pub mod ctc;
 #[cfg(feature = "ocr")]
 pub mod db_postprocess;
+#[cfg(feature = "ocr")]
+pub mod lang_route;
 #[cfg(any(feature = "tract", feature = "ort"))]
 pub mod paddle_runtime;
 #[cfg(feature = "ocr")]

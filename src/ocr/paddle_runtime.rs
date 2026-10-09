@@ -36,6 +36,7 @@ use crate::vision::{BBox, VisionImageSource};
 
 use super::ctc::Vocab;
 use super::db_postprocess::{extract_boxes, DbParams, DetBox};
+use super::lang_route::{self, RecPack};
 use super::preprocess::{
     decode_rgb, det_resize_dims, det_to_chw, rec_bucket_w, rec_needed_w, rec_to_chw,
 };
@@ -52,6 +53,24 @@ fn executor_name(e: OcrExecutor) -> &'static str {
     match e {
         OcrExecutor::Tract => "tract",
         OcrExecutor::Ort => "ort",
+    }
+}
+
+/// Build the executor-specific session for one graph.
+fn build_session_for(executor: OcrExecutor, path: &Path) -> Result<Arc<dyn OcrSession>, NeuronError> {
+    match executor {
+        #[cfg(feature = "tract")]
+        OcrExecutor::Tract => Ok(Arc::new(TractPlanCache::new(path.to_path_buf()))),
+        #[cfg(not(feature = "tract"))]
+        OcrExecutor::Tract => Err(NeuronError::invalid_input(
+            "tract executor selected but this build was compiled without the `tract` feature",
+        )),
+        #[cfg(feature = "ort")]
+        OcrExecutor::Ort => Ok(Arc::new(super::ort_session::OrtGraphSession::open(path)?)),
+        #[cfg(not(feature = "ort"))]
+        OcrExecutor::Ort => Err(NeuronError::invalid_input(
+            "ort executor selected but this build was compiled without the `ort` feature",
+        )),
     }
 }
 
@@ -130,9 +149,60 @@ pub struct PaddleOcrRuntime {
     det: Arc<dyn OcrSession>,
     rec: Arc<dyn OcrSession>,
     executor: OcrExecutor,
-    vocab: Vocab,
+    vocab: Arc<Vocab>,
     det_params: DbParams,
     det_max_side: u32,
+    /// Optional `rec-<pack>/` language packs discovered in the model dir.
+    packs: HashMap<String, RecPackAssets>,
+    /// Pack (session, vocab) pairs, built lazily on the first routed request.
+    loaded_packs: Mutex<HashMap<String, (Arc<dyn OcrSession>, Arc<Vocab>)>>,
+}
+
+/// One discovered language pack: a recognition graph + its matching vocab.
+/// PP-OCR language packs are independent weights *and* dicts — never mix a
+/// pack's graph with the default dict.
+struct RecPackAssets {
+    rec_path: PathBuf,
+    dict_path: PathBuf,
+}
+
+/// Scan `<model_dir>/rec-<pack>/` subdirectories for optional language
+/// packs. Each pack must hold a rec graph (`rec.onnx` / `rec.prepped.onnx`)
+/// and a dict; incomplete directories are reported and skipped.
+fn discover_rec_packs(dir: &Path) -> HashMap<String, RecPackAssets> {
+    let mut packs = HashMap::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return packs;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let Some(dir_name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let Some(pack) = dir_name.strip_prefix("rec-") else {
+            continue;
+        };
+        if pack.is_empty() {
+            continue;
+        }
+        let (rec_path, dict_path) = (
+            find_file(&path, &["rec.prepped.onnx", "rec.onnx", "rec_infer.onnx"]),
+            find_file(&path, &["dict.txt", "keys.txt"]),
+        );
+        match (rec_path, dict_path) {
+            (Some(rec_path), Some(dict_path)) => {
+                packs.insert(pack.to_string(), RecPackAssets { rec_path, dict_path });
+            }
+            _ => eprintln!(
+                "[neuron] ocr: language pack dir {} lacks a rec graph or dict; ignored",
+                path.display()
+            ),
+        }
+    }
+    packs
 }
 
 /// tract-backed session: compiles (and FIFO-caches) one optimized plan per
@@ -261,26 +331,16 @@ impl PaddleOcrRuntime {
             ))
         })?;
 
-        let vocab = Vocab::load(&dict_path)?;
+        let vocab = Arc::new(Vocab::load(&dict_path)?);
         let executor = choose_executor(crate::config::env_var("OCR_EXECUTOR").as_deref())?;
-        let build_session = |path: &Path| -> Result<Arc<dyn OcrSession>, NeuronError> {
-            match executor {
-                #[cfg(feature = "tract")]
-                OcrExecutor::Tract => Ok(Arc::new(TractPlanCache::new(path.to_path_buf()))),
-                #[cfg(not(feature = "tract"))]
-                OcrExecutor::Tract => Err(NeuronError::invalid_input(
-                    "tract executor selected but this build was compiled without the `tract` feature",
-                )),
-                #[cfg(feature = "ort")]
-                OcrExecutor::Ort => Ok(Arc::new(super::ort_session::OrtGraphSession::open(path)?)),
-                #[cfg(not(feature = "ort"))]
-                OcrExecutor::Ort => Err(NeuronError::invalid_input(
-                    "ort executor selected but this build was compiled without the `ort` feature",
-                )),
-            }
-        };
-        let det = build_session(&det_path)?;
-        let rec = build_session(&rec_path)?;
+        let packs = discover_rec_packs(&dir);
+        if !packs.is_empty() {
+            let mut names: Vec<&str> = packs.keys().map(|s| s.as_str()).collect();
+            names.sort_unstable();
+            tracing::info!(model_id, packs = ?names, "ocr: discovered recognition language packs");
+        }
+        let det = build_session_for(executor, &det_path)?;
+        let rec = build_session_for(executor, &rec_path)?;
         tracing::info!(
             model_id,
             dir = %dir.display(),
@@ -296,7 +356,49 @@ impl PaddleOcrRuntime {
             vocab,
             det_params: DbParams::default(),
             det_max_side: 960,
+            packs,
+            loaded_packs: Mutex::new(HashMap::new()),
         }))
+    }
+
+    /// Resolve the (session, vocab, pack-name) triple for a request. Routed
+    /// packs build lazily and cache; unrouted requests use the default rec
+    /// with no locking.
+    fn resolve_rec(
+        &self,
+        languages: Option<&Vec<String>>,
+    ) -> Result<(Arc<dyn OcrSession>, Arc<Vocab>, String), NeuronError> {
+        let pack = match languages {
+            Some(langs) => {
+                let known: Vec<String> = self.packs.keys().cloned().collect();
+                lang_route::select_pack(langs, &known)
+            }
+            None => RecPack::Default,
+        };
+        let RecPack::Named(name) = pack else {
+            return Ok((self.rec.clone(), self.vocab.clone(), "default".to_string()));
+        };
+        if let Some((session, vocab)) = self.loaded_packs.lock().unwrap().get(&name) {
+            return Ok((session.clone(), vocab.clone(), name));
+        }
+        let assets = self.packs.get(&name).ok_or_else(|| {
+            NeuronError::invalid_input(format!(
+                "languages routed to pack '{name}' but no rec-{name}/ directory exists in \
+                 the model dir"
+            ))
+        })?;
+        let session = build_session_for(self.executor, &assets.rec_path)?;
+        let vocab = Arc::new(Vocab::load(&assets.dict_path)?);
+        tracing::info!(
+            pack = %name,
+            vocab = vocab.tokens.len(),
+            "ocr: loaded recognition language pack"
+        );
+        let mut loaded = self.loaded_packs.lock().unwrap();
+        let (session, vocab) = loaded
+            .entry(name.clone())
+            .or_insert_with(|| (session, vocab));
+        Ok((session.clone(), vocab.clone(), name))
     }
 }
 
@@ -340,13 +442,14 @@ impl OcrRuntime for PaddleOcrRuntime {
         let boxes = extract_boxes(&prob, map_w, map_h, scale_x, scale_y, &params);
 
         // ---- Stage 2: recognition, line by line --------------------------
+        let (rec_session, rec_vocab, pack_used) = self.resolve_rec(req.languages.as_ref())?;
         let mut regions: Vec<OcrTextRegion> = Vec::with_capacity(boxes.len());
         for (i, det_box) in boxes.iter().enumerate() {
             let (line, line_w, line_h) = crop_rgb(&rgb, src_w, src_h, det_box);
             let needed = rec_needed_w(line_w, line_h, REC_TARGET_H);
             let bucket = rec_bucket_w(needed);
             let rec_chw = rec_to_chw(&line, line_w, line_h, bucket, REC_TARGET_H)?;
-            let (probs, shape) = self.rec.run(rec_chw, REC_TARGET_H, bucket)?;
+            let (probs, shape) = rec_session.run(rec_chw, REC_TARGET_H, bucket)?;
             let (t, vocab) = match shape.as_slice() {
                 [_, t, v] => (*t, *v),
                 other => {
@@ -355,15 +458,15 @@ impl OcrRuntime for PaddleOcrRuntime {
                     )))
                 }
             };
-            if vocab != self.vocab.tokens.len() {
+            if vocab != rec_vocab.tokens.len() {
                 return Err(NeuronError::invalid_input(format!(
                     "vocab size {} does not match the recognition graph's {} outputs — \
-                     wrong dict for this rec export",
-                    self.vocab.tokens.len(),
+                     wrong dict for this rec export (pack '{pack_used}')",
+                    rec_vocab.tokens.len(),
                     vocab
                 )));
             }
-            let (text, confidence) = self.vocab.decode(&probs, t, vocab);
+            let (text, confidence) = rec_vocab.decode(&probs, t, vocab);
             if text.is_empty() {
                 continue;
             }
@@ -398,7 +501,8 @@ impl OcrRuntime for PaddleOcrRuntime {
             inference_time_ms: start.elapsed().as_millis() as u32,
             text,
             regions,
-            languages: req.languages.unwrap_or_else(|| vec!["en".into(), "zh".into()]),
+            // The recognition pack actually used ("default" or e.g. "latin").
+            languages: vec![pack_used],
         })
     }
 
@@ -555,6 +659,28 @@ fn find_file(dir: &Path, names: &[&str]) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn discover_rec_packs_finds_complete_dirs_only() {
+        let dir = std::env::temp_dir().join(format!("neuron-ocr-packs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let latin = dir.join("rec-latin");
+        std::fs::create_dir_all(&latin).unwrap();
+        std::fs::write(latin.join("rec.prepped.onnx"), b"x").unwrap();
+        std::fs::write(latin.join("dict.txt"), "A\nB\n").unwrap();
+        // incomplete pack: no dict
+        let broken = dir.join("rec-korean");
+        std::fs::create_dir_all(&broken).unwrap();
+        std::fs::write(broken.join("rec.onnx"), b"x").unwrap();
+        // non-pack dirs are ignored
+        std::fs::create_dir_all(dir.join("det")).unwrap();
+
+        let packs = discover_rec_packs(&dir);
+        assert!(packs.contains_key("latin"), "{:?}", packs.keys());
+        assert!(!packs.contains_key("korean"));
+        assert_eq!(packs["latin"].dict_path.file_name().unwrap(), "dict.txt");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn choose_executor_resolves_default_and_validates_names() {
