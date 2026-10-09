@@ -31,6 +31,7 @@ pub struct ServerState {
     pub rerank_registry: Arc<crate::rerank::RerankRuntimeRegistry>,
     pub embedding_registry: Arc<crate::embedding::EmbeddingRuntimeRegistry>,
     pub vision_registry: Arc<crate::vision::VisionRuntimeRegistry>,
+    pub ocr_registry: Arc<crate::ocr::OcrRuntimeRegistry>,
     pub chronos2_registry: Arc<crate::chronos2::Chronos2Registry>,
     pub decision_registry: Arc<crate::decision::DecisionRuntimeRegistry>,
 
@@ -43,6 +44,7 @@ pub struct ServerState {
     pub(crate) rerank_registry_lock: Arc<Mutex<crate::rerank::RerankRuntimeRegistry>>,
     pub(crate) embedding_registry_lock: Arc<Mutex<crate::embedding::EmbeddingRuntimeRegistry>>,
     pub(crate) vision_registry_lock: Arc<Mutex<crate::vision::VisionRuntimeRegistry>>,
+    pub(crate) ocr_registry_lock: Arc<Mutex<crate::ocr::OcrRuntimeRegistry>>,
     pub(crate) chronos2_registry_lock: Arc<Mutex<crate::chronos2::Chronos2Registry>>,
     pub(crate) decision_registry_lock: Arc<Mutex<crate::decision::DecisionRuntimeRegistry>>,
 
@@ -56,6 +58,7 @@ pub struct ServerState {
     pub rerank: Arc<dyn crate::rerank::RerankRuntime>,
     pub embedding: Arc<dyn crate::embedding::EmbeddingRuntime>,
     pub vision: Arc<dyn crate::vision::VisionRuntime>,
+    pub ocr: Arc<dyn crate::ocr::OcrRuntime>,
     pub decision: Arc<dyn crate::decision::DecisionRuntime>,
 
     // -- Engine registries (Phase 1, lazy-populated) --
@@ -575,6 +578,30 @@ impl ServerState {
         }
         let vision_shortcut = vision_registry.default_runtime();
 
+        // ---- OCR registry ---------------------------------------------------
+        // OCR is opt-in via config.registrations (capability = "ocr", engine
+        // = "paddle-ocr"). Defaults to no models registered (the registry
+        // hands out UnavailableOcrRuntime, which surfaces a 501 per request).
+        let mut ocr_registry = crate::ocr::OcrRuntimeRegistry::new(config_arc.clone());
+        for reg in &config.registrations {
+            if reg.capability == EngineType::Ocr {
+                if let Ok(impl_id) = crate::ocr::OcrImpl::parse(&reg.engine) {
+                    let _ = ocr_registry.register(
+                        reg.model_id.clone(),
+                        impl_id,
+                        reg.device,
+                        reg.required_memory_bytes,
+                    );
+                } else {
+                    eprintln!(
+                        "[neuron] config.registrations: unknown OCR engine impl {:?} for model {:?}",
+                        reg.engine, reg.model_id
+                    );
+                }
+            }
+        }
+        let ocr_shortcut = ocr_registry.default_runtime();
+
         // ---- Vision LoRA registry (empty by default) -----------------------
         let vision_lora_registry = Arc::new(crate::vision::LoraRegistry::new());
 
@@ -663,6 +690,7 @@ impl ServerState {
         let rerank_registry_lock = Arc::new(Mutex::new(rerank_registry.clone()));
         let embedding_registry_lock = Arc::new(Mutex::new(embedding_registry.clone()));
         let vision_registry_lock = Arc::new(Mutex::new(vision_registry.clone()));
+        let ocr_registry_lock = Arc::new(Mutex::new(ocr_registry.clone()));
         let decision_registry_lock = Arc::new(Mutex::new(decision_registry.clone()));
 
         // ---- Model scheduler (LLM capability, v1) ------------------------
@@ -706,6 +734,7 @@ impl ServerState {
             rerank_registry: Arc::new(rerank_registry),
             embedding_registry: Arc::new(embedding_registry),
             vision_registry: Arc::new(vision_registry),
+            ocr_registry: Arc::new(ocr_registry),
             decision_registry: Arc::new(decision_registry),
             vision_lora_registry,
             chronos2_registry,
@@ -715,6 +744,7 @@ impl ServerState {
             rerank_registry_lock,
             embedding_registry_lock,
             vision_registry_lock,
+            ocr_registry_lock,
             chronos2_registry_lock,
             decision_registry_lock,
             llm: llm_shortcut,
@@ -723,6 +753,7 @@ impl ServerState {
             rerank: rerank_shortcut,
             embedding: embedding_shortcut,
             vision: vision_shortcut,
+            ocr: ocr_shortcut,
             decision: decision_shortcut,
             engines: Arc::new(engines),
             adapters: {
@@ -816,6 +847,21 @@ impl ServerState {
             }
         }
 
+        // Same registry-not-shortcut reasoning as decision above.
+        {
+            let reg = self.ocr_registry_lock.lock().await;
+            for model in reg.list_models() {
+                models.push(ModelInfo {
+                    id: format!("ocr/{}", model.id),
+                    object: "model".to_string(),
+                    created: now,
+                    owned_by: model.owned_by,
+                    capabilities: Some(vec!["ocr".to_string()]),
+                    is_default: None,
+                });
+            }
+        }
+
         models
     }
 
@@ -864,6 +910,12 @@ impl ServerState {
                     .map_err(|e| crate::llm::NeuronError::new(format!("Invalid vision engine: {e}")))?;
                 reg.register(model_id, impl_id, device, required_memory_bytes)?;
             }
+            "ocr" => {
+                let mut reg = self.ocr_registry_lock.lock().await;
+                let impl_id = crate::ocr::OcrImpl::parse(&engine)
+                    .map_err(|e| crate::llm::NeuronError::new(format!("Invalid OCR engine: {e}")))?;
+                reg.register(model_id, impl_id, device, required_memory_bytes)?;
+            }
             "chronos2" => {
                 let mut reg = self.chronos2_registry_lock.lock().await;
                 reg.register(model_id, device, required_memory_bytes)?;
@@ -891,7 +943,7 @@ impl ServerState {
             }
             _ => {
                 return Err(crate::llm::NeuronError::new(format!(
-                    "Unknown capability: {}. Valid: llm, tts, asr, rerank, embedding, vision, chronos2, decision",
+                    "Unknown capability: {}. Valid: llm, tts, asr, rerank, embedding, vision, chronos2, decision, ocr",
                     capability
                 )));
             }

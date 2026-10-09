@@ -122,6 +122,10 @@ harness = false
 name = "model_matrix"
 harness = false
 
+[[example]]
+name = "ocr_smoke"
+required-features = ["tract"]
+
 [features]
 default = ["candle"]
 candle = ["dep:candle", "dep:candle-nn", "dep:candle-transformers", "dep:tokenizers", "dep:image", "dep:base64", "dep:safetensors", "dep:wide"]
@@ -136,7 +140,9 @@ mistralrs = ["dep:mistralrs", "candle"]
 ndarray = ["dep:ndarray"]
 # Own-ONNX ASR (SenseVoice via tract) reuses the tract feature; rustfft
 # backs the kaldi-style fbank extraction in src/asr/fbank.rs.
-tract = ["dep:tract-onnx", "dep:ndarray", "dep:tokenizers", "dep:rustfft"]
+# The PP-OCR pipeline (src/ocr/paddle_runtime.rs) also lives under `tract`
+# and needs image decode (JPEG/PNG) + base64 for the request image source.
+tract = ["dep:tract-onnx", "dep:ndarray", "dep:tokenizers", "dep:rustfft", "dep:image", "dep:base64"]
 sherpa = ["dep:sherpa-onnx"]
 
 

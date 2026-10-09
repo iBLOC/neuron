@@ -21,6 +21,7 @@ use crate::llm::{ChatMessage, ChatRequest, ModelInfo};
 
 use super::{ServerError, ServerState};
 use crate::embedding::{EmbeddingInput, EmbeddingRequest};
+use crate::ocr::{OcrRequest, OcrResponse};
 use crate::vision::{
     load_lora_from_path, LoraAdapterMeta, LoraListResponse, LoraRegisterRequest,
     LoraRegisterResponse, LoraAdapterStatus, VisionRequest, VisionResponse, VisionTask,
@@ -53,7 +54,8 @@ pub async fn info_handler(
             "tts": true,
             "asr": true,
             "rerank": true,
-            "vision": true
+            "vision": true,
+            "ocr": true
         }
     }))
 }
@@ -579,6 +581,37 @@ async fn vision_run_task(
 
     rt.run(req)
         .await
+        .map_err(|e| match e.error_type.as_str() {
+            "invalid_request_error" => ServerError::BadRequest(e.message),
+            "not_implemented" | "not_initialized" => ServerError::NotImplemented(e.message),
+            _ => ServerError::Internal(e.message),
+        })
+}
+
+// ---------------------------------------------------------------------------
+// OCR
+// ---------------------------------------------------------------------------
+
+/// `POST /v1/ocr/recognize` — PP-OCR text detection + recognition.
+///
+/// Runs the full pipeline (DB++ detection → line crops → SVTR recognition →
+/// reading order) over a single image. neuron-shaped endpoint (OpenAI has no
+/// OCR wire format to mirror); the image source reuses the vision module's
+/// OpenAI-compatible content-part enum.
+pub async fn ocr_recognize(
+    State(state): State<ServerState>,
+    Json(req): Json<OcrRequest>,
+) -> Result<Json<OcrResponse>, ServerError> {
+    let model = req.model.clone();
+    let rt = state
+        .ocr_registry
+        .runtime_for(&model)
+        .await
+        .unwrap_or_else(|_| state.ocr.clone());
+
+    rt.run(req)
+        .await
+        .map(Json)
         .map_err(|e| match e.error_type.as_str() {
             "invalid_request_error" => ServerError::BadRequest(e.message),
             "not_implemented" | "not_initialized" => ServerError::NotImplemented(e.message),

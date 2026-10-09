@@ -68,6 +68,7 @@ pub struct NeuronHealth {
     pub rerank_loaded: bool,
     pub embedding_loaded: bool,
     pub vision_loaded: bool,
+    pub ocr_loaded: bool,
 }
 
 pub async fn run_embedded(cfg: NeuronEmbedConfig) -> Result<NeuronHandle, String> {
@@ -114,6 +115,7 @@ pub fn health(handle: &NeuronHandle) -> NeuronHealth {
         rerank_loaded: true,
         embedding_loaded: true,
         vision_loaded: true,
+        ocr_loaded: true,
     }
 }
 

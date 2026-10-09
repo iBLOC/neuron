@@ -184,6 +184,20 @@ pub fn default_capabilities() -> Vec<ModelCapabilities> {
         // Florence-2 (vision-language, text-prompted)
         cap("ort", "florence-2-base", &[ImageInput], &[BoundingBox],
             &[ApiStyle::openai_vision()], false, false, false, false),
+        // PP-OCR (Baidu PaddlePaddle, Apache-2.0) — two-stage CNN OCR
+        // (DB++ text detection + SVTR-LCNet recognition). Served by the
+        // `paddle-ocr` engine (pluggable ONNX session: tract by default,
+        // `ort` as the performance backend). Official ONNX exports from the
+        // `PaddlePaddle/PP-OCRv5_*_onnx` / `PP-OCRv6_*_onnx` HF repos must be
+        // prepped with `scripts/prep-ppocr-onnx.py` (metadata-only: tract's
+        // TDim parser rejects Paddle2ONNX's dotted/floor shape hints).
+        // Verified tract-0.21.10 + onnxruntime parity 2026-10-09.
+        cap("paddle-ocr", "ppocrv5-mobile", &[ImageInput, DocumentInput], &[TextOutput, BoundingBox],
+            &[ApiStyle::openai_vision()], false, false, false, false),
+        cap("paddle-ocr", "ppocrv5-server", &[ImageInput, DocumentInput], &[TextOutput, BoundingBox],
+            &[ApiStyle::openai_vision()], false, false, false, false),
+        cap("paddle-ocr", "ppocrv6-medium", &[ImageInput, DocumentInput], &[TextOutput, BoundingBox],
+            &[ApiStyle::openai_vision()], false, false, false, false),
         // Mage-VL (codec-native streaming VLM, image+video understanding)
         // Apache-2.0 license. Uses the neuron-native mage_vl vendor tree
         // (candle port of MageViT + Qwen3-4B) for inference; register

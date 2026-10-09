@@ -29,7 +29,8 @@ pub use error::ServerError;
 pub use handlers::{
     audio_speech, audio_transcriptions, chat_completions, decisions, embedding_handler, forecast,
     gate_score, health_handler, info_handler, list_models, rerank, scheduler_evict,
-    scheduler_status, vision_classify, vision_detect, vision_lora_list, vision_lora_register,
+    ocr_recognize, scheduler_status, vision_classify, vision_detect, vision_lora_list,
+    vision_lora_register,
     vision_lora_unregister, vision_pose, vision_segment, ChatCompletionsRequest,
     DecisionHttpRequest, EmbeddingHttpRequest, ModelList, RerankHttpRequest, SpeechRequest,
     TranscriptionResponse,
@@ -80,6 +81,7 @@ pub fn routes() -> Router<ServerState> {
         .route("/v1/vision/classify", post(vision_classify))
         .route("/v1/vision/segment", post(vision_segment))
         .route("/v1/vision/pose", post(vision_pose))
+        .route("/v1/ocr/recognize", post(ocr_recognize))
         .route("/v1/vision/lora/register", post(vision_lora_register))
         .route("/v1/vision/lora/list", get(vision_lora_list))
         .route(
@@ -486,6 +488,39 @@ mod tests {
             axum::Json(req),
         ).await;
         assert!(resp.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_ocr_recognize_unregistered_surfaces_501_error() {
+        // No OCR model registered: the handler falls back to the
+        // UnavailableOcrRuntime shortcut, whose not_initialized error maps
+        // to 501 NotImplemented — the route is reachable end-to-end.
+        let config = crate::config::NeuronConfig::default();
+        let state = ServerState::new(config);
+        let req = crate::ocr::OcrRequest {
+            model: "ppocrv5-mobile".into(),
+            image: crate::vision::VisionImageSource::ImageUrl {
+                image_url: crate::vision::VisionImageUrl {
+                    url: "test".into(),
+                    detail: None,
+                },
+            },
+            languages: None,
+            det_thresh: None,
+            det_box_thresh: None,
+            det_unclip_ratio: None,
+            det_max_side: None,
+            rec_batch_size: None,
+        };
+        let resp = handlers::ocr_recognize(
+            axum::extract::State(state),
+            axum::Json(req),
+        ).await;
+        let err = resp.err().expect("unavailable OCR runtime must error");
+        assert!(
+            matches!(err, crate::server::error::ServerError::NotImplemented(_)),
+            "expected NotImplemented, got {err:?}"
+        );
     }
 
     // -- Mage-VL StreamMind gate validation tests ----------------------------

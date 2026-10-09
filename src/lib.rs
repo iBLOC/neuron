@@ -16,6 +16,7 @@ pub mod llm;
 pub mod mage_vl;
 pub mod metrics;
 pub mod models;
+pub mod ocr;
 pub mod rerank;
 pub mod scheduler;
 pub mod server;
@@ -47,6 +48,9 @@ pub use embedding::{
 
 #[cfg(feature = "candle")]
 pub use embedding::MiniLmL6V2EmbeddingRuntime;
+pub use ocr::{OcrImpl, OcrRegistryKey, OcrRequest, OcrResponse, OcrRuntime, OcrRuntimeRegistry};
+#[cfg(feature = "tract")]
+pub use ocr::PaddleOcrRuntime;
 pub use llm::{
     ChatChunk, ChatMessage, ChatRequest, ChatResponse, ChatResult, Choice, DeltaMessage,
     LlmImpl, LlmRuntime, LlmRuntimeRegistry, ModelInfo, NeuronError,
