@@ -365,6 +365,8 @@ Laya's upstream ships **safetensors only**, so a tract-loaded graph requires the
 
 **Multilingual packs**: optional `rec-<pack>/` subdirectories of the model dir hold per-script recognition weights + their `ppocrv5_<script>_dict.txt` (from HF `PaddlePaddle/<script>_PP-OCRv5_mobile_rec_onnx`, prepped the same way). A request's `languages` field routes to one pack — `"fr"` → `rec-latin`, `"ko"` → `rec-korean`, `"ru"` → `rec-cyrillic`, `"ar"` → `rec-arabic`, `"hi"` → `rec-devanagari`, plus `"th"`/`"el"`/`"te"`/`"ta"`; `zh`/`en`/`ja` and anything unrouted stay on the default rec, and an exact pack name (`"latin"`) works as an escape hatch. Packs load lazily on first use; the response's `languages` field reports the pack actually used.
 
+**Layout analysis (optional, `ort` executor)**: drop `layout.onnx` (PP-DocLayoutV3, ~130 MB, from HF `PaddlePaddle/PP-DocLayoutV3_onnx`) into the model dir and the response gains a `layout[]` array — 25 region classes (text / table / image / display_formula / doc_title / header / footer / seal / …) with boxes and scores — plus a per-line `kind` naming the region each text line sits in. Table and figure regions come back boxed for downstream processing; text regions are already OCR'd.
+
 Requires the `ocr` meta feature — enabled by either executor, `tract` (pure Rust, default) or `ort` — and a model directory prepped with `scripts/prep-ppocr-onnx.py` (metadata-only: tract's TDim parser rejects Paddle2ONNX's dotted symbol names and `floor(...)` shape hints):
 
 ```bash

@@ -90,13 +90,13 @@ impl OcrSession for OrtGraphSession {
 /// Fixed-size checkout pool: `with` blocks until a slot is free and hands
 /// it back on scope exit. Generic (and unit-tested) over the stored type so
 /// the blocking semantics don't need a real onnxruntime to verify.
-struct SessionPool<T> {
+pub(crate) struct SessionPool<T> {
     items: Mutex<Vec<T>>,
     available: Condvar,
 }
 
 impl<T> SessionPool<T> {
-    fn new(items: Vec<T>) -> Self {
+    pub(crate) fn new(items: Vec<T>) -> Self {
         Self {
             items: Mutex::new(items),
             available: Condvar::new(),
@@ -106,7 +106,7 @@ impl<T> SessionPool<T> {
     /// Run `f` with exclusive access to one pooled item, blocking while all
     /// slots are checked out. The item returns to the pool before `with`
     /// returns (panics included — the guard pushes back in its Drop).
-    fn with<F, R>(&self, f: F) -> R
+    pub(crate) fn with<F, R>(&self, f: F) -> R
     where
         F: FnOnce(&mut T) -> R,
     {

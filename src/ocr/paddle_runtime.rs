@@ -169,6 +169,9 @@ pub struct PaddleOcrRuntime {
     packs: HashMap<String, RecPackAssets>,
     /// Pack (session, vocab) pairs, built lazily on the first routed request.
     loaded_packs: Mutex<HashMap<String, (Arc<dyn OcrSession>, Arc<Vocab>)>>,
+    /// Document layout model (`layout.onnx`), ort-executor only.
+    #[cfg(feature = "ort")]
+    layout: Option<super::layout::LayoutSession>,
 }
 
 /// One discovered language pack: a recognition graph + its matching vocab.
@@ -358,6 +361,29 @@ impl PaddleOcrRuntime {
         }
         let det = build_session_for(executor, &det_path, session_pool)?;
         let rec = build_session_for(executor, &rec_path, session_pool)?;
+
+        // Optional layout model. ort-only in v1: the DocLayoutV3 export's op
+        // set (GridSample, ScatterND, dynamic Range) is beyond tract 0.21.
+        #[cfg(feature = "ort")]
+        let layout = match (super::layout::layout_model_path(&dir), executor) {
+            (Some(path), OcrExecutor::Ort) => {
+                if crate::config::env_var("OCR_LAYOUT").as_deref() == Some("false") {
+                    None
+                } else {
+                    Some(super::layout::LayoutSession::open(&path, session_pool)?)
+                }
+            }
+            (Some(path), _) => {
+                eprintln!(
+                    "[neuron] ocr: layout model {} found but only the `ort` executor can run \
+                     it (its op set exceeds tract 0.21); layout output disabled",
+                    path.display()
+                );
+                None
+            }
+            (None, _) => None,
+        };
+
         tracing::info!(
             model_id,
             dir = %dir.display(),
@@ -376,6 +402,8 @@ impl PaddleOcrRuntime {
             session_pool,
             packs,
             loaded_packs: Mutex::new(HashMap::new()),
+            #[cfg(feature = "ort")]
+            layout,
         }))
     }
 
@@ -435,6 +463,13 @@ impl OcrRuntime for PaddleOcrRuntime {
         let bytes = fetch_image(&req.image).await?;
         let (rgb, src_w, src_h) = decode_rgb(&bytes)?;
 
+        // ---- Stage 0: layout (optional; ort executor only) ---------------
+        let mut layout_regions: Option<Vec<super::LayoutRegion>> = None;
+        #[cfg(feature = "ort")]
+        if let Some(layout) = &self.layout {
+            layout_regions = Some(layout.detect(&rgb, src_w, src_h)?);
+        }
+
         // ---- Stage 1: detection ------------------------------------------
         let params = DbParams {
             thresh: req.det_thresh.unwrap_or(self.det_params.thresh),
@@ -488,16 +523,22 @@ impl OcrRuntime for PaddleOcrRuntime {
             if text.is_empty() {
                 continue;
             }
+            let bbox = BBox {
+                x: det_box.x0.max(0.0),
+                y: det_box.y0.max(0.0),
+                w: (det_box.x1 - det_box.x0).max(1.0),
+                h: (det_box.y1 - det_box.y0).max(1.0),
+            };
+            let kind = layout_regions
+                .as_ref()
+                .and_then(|l| super::containing_kind(l, &bbox))
+                .map(|r| r.kind.clone());
             regions.push(OcrTextRegion {
-                bbox: BBox {
-                    x: det_box.x0.max(0.0),
-                    y: det_box.y0.max(0.0),
-                    w: (det_box.x1 - det_box.x0).max(1.0),
-                    h: (det_box.y1 - det_box.y0).max(1.0),
-                },
+                bbox,
                 text,
                 confidence,
                 line: i,
+                kind,
             });
         }
 
@@ -521,6 +562,7 @@ impl OcrRuntime for PaddleOcrRuntime {
             regions,
             // The recognition pack actually used ("default" or e.g. "latin").
             languages: vec![pack_used],
+            layout: layout_regions,
         })
     }
 
@@ -734,6 +776,7 @@ mod tests {
             text: text.into(),
             confidence: 0.9,
             line: 0,
+            kind: None,
         }
     }
 

@@ -30,6 +30,8 @@ pub mod ctc;
 pub mod db_postprocess;
 #[cfg(feature = "ocr")]
 pub mod lang_route;
+#[cfg(feature = "ort")]
+pub mod layout;
 #[cfg(any(feature = "tract", feature = "ort"))]
 pub mod paddle_runtime;
 #[cfg(feature = "ocr")]
@@ -38,6 +40,8 @@ pub mod preprocess;
 pub mod ort_session;
 #[cfg(any(feature = "tract", feature = "ort"))]
 pub use paddle_runtime::PaddleOcrRuntime;
+#[cfg(feature = "ort")]
+pub use layout::LayoutSession;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -138,6 +142,10 @@ pub struct OcrTextRegion {
     pub confidence: f32,
     /// Position in reading order (0 = first line).
     pub line: usize,
+    /// Containing layout region's class (e.g. `"text"`, `"doc_title"`),
+    /// present only when a layout model ran.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
 }
 
 /// Response DTO for `POST /v1/ocr/recognize`.
@@ -154,6 +162,39 @@ pub struct OcrResponse {
     pub regions: Vec<OcrTextRegion>,
     /// Language packs actually used by the recognizer.
     pub languages: Vec<String>,
+    /// Document layout regions (tables, figures, formulas, titles, …) when
+    /// a `layout.onnx` runs alongside the OCR graphs (`ort` executor only).
+    /// Text lines carry their containing region's class in `OcrTextRegion::kind`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layout: Option<Vec<LayoutRegion>>,
+}
+
+/// One document layout region (PP-DocLayoutV3 class + box, original-image
+/// pixels). Plain data — the `ort`-gated engine lives in [`layout`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LayoutRegion {
+    /// One of `layout::LAYOUT_LABELS` (`"text"`, `"table"`, `"image"`, …).
+    pub kind: String,
+    pub bbox: BBox,
+    pub score: f32,
+}
+
+/// The layout region containing a text line's center, if any — smallest
+/// container wins. Pure data helper so text regions can be stamped with
+/// their `kind` in every executor build.
+pub fn containing_kind<'a>(
+    regions: &'a [LayoutRegion],
+    bbox: &BBox,
+) -> Option<&'a LayoutRegion> {
+    let cx = bbox.x + bbox.w / 2.0;
+    let cy = bbox.y + bbox.h / 2.0;
+    regions
+        .iter()
+        .filter(|r| {
+            let b = &r.bbox;
+            cx >= b.x && cx <= b.x + b.w && cy >= b.y && cy <= b.y + b.h
+        })
+        .min_by(|a, b| (a.bbox.w * a.bbox.h).total_cmp(&(b.bbox.w * b.bbox.h)))
 }
 
 #[async_trait]
@@ -234,15 +275,18 @@ mod tests {
                     text: "Quarterly Report".into(),
                     confidence: 0.984,
                     line: 0,
+                    kind: None,
                 },
                 OcrTextRegion {
                     bbox: BBox { x: 120.0, y: 220.0, w: 260.0, h: 40.0 },
                     text: "净利润: ¥31.4M".into(),
                     confidence: 0.951,
                     line: 1,
+                    kind: None,
                 },
             ],
             languages: vec!["en".into(), "zh".into()],
+            layout: None,
         };
         let json = serde_json::to_string(&resp).unwrap();
         let back: OcrResponse = serde_json::from_str(&json).unwrap();

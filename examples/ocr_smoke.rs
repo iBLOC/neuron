@@ -93,6 +93,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         handle.join().await;
         std::process::exit(1);
     }
+    if std::env::var("NEURON_OCR_DEBUG").as_deref() == Ok("1") {
+        eprintln!("[smoke:ocr] payload: {payload}");
+    }
 
     let text = payload["text"].as_str().unwrap_or_default();
     let regions = payload["regions"].as_array().map(|a| a.len()).unwrap_or(0);
@@ -100,6 +103,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!(
         "[smoke:ocr] OK: {regions} regions in {ms} ms\n--- text ---\n{text}\n------------"
     );
+    if let Some(layout) = payload["layout"].as_array() {
+        let kinds: Vec<&str> = layout
+            .iter()
+            .filter_map(|r| r["kind"].as_str())
+            .collect();
+        eprintln!("[smoke:ocr] layout: {} regions {kinds:?}", layout.len());
+    }
 
     handle.request_shutdown();
     handle.join().await;

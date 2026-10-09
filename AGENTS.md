@@ -1,6 +1,6 @@
 # neuron (神经元) — AGENTS guide
 
-**Status:** READ-ONLY contributor reference. Updated 2026-10-09 (**OCR capability (PP-OCR) landed** — `POST /v1/ocr/recognize`, config-driven registration, tract **and ort** executors behind the `ocr` meta feature (`NEURON_OCR_EXECUTOR`), DB++ postprocess + CTC, ort measured 10.3× faster end-to-end, see the "OCR (PP-OCR, loadable)" section; **679 lib tests** default / **733 with `--features tract`** / **703 with `--features ort`** as of 2026-10-09; prior 2026-09-27 baseline: post-candle 0.11 upgrade per `huggingface/candle.git#aebc405`; post-`f643c1c` LLM auto-registration + USERPROFILE fallback on Windows GUI processes; **VoxCPM2 (2B/48 kHz) local inference landed** — `NEURON_TTS_RUNTIME=voxcpm2`, direct checkpoint load, see the "VoxCPM2 (loadable)" section; **model scheduler landed** — bounded-memory LLM swap queue behind `/v1/chat/completions` + `/v1/messages`, see the "Model scheduler" bullet and `docs/superpowers/specs/2026-09-29-model-scheduler.md`; GitHub Pages CI now base-URL-configured + adds a `lychee` link-check job; prior 2026-09-25 baseline: post-rename `neure → neuron` per commit `e3d2c41` (2026-09-21); `AppState::register_engine` capability per `bccef7c`; earlier 2026-07-19 baseline: license switch + Shadow decoupling).
+**Status:** READ-ONLY contributor reference. Updated 2026-10-09 (**OCR capability (PP-OCR) landed** — `POST /v1/ocr/recognize`, config-driven registration, tract **and ort** executors behind the `ocr` meta feature (`NEURON_OCR_EXECUTOR`), DB++ postprocess + CTC, multilingual rec packs routed by `languages`, optional PP-DocLayoutV3 layout model (`layout.onnx`, ort only), ort measured 10.3× faster end-to-end, see the "OCR (PP-OCR, loadable)" section; **679 lib tests** default / **739 with `--features tract`** / **715 with `--features ort`** / **746 with `tract,ort`** as of 2026-10-09; prior 2026-09-27 baseline: post-candle 0.11 upgrade per `huggingface/candle.git#aebc405`; post-`f643c1c` LLM auto-registration + USERPROFILE fallback on Windows GUI processes; **VoxCPM2 (2B/48 kHz) local inference landed** — `NEURON_TTS_RUNTIME=voxcpm2`, direct checkpoint load, see the "VoxCPM2 (loadable)" section; **model scheduler landed** — bounded-memory LLM swap queue behind `/v1/chat/completions` + `/v1/messages`, see the "Model scheduler" bullet and `docs/superpowers/specs/2026-09-29-model-scheduler.md`; GitHub Pages CI now base-URL-configured + adds a `lychee` link-check job; prior 2026-09-25 baseline: post-rename `neure → neuron` per commit `e3d2c41` (2026-09-21); `AppState::register_engine` capability per `bccef7c`; earlier 2026-07-19 baseline: license switch + Shadow decoupling).
 
 ## What neuron is
 
@@ -127,6 +127,17 @@ Load-bearing points:
    `<script>_dict.txt` files — the runtime's vocab/graph size check rejects
    the wrong pairing with a clear error. Response `languages` reports the
    pack actually used (`"default"` / `"latin"` / …).
+8. **Optional layout model** (`src/ocr/layout.rs`, `ort` executor only):
+   `layout.onnx` (PP-DocLayoutV3, HF `PaddlePaddle/PP-DocLayoutV3_onnx`,
+   ~130 MB) in the model dir adds document structure — `layout[]` regions
+   (25 classes: text/table/image/formula/…) in the response plus a per-line
+   `kind` stamped from the smallest containing region. The yml lies about
+   preprocessing; the verified contract is: RGB stretched to 800×800,
+   `pixel/255.0` (raw 0-255 yields degenerate ~0.05 scores),
+   `im_shape`=(h,w), `scale_factor`=(800/h, 800/w), output boxes
+   `×(800/W, 800/H)` to reach source pixels. The op set (GridSample,
+   ScatterND, dynamic Range) exceeds tract 0.21 — tract-only builds ignore
+   the file with a warning. `NEURON_OCR_LAYOUT=false` skips it.
 
 ### VoxCPM2 (loadable, 2026-09-27)
 
@@ -285,7 +296,7 @@ points if you touch it:
 cargo test --lib                                  # 679 unit tests (src/**/mod.rs) — 0 failures (2026-10-09; +15 OCR capability/DTO/registry/handler tests on the 2026-10-08 baseline of 664)
 cargo test --lib --features voxcpm                # 709 unit tests — 0 failures (VoxCPM2 adds the weights/model/runtime/clone-audio/streaming suites; two pre-existing V1 audiovae roundtrip tests are slow, ~5 min, on ndarray)
 cargo test --lib --features tract                 # 733 unit tests — 0 failures (tract adds the decision + vision-ONNX + sensevoice paths + the full PP-OCR pipeline suites: DB++ postprocess, CTC decode, preprocess, paddle runtime)
-cargo test --lib --features ort                   # 703 unit tests — 0 failures (the PP-OCR pipeline suites on the ort executor; needs ORT_DYLIB_PATH only for the runtime, not the tests)
+cargo test --lib --features ort                   # 715 unit tests — 0 failures (the PP-OCR pipeline suites on the ort executor + the layout suites; needs ORT_DYLIB_PATH only for the runtime, not the tests)
 cargo test --lib --features tract,sherpa          # 695 unit tests — 0 failures (sherpa adds SherpaAsrRuntime + from_dir + the wav/onnx_meta/fbank/sensevoice coverage)
 cargo build --bench asr_speed --features tract,sherpa  # in-process tract-vs-sherpa benchmark compiles
 cargo bench  --bench asr_speed --features tract,sherpa  # writes target/asr-speed-compare.md
@@ -385,6 +396,7 @@ neuron has **no direct dependency** on any particular host — the integration c
 | `NEURON_SCHEDULER_PLATFORM` | from `NEURON_DEVICE` | Platform key into the memory profile (`cpu` \| `cuda` \| `metal`); RSS observation runs on `cpu` only |
 | `NEURON_OCR_MODEL_PATH` | (unset) | Path to the PP-OCR pipeline directory (`det.prepped.onnx` + `rec.prepped.onnx` + `dict.txt`, all prepped with `scripts/prep-ppocr-onnx.py`); falls back to scanning `<model_root>/ocr/<model_id>`. Requires the `ocr` feature (`tract` or `ort`) |
 | `NEURON_OCR_EXECUTOR` | `tract` | `tract` \| `ort` — PP-OCR session executor. `ort` is ~10× faster on CPU but loads onnxruntime at runtime |
+| `NEURON_OCR_LAYOUT` | `true` | `false` skips an optional `layout.onnx` (PP-DocLayoutV3) even when present in the model dir |
 | `NEURON_OCR_SESSIONS` | `2` | ort sessions per graph (its `run` takes `&mut`, so concurrent requests need one session each; tract plans are `run(&self)` and ignore this) |
 | `ORT_DYLIB_PATH` | (unset) | Path to `onnxruntime.dll` for the `ort` crate's load-dynamic linking (needed by the OCR `ort` executor; falls back to `PATH` lookup) |
 
