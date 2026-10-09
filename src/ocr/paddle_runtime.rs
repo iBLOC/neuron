@@ -48,6 +48,8 @@ type RunnablePlan = Arc<TypedRunnableModel<TypedModel>>;
 const REC_TARGET_H: u32 = 48;
 /// Maximum plans (concrete input shapes) kept compiled per graph.
 const PLAN_CACHE_CAP: usize = 8;
+/// Default ort sessions per graph (`NEURON_OCR_SESSIONS` overrides).
+const DEFAULT_SESSION_POOL: usize = 2;
 
 fn executor_name(e: OcrExecutor) -> &'static str {
     match e {
@@ -56,8 +58,14 @@ fn executor_name(e: OcrExecutor) -> &'static str {
     }
 }
 
-/// Build the executor-specific session for one graph.
-fn build_session_for(executor: OcrExecutor, path: &Path) -> Result<Arc<dyn OcrSession>, NeuronError> {
+/// Build the executor-specific session for one graph. `pool_size` applies
+/// to ort (its `run` takes `&mut`, so concurrent requests need one session
+/// each); tract plans are `run(&self)` and share freely.
+fn build_session_for(
+    executor: OcrExecutor,
+    path: &Path,
+    pool_size: usize,
+) -> Result<Arc<dyn OcrSession>, NeuronError> {
     match executor {
         #[cfg(feature = "tract")]
         OcrExecutor::Tract => Ok(Arc::new(TractPlanCache::new(path.to_path_buf()))),
@@ -66,7 +74,10 @@ fn build_session_for(executor: OcrExecutor, path: &Path) -> Result<Arc<dyn OcrSe
             "tract executor selected but this build was compiled without the `tract` feature",
         )),
         #[cfg(feature = "ort")]
-        OcrExecutor::Ort => Ok(Arc::new(super::ort_session::OrtGraphSession::open(path)?)),
+        OcrExecutor::Ort => Ok(Arc::new(super::ort_session::OrtGraphSession::open(
+            path,
+            pool_size,
+        )?)),
         #[cfg(not(feature = "ort"))]
         OcrExecutor::Ort => Err(NeuronError::invalid_input(
             "ort executor selected but this build was compiled without the `ort` feature",
@@ -152,6 +163,8 @@ pub struct PaddleOcrRuntime {
     vocab: Arc<Vocab>,
     det_params: DbParams,
     det_max_side: u32,
+    /// ort sessions per graph (tract ignores this).
+    session_pool: usize,
     /// Optional `rec-<pack>/` language packs discovered in the model dir.
     packs: HashMap<String, RecPackAssets>,
     /// Pack (session, vocab) pairs, built lazily on the first routed request.
@@ -333,14 +346,18 @@ impl PaddleOcrRuntime {
 
         let vocab = Arc::new(Vocab::load(&dict_path)?);
         let executor = choose_executor(crate::config::env_var("OCR_EXECUTOR").as_deref())?;
+        let session_pool = crate::config::env_var("OCR_SESSIONS")
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .filter(|n| *n > 0)
+            .unwrap_or(DEFAULT_SESSION_POOL);
         let packs = discover_rec_packs(&dir);
         if !packs.is_empty() {
             let mut names: Vec<&str> = packs.keys().map(|s| s.as_str()).collect();
             names.sort_unstable();
             tracing::info!(model_id, packs = ?names, "ocr: discovered recognition language packs");
         }
-        let det = build_session_for(executor, &det_path)?;
-        let rec = build_session_for(executor, &rec_path)?;
+        let det = build_session_for(executor, &det_path, session_pool)?;
+        let rec = build_session_for(executor, &rec_path, session_pool)?;
         tracing::info!(
             model_id,
             dir = %dir.display(),
@@ -356,6 +373,7 @@ impl PaddleOcrRuntime {
             vocab,
             det_params: DbParams::default(),
             det_max_side: 960,
+            session_pool,
             packs,
             loaded_packs: Mutex::new(HashMap::new()),
         }))
@@ -387,7 +405,7 @@ impl PaddleOcrRuntime {
                  the model dir"
             ))
         })?;
-        let session = build_session_for(self.executor, &assets.rec_path)?;
+        let session = build_session_for(self.executor, &assets.rec_path, self.session_pool)?;
         let vocab = Arc::new(Vocab::load(&assets.dict_path)?);
         tracing::info!(
             pack = %name,

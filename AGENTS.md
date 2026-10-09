@@ -110,7 +110,9 @@ Load-bearing points:
    `ORT_DYLIB_PATH` or `PATH`; rc.12's vitis.rs gating bug #547 is fixed in
    rc.13) — do NOT switch to static `download-binaries`: its /MD CRT
    objects conflict with the /MT objects cc-based deps (`esaxx_rs`) emit on
-   Windows and fail linking with LNK2038.
+   Windows and fail linking with LNK2038. ort sessions live in a fixed pool
+   (`NEURON_OCR_SESSIONS`, default 2) because `run` takes `&mut self`;
+   tract plans are shared through `Arc` and need no pool.
 7. **Multilingual rec packs** (`src/ocr/lang_route.rs`): optional
    `rec-<pack>/` subdirectories of the model dir hold per-script rec graph
    + dict pairs (HF `PaddlePaddle/<script>_PP-OCRv5_mobile_rec_onnx`). A
@@ -383,6 +385,7 @@ neuron has **no direct dependency** on any particular host — the integration c
 | `NEURON_SCHEDULER_PLATFORM` | from `NEURON_DEVICE` | Platform key into the memory profile (`cpu` \| `cuda` \| `metal`); RSS observation runs on `cpu` only |
 | `NEURON_OCR_MODEL_PATH` | (unset) | Path to the PP-OCR pipeline directory (`det.prepped.onnx` + `rec.prepped.onnx` + `dict.txt`, all prepped with `scripts/prep-ppocr-onnx.py`); falls back to scanning `<model_root>/ocr/<model_id>`. Requires the `ocr` feature (`tract` or `ort`) |
 | `NEURON_OCR_EXECUTOR` | `tract` | `tract` \| `ort` — PP-OCR session executor. `ort` is ~10× faster on CPU but loads onnxruntime at runtime |
+| `NEURON_OCR_SESSIONS` | `2` | ort sessions per graph (its `run` takes `&mut`, so concurrent requests need one session each; tract plans are `run(&self)` and ignore this) |
 | `ORT_DYLIB_PATH` | (unset) | Path to `onnxruntime.dll` for the `ort` crate's load-dynamic linking (needed by the OCR `ort` executor; falls back to `PATH` lookup) |
 
 ## Where the design specs live
