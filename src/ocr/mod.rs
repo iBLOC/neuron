@@ -38,6 +38,8 @@ pub mod paddle_runtime;
 pub mod preprocess;
 #[cfg(feature = "ort")]
 pub mod ort_session;
+#[cfg(feature = "ort")]
+pub mod table;
 #[cfg(any(feature = "tract", feature = "ort"))]
 pub use paddle_runtime::PaddleOcrRuntime;
 #[cfg(feature = "ort")]
@@ -177,6 +179,10 @@ pub struct LayoutRegion {
     pub kind: String,
     pub bbox: BBox,
     pub score: f32,
+    /// Assembled `<table>` HTML for `kind == "table"` regions when a
+    /// `table.onnx` (SLANeXt wired) runs alongside layout.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub html: Option<String>,
 }
 
 /// The layout region containing a text line's center, if any — smallest

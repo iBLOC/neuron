@@ -172,6 +172,9 @@ pub struct PaddleOcrRuntime {
     /// Document layout model (`layout.onnx`), ort-executor only.
     #[cfg(feature = "ort")]
     layout: Option<super::layout::LayoutSession>,
+    /// Table structure model (`table.onnx`, SLANeXt wired), ort only.
+    #[cfg(feature = "ort")]
+    tables: Option<super::table::TableSession>,
 }
 
 /// One discovered language pack: a recognition graph + its matching vocab.
@@ -384,6 +387,23 @@ impl PaddleOcrRuntime {
             (None, _) => None,
         };
 
+        // Optional table structure model — needs layout to find the table
+        // regions first.
+        #[cfg(feature = "ort")]
+        let tables = match (
+            super::table::table_model_path(&dir),
+            cfg!(feature = "ort"),
+        ) {
+            (Some(path), true) => {
+                if crate::config::env_var("OCR_TABLES").as_deref() == Some("false") {
+                    None
+                } else {
+                    Some(super::table::TableSession::open(&path, session_pool)?)
+                }
+            }
+            _ => None,
+        };
+
         tracing::info!(
             model_id,
             dir = %dir.display(),
@@ -404,6 +424,8 @@ impl PaddleOcrRuntime {
             loaded_packs: Mutex::new(HashMap::new()),
             #[cfg(feature = "ort")]
             layout,
+            #[cfg(feature = "ort")]
+            tables,
         }))
     }
 
@@ -544,6 +566,52 @@ impl OcrRuntime for PaddleOcrRuntime {
 
         // ---- Stage 3: reading order --------------------------------------
         sort_reading_order(&mut regions);
+
+        // ---- Stage 4: table structure (optional; ort only) ---------------
+        // Every layout `table` region gets its cells re-detected on the
+        // crop, and the already-recognized lines inside it are assigned to
+        // cells by center containment.
+        #[cfg(feature = "ort")]
+        if let (Some(layout_list), Some(tables)) = (layout_regions.as_mut(), &self.tables) {
+            for region in layout_list.iter_mut().filter(|r| r.kind == "table") {
+                let det_box = DetBox {
+                    x0: region.bbox.x,
+                    y0: region.bbox.y,
+                    x1: region.bbox.x + region.bbox.w,
+                    y1: region.bbox.y + region.bbox.h,
+                    score: region.score,
+                };
+                let (crop, cw, ch) = crop_rgb(&rgb, src_w, src_h, &det_box);
+                let Ok(cells) = tables.detect_cells(&crop, cw, ch) else {
+                    continue;
+                };
+                if cells.is_empty() {
+                    continue;
+                }
+                let lines: Vec<(BBox, String)> = regions
+                    .iter()
+                    .filter(|r| {
+                        let (cx, cy) = (r.bbox.x + r.bbox.w / 2.0, r.bbox.y + r.bbox.h / 2.0);
+                        cx >= region.bbox.x
+                            && cx <= region.bbox.x + region.bbox.w
+                            && cy >= region.bbox.y
+                            && cy <= region.bbox.y + region.bbox.h
+                    })
+                    .map(|r| {
+                        (
+                            BBox {
+                                x: r.bbox.x - region.bbox.x,
+                                y: r.bbox.y - region.bbox.y,
+                                w: r.bbox.w,
+                                h: r.bbox.h,
+                            },
+                            r.text.clone(),
+                        )
+                    })
+                    .collect();
+                region.html = Some(super::table::assemble_html(&cells, &lines));
+            }
+        }
 
         let text = regions
             .iter()

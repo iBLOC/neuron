@@ -138,6 +138,24 @@ Load-bearing points:
    `×(800/W, 800/H)` to reach source pixels. The op set (GridSample,
    ScatterND, dynamic Range) exceeds tract 0.21 — tract-only builds ignore
    the file with a warning. `NEURON_OCR_LAYOUT=false` skips it.
+10. **Table structure (SLANeXt wired, `ort` only)**: `table.onnx`
+   (`PaddlePaddle/SLANeXt_wired_onnx`, ~368 MB) in the model dir + layout
+   running turns every `table` layout region into assembled `<table>` HTML
+   on `LayoutRegion::html`: the region is re-cropped, SLANeXt predicts one
+   cell quad per structure step (`loc [1,T,8]`, xyxyxyxy normalized to the
+   512 canvas; `struct [1,T,50]` gates which steps are cells), and the
+   already-recognized lines are assigned to cells by center containment.
+   Decoding hard-won facts (all verified 2026-10-09): the alphabet is
+   CTC-layout (0=blank, 1..48 = yml dict order, 49=space — `id 5`=`<tr>`,
+   `id 6`=`</tr>` on a 4×4 grid); the wired export marks cells with
+   `<td`-variant AND attribute tokens (`rowspan`/`colspan` carry the cell
+   quads), so cell = non-structural id (`STRUCTURAL_IDS` =
+   0,1,2,3,4,5,6,9,10,49) with a valid quad; preprocessing is RGB (the
+   table ymls lie about BGR like layout's does), keep-ratio into 512²,
+   top-left paste, `/255` + ImageNet. Known v1 limits: overlapping quads
+   can duplicate/merge cells on synthetic tables (dedupe needs real-world
+   tuning); colspan/rowspan spans are not reconstructed.
+   `NEURON_OCR_TABLES=false` skips it.
 9. **Table structure: SLANet_plus export is broken, use SLANeXt** (spiked
    2026-10-09, scratch under `target/ocr-table-spike/`): the official
    `PaddlePaddle/SLANet_plus_onnx` ONNX runs but its Loop-based
@@ -413,6 +431,7 @@ neuron has **no direct dependency** on any particular host — the integration c
 | `NEURON_OCR_MODEL_PATH` | (unset) | Path to the PP-OCR pipeline directory (`det.prepped.onnx` + `rec.prepped.onnx` + `dict.txt`, all prepped with `scripts/prep-ppocr-onnx.py`); falls back to scanning `<model_root>/ocr/<model_id>`. Requires the `ocr` feature (`tract` or `ort`) |
 | `NEURON_OCR_EXECUTOR` | `tract` | `tract` \| `ort` — PP-OCR session executor. `ort` is ~10× faster on CPU but loads onnxruntime at runtime |
 | `NEURON_OCR_LAYOUT` | `true` | `false` skips an optional `layout.onnx` (PP-DocLayoutV3) even when present in the model dir |
+| `NEURON_OCR_TABLES` | `true` | `false` skips an optional `table.onnx` (SLANeXt wired) even when present; needs layout for the table regions |
 | `NEURON_OCR_SESSIONS` | `2` | ort sessions per graph (its `run` takes `&mut`, so concurrent requests need one session each; tract plans are `run(&self)` and ignore this) |
 | `ORT_DYLIB_PATH` | (unset) | Path to `onnxruntime.dll` for the `ort` crate's load-dynamic linking (needed by the OCR `ort` executor; falls back to `PATH` lookup) |
 

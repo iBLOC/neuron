@@ -367,6 +367,8 @@ Laya's upstream ships **safetensors only**, so a tract-loaded graph requires the
 
 **Layout analysis (optional, `ort` executor)**: drop `layout.onnx` (PP-DocLayoutV3, ~130 MB, from HF `PaddlePaddle/PP-DocLayoutV3_onnx`) into the model dir and the response gains a `layout[]` array — 25 region classes (text / table / image / display_formula / doc_title / header / footer / seal / …) with boxes and scores — plus a per-line `kind` naming the region each text line sits in. Table and figure regions come back boxed for downstream processing; text regions are already OCR'd.
 
+**Table structure (optional, `ort` executor, needs layout)**: add `table.onnx` (SLANeXt wired, ~368 MB, from HF `PaddlePaddle/SLANeXt_wired_onnx`) and every `table` region also carries an `html` field — an assembled `<table>` with the recognized text placed into cells. Note: the widely mirrored `SLANet_plus_onnx` export is broken (its autoregressive decoder ignores the image — white noise and real tables decode identically); SLANeXt is the working path.
+
 Requires the `ocr` meta feature — enabled by either executor, `tract` (pure Rust, default) or `ort` — and a model directory prepped with `scripts/prep-ppocr-onnx.py` (metadata-only: tract's TDim parser rejects Paddle2ONNX's dotted symbol names and `floor(...)` shape hints):
 
 ```bash

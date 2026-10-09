@@ -199,6 +199,7 @@ pub fn decode_layout(
                 h: (y1 - y0).max(1.0),
             },
             score,
+            html: None,
         });
     }
     out
@@ -265,11 +266,13 @@ mod tests {
                 kind: "text".into(),
                 bbox: BBox { x: 0.0, y: 0.0, w: 800.0, h: 600.0 },
                 score: 0.9,
+                html: None,
             },
             LayoutRegion {
                 kind: "paragraph_title".into(),
                 bbox: BBox { x: 10.0, y: 10.0, w: 300.0, h: 50.0 },
                 score: 0.9,
+                html: None,
             },
         ];
         // line inside the title block → the smaller region wins
