@@ -21,10 +21,13 @@ Other useful features (opt-in):
 
 - `flash-attn` — FlashAttention for Llama 2/3 + Mistral + Qwen 2/2.5/3/3.5 (requires CUDA)
 - `cuda` / `metal` — GPU acceleration
-- `voxcpm` — TTS via VoxCpm (burn 0.21 + `hound`)
+- `voxcpm` — TTS via VoxCPM (burn 0.21 + `hound`; 0.5B and VoxCPM2 2B/48 kHz)
 - `litert` — on-device LLM via `litert-lm` (Google LiteRT-LM subprocess)
 - `asr-audio` — MP3 / FLAC / OGG-Vorbis audio decoding (via `symphonia` + `rubato`)
 - `mistralrs` — 40+ model families via mistral.rs engine
+- `tract` — ONNX executor for SenseVoice ASR, Laya decisions and the PP-OCR pipeline (pure Rust)
+- `ort` — fast onnxruntime executor (OCR; ~10× faster than tract on CPU)
+- `sherpa` — SenseVoice ASR via the official sherpa-onnx binding
 - `chronos2` — time-series forecasting (Sprint 3 in progress; candle runtime WIP)
 
 ## 2. Embed neuron in your `main.rs`

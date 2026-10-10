@@ -49,6 +49,29 @@ neuron reads its configuration from environment variables on startup. The full m
 | `NEURON_DECISION_MODEL_ID` | `laya` | Model id registered for the Decision capability |
 | `NEURON_DECISION_MODEL_PATH` | (unset) | Path to the prepped Decision model dir — a single `*.onnx` (plus `.onnx.data` if external) + `tokenizer.json`, optional `rl_agent_config.json` for the temperature tables |
 
+## OCR
+
+| Variable | Default | Description |
+|---|---|---|
+| `NEURON_OCR_MODEL_PATH` | (unset) | Path to the PP-OCR pipeline directory (`det.prepped.onnx` + `rec.prepped.onnx` + `dict.txt`); falls back to scanning `<model_root>/ocr/<model_id>`. Requires the `ocr` feature (`tract` or `ort`). Optional: `rec-<pack>/` language packs, `layout.onnx` (PP-DocLayoutV3), `table.onnx` (SLANeXt) — see [/howto/ocr](/howto/ocr) |
+| `NEURON_OCR_EXECUTOR` | `tract` | `tract` \| `ort` — PP-OCR session executor. `ort` is ~10× faster on CPU but loads onnxruntime at runtime |
+| `NEURON_OCR_SESSIONS` | `2` | ort sessions per graph (concurrency); tract plans are shared and ignore this |
+| `NEURON_OCR_LAYOUT` | `true` | `false` skips an optional `layout.onnx` even when present |
+| `NEURON_OCR_TABLES` | `true` | `false` skips an optional `table.onnx` even when present |
+| `ORT_DYLIB_PATH` | (unset) | Path to `onnxruntime.dll`/`.so` for the `ort` crate's load-dynamic linking (falls back to `PATH`) |
+
+## Model scheduler
+
+| Variable | Default | Description |
+|---|---|---|
+| `NEURON_SCHEDULER_ENABLED` | `true` | `false` disables the scheduler entirely (legacy always-load path — no queue, no eviction) |
+| `NEURON_SCHEDULER_BUDGET_MB` | auto (80% RAM) | Resident-weights memory budget in MiB (`0` = auto) |
+| `NEURON_SCHEDULER_IDLE_SECS` | `120` | Idle residents (0 leases, no queued demand) recycled after this |
+| `NEURON_SCHEDULER_MAX_CONCURRENCY` | `4` | Concurrent leases per resident model |
+| `NEURON_SCHEDULER_MAX_QUEUE_WAIT_SECS` | `300` | Queue dwell time before `503 queue_timeout` (`0` = forever) |
+| `NEURON_SCHEDULER_PLATFORM` | from `NEURON_DEVICE` | Platform key into the memory profile (`cpu` \| `cuda` \| `metal`); RSS observation runs on `cpu` only |
+| `NEURON_SCHEDULER_PROFILE_PATH` | (unset) | Override where observed memory-profile overrides persist |
+
 ## Model source registry
 
 | Variable | Default | Description |

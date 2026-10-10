@@ -92,6 +92,23 @@ POST /v1/decisions
 
 Discriminative decision scoring backed by the [Laya](https://github.com/NandhaKishorM/laya) models (Apache-2.0; int8 encoder-only ONNX, one forward per question, no decoding). Request: `{model, state, questions: [{type: "choice"|"score"|"noul", instructions, criteria?, labels?, options?, option_order?}], max_len?, head_max_len?}`. Response carries one result per question: per-option probabilities in rendered order, the chosen index, the `act` vs `escalate` split, and a calibrated confidence. Question field names follow `laya/onnx_agent.py`'s input, so a schema written for the Python agent ports over unchanged. Requires `--features tract` + `NEURON_DECISION_RUNTIME=tract` + `NEURON_DECISION_MODEL_PATH` pointing at a model prepped with `scripts/prep-laya-onnx.py`. See [`docs/superpowers/specs/2026-09-24-laya-decision.md`](../superpowers/specs/2026-09-24-laya-decision.md).
 
+### OCR (neuron-specific)
+
+```
+POST /v1/ocr/recognize
+```
+
+Two-stage PP-OCR pipeline (DB++ text detection + SVTR-LCNet recognition) over the official PaddlePaddle PP-OCRv5/v6 ONNX exports. Request: `{model, image, languages?: [String], det_thresh?, det_box_thresh?, det_unclip_ratio?, det_max_side?, rec_batch_size?}` where `image` mirrors the vision endpoints' image source. Response: `{text, regions: [{bbox, text, confidence, line, kind?}], languages, layout?: [{kind, bbox, score, html?}]}` — `regions` in reading order, `layout[]` present when an optional `layout.onnx` runs (25 region classes), `html` on `table` regions when an optional `table.onnx` runs. `languages: ["fr"]` routes to a `rec-latin/` language pack. Requires the `tract` or `ort` feature + `NEURON_OCR_MODEL_PATH` pointing at a prepped model dir. See [/howto/ocr](/howto/ocr) for the full walkthrough.
+
+### Model scheduler (neuron-specific)
+
+```
+GET    /v1/scheduler/status         (residents, queue, budget, correction stats)
+DELETE /v1/scheduler/models/{id}    (administrative eviction; 409 while in use)
+```
+
+Memory-bounded LLM model swapping: requests queue while resident work drains, idle residents evict LRU-first, weights recycle after idle timeout. Currently wired for the LLM capability. See [/concepts/scheduler](/concepts/scheduler).
+
 ### Models (neuron-specific)
 
 ```

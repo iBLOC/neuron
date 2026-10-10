@@ -19,23 +19,31 @@ hero:
       link: /reference/api
 
 features:
-  - title: 🤖 6 Capability Surfaces
+  - title: 🤖 9 Capability Surfaces
     details: |
-      LLM (Qwen / Llama / Phi / Mistral / ChatGLM / Gemma / 40+ via mistralrs) ·
-      TTS (VoxCpm) · ASR (Whisper) · Rerank (BGE / mxbai / jina / Cohere) ·
-      Embedding (MiniLM BERT) · Vision (YOLOv8 / RT-DETR / DETR / RF-DETR /
-      Florence-2 / Grounding DINO)
+      LLM (Qwen / Llama / Phi / Mistral / ChatGLM / Gemma / MiniCPM5 / 40+ via mistralrs) ·
+      TTS (VoxCPM 0.5B + VoxCPM2 2B/48kHz) · ASR (Whisper + SenseVoice) ·
+      Rerank (BGE / mxbai / jina / Cohere) · Embedding (MiniLM BERT) ·
+      Vision (YOLOv8 / RT-DETR / DETR / RF-DETR / Florence-2) ·
+      OCR (PP-OCRv5/v6 + layout + tables) · Decision (Laya) ·
+      Forecasting (Chronos2)
   - title: 🔌 OpenAI + Anthropic Wire-Format
     details: |
       10+ OpenAI-compatible routes (/v1/chat/completions, /v1/audio/speech,
-      /v1/embeddings, /v1/rerank, /v1/vision/*, /v1/models/pull, …) +
-      /v1/messages for Anthropic Messages v1 (vision, tool_use, cache_control,
-      extended thinking, streaming SSE).
+      /v1/embeddings, /v1/rerank, /v1/vision/*, /v1/ocr/recognize,
+      /v1/models/pull, …) + /v1/messages for Anthropic Messages v1 (vision,
+      tool_use, cache_control, extended thinking, streaming SSE).
   - title: 🛠 3 ML Frameworks, Pick What Fits
     details: |
-      candle (default, LLM/ASR/Rerank/Embedding/Vision) · burn (TTS via VoxCpm) ·
-      litert_lm (on-device LLM via subprocess). Feature flags let you opt in to
-      just the engines you need.
+      candle (default, LLM/ASR/Rerank/Embedding/Vision) · burn (TTS via VoxCPM) ·
+      litert_lm (on-device LLM via subprocess) — plus tract / ort ONNX
+      executors (SenseVoice ASR, Laya decisions, PP-OCR pipeline). Feature
+      flags let you opt in to just the engines you need.
+  - title: 🧠 Bounded-Memory Model Scheduler
+    details: |
+      More models than fit in RAM: requests queue while resident work
+      drains, weights swap LRU-first, idle models recycle. RSS-observed
+      memory profiles self-correct at runtime. Off-switch included.
   - title: 📦 Library-Only, Embedded
     details: |
       No standalone daemon. Hosts call neuron::run_embedded(...) and get back a
