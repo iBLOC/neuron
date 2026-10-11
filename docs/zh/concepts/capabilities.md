@@ -4,7 +4,9 @@ title: 能力
 
 # 能力
 
-neuron 暴露 **8 个能力面（capability）**：在存在 OpenAI 对应格式的地方镜像 OpenAI 线上格式（chat completions、audio、embeddings、rerank、forecast），另外新增 3 个 neuron 专属的能力面（vision + Mage-VL StreamMind 门控、决策打分、多源模型注册表）。
+neuron 暴露 **9 个能力面（capability）**：在存在 OpenAI 对应格式的地方镜像 OpenAI 线上格式（chat completions、audio、embeddings、rerank、forecast），另外新增 3 个 neuron 专属的能力面（vision + Mage-VL StreamMind 门控、决策打分、多源模型注册表）。
+
+> 权威的模型 × 后端矩阵见 [/zh/reference/models](/zh/reference/models)。
 
 ## LLM — 大语言模型
 
@@ -12,7 +14,7 @@ neuron 暴露 **8 个能力面（capability）**：在存在 OpenAI 对应格式
 
 **引擎**：
 - **candle**（默认）——经 `candle-transformers` 支持 Qwen 2/2.5/3/3.5、Llama 2/3、Phi-3、Mistral、ChatGLM、**MiniCPM5-1B（平台默认）/ MiniCPM5-2B**。从 `config.json` 的 `model_type` 字段自动检测（MiniCPM5 上报 `model_type = "llama"`，走同一条 Llama 架构路径）
-- **litert_lm**（可选，`--features litert`）——经 Google LiteRT-LM 子进程支持 Gemma 3（shell 出 `lit` 二进制）
+- **litert_lm**（可选，`--features litert`）——经 Google LiteRT-LM 子进程支持 Gemma 3 / 3n / 4（shell 出 `lit` 二进制）
 - **mistralrs**（可选，`--features mistralrs`）——经 mistral.rs 引擎支持 40+ 模型家族，带 PagedAttention、prefix caching、KV cache、逐 token 流式输出、ISQ（即时量化）
 - **mage_vl**（无需额外特性；随默认 `candle` 提供）——Microsoft Mage-VL：从零开始的 candle 移植版 MageViT（24 层 codec 原生 ViT，在 16×16 网格上对 t/h/w 施加 3D RoPE + I/P 帧补丁稀疏化）+ Qwen3-4B-Instruct-2507 解码器 + StreamMind 门控（约 0.5B 的事件分类器）。经 `adapter_dispatch` 系统同时覆盖 `/v1/chat/completions`（OpenAI vision）与 `/v1/messages`（Anthropic vision）
 
@@ -28,12 +30,12 @@ neuron 暴露 **8 个能力面（capability）**：在存在 OpenAI 对应格式
 
 **端点**：`POST /v1/audio/speech`（OpenAI），`stream: true` 时经 SSE 流式返回
 
-**引擎**：**burn**（VoxCpm，经 `--features voxcpm` 可选启用）
+**引擎**：**burn**（VoxCpm 0.5B 与 VoxCPM2，经 `--features voxcpm` 可选启用）
 
-**模型**：VoxCpm 0.5B（Apache-2.0 权重，预转换为 burn `.mpk` 格式）。支持声音克隆。中文 + 英文。
+**模型**：VoxCpm 0.5B（Apache-2.0 权重，预转换为 burn `.mpk` 格式），或 **VoxCPM2**（`NEURON_TTS_RUNTIME=voxcpm2`，2B 参数 / 48 kHz、30 种语言——直接加载上游 `openbmb/VoxCPM2` 检查点，无需转换，约需 10 GB RAM）。支持声音克隆。
 
 **配置**：
-- `NEURON_TTS_RUNTIME=voxcpm`（没有其他 TTS 引擎）
+- `NEURON_TTS_RUNTIME=voxcpm`（0.5B `.mpk` 权重）或 `voxcpm2`（2B/48 kHz 上游检查点，约 10 GB 内存）
 - `NEURON_TTS_MODEL_PATH=/path/to/voxcpm-mpk-dir`（必须包含 `config.json` + `tokenizer.json` + `model.mpk` + `audiovae.mpk`）
 - `voice`（OpenAI）：`alloy` / `echo` / `fable` / `onyx` / `nova` / `shimmer`（映射到 VoxCpm 说话人；就近选择）
 
@@ -47,7 +49,7 @@ neuron 暴露 **8 个能力面（capability）**：在存在 OpenAI 对应格式
 
 **引擎**：**candle**（Whisper，默认）· **sherpa**（SenseVoiceSmall）· **tract**（SenseVoiceSmall，prepped graph）
 
-**模型**：经 `candle-transformers` 的 Whisper base / small / medium / large-v3（多语言）；或来自 sherpa-onnx releases 的 SenseVoiceSmall（Apache 2.0，zh/en/ja/ko/yue + 情绪/事件标签 + 可选 ITN），跑在两个新引擎之一上。
+**模型**：`whisper-base` 经 `candle-transformers`（多语言）——默认目录中唯一的 Whisper 条目（更大的变体——small / medium / large-v3——不在默认目录中）；或来自 sherpa-onnx releases 的 SenseVoiceSmall（Apache 2.0，zh/en/ja/ko/yue + 情绪/事件标签 + 可选 ITN），跑在两个新引擎之一上。
 
 **配置**：
 - `NEURON_ASR_RUNTIME=candle`（默认）——设置 `NEURON_ASR_MODEL_PATH=/path/to/whisper-dir`
@@ -129,7 +131,7 @@ neuron 暴露 **8 个能力面（capability）**：在存在 OpenAI 对应格式
 
 **引擎**：
 - **candle**（默认）——YOLOv8 (n/s/11n)、RT-DETR (r50)、DETR (resnet50)
-- **ort**（ONNX 可插拔：ort / tract / onnxruntime）——YOLOv8-ONNX、RF-DETR (base/large)、Florence-2（视觉-语言）
+- **ort**（ONNX 可插拔：ort / tract / onnxruntime）——RF-DETR (base/large)、Florence-2（视觉-语言）
 
 **配置**：
 - `NEURON_VISION_RUNTIME=candle-yolo|candle-rtdetr|candle-detr|ort`
@@ -238,9 +240,18 @@ Decision 是一种*打分*型能力面，而非生成式能力面：给定一个
 | Vision | `/v1/vision/{detect,classify,segment,pose,lora/*,gate/score}` | — | candle / ort（tract、ort、onnxruntime） | `candle`（默认） | ✅ |
 | Chronos2 | `/v1/forecast` | — | candle（T5 风格，vendored） | `chronos2` | — |
 | Decision | `/v1/decisions` | — | tract（Laya int8 ONNX） | `tract` | — |
+| OCR | `/v1/ocr/recognize` | — | paddle-ocr 引擎：tract-onnx（默认）/ ort（快速执行器） | `tract` 或 `ort` | — |
 | 模型管理 | `/v1/models/*`、`/v1/catalog/sources`、`/v1/models/pull` | — | （仅 HTTP） | — | ✅ |
 | 存活探针 | `/health`、`/v1/info` | — | — | — | ✅ |
 
+### OCR —— 文字检测 + 识别
+
+`POST /v1/ocr/recognize` 提供两阶段 PP-OCR 管线(DB++ 检测 + SVTR-LCNet
+识别),基于 PaddlePaddle 官方 PP-OCRv5/v6 ONNX 导出(Apache-2.0),引擎
+`paddle-ocr` 的会话执行器可插拔:`tract`(纯 Rust,默认)或 `ort`
+(onnxruntime,约快 10×)。可选附加模型:`rec-<pack>/` 语种包(109 种
+文字)、`layout.onnx`(PP-DocLayoutV3 版面分析)、`table.onnx`(SLANeXt
+表格结构 → HTML)。详见 [OCR 实操教程](/zh/howto/ocr)。
 ## 下一步
 
 - [运行时 Trait](/zh/concepts/runtime-traits) — 每个能力面运行时实现的契约
@@ -248,3 +259,5 @@ Decision 是一种*打分*型能力面，而非生成式能力面：给定一个
 - [视觉任务 How-to](/zh/howto/vision-tasks) — 检测 / 分类 / 分割 / 姿态的具体示例
 - [LoRA 适配器 How-to](/zh/howto/lora-adapters) — 无需重训即可扩展检测类别
 - [OpenAI 兼容 API](/zh/reference/api) — 完整路由参考
+- [支持的模型与后端](/zh/reference/models) — 权威的模型 × 引擎矩阵
+- [基准测试](/zh/reference/benchmarks) — 实测速度与内存数据

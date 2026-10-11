@@ -91,5 +91,5 @@ Most inference servers (vLLM, ollama, llama.cpp server) are standalone daemons �
 
 - [Quick Start](/guide/quick-start) — embed neuron in a Rust binary in 20 lines
 - [Architecture](/concepts/architecture) — how the data flow works end-to-end
-- [Capabilities](/concepts/capabilities) — the 6 model surfaces, in detail
+- [Capabilities](/concepts/capabilities) — the 9 model surfaces, in detail
 - [OpenAI-compatible API](/reference/api) — full route table

@@ -4,7 +4,9 @@ title: Capabilities
 
 # Capabilities
 
-neuron exposes **8 capability surfaces** that mirror the OpenAI wire format where it exists (chat completions, audio, embeddings, rerank, forecast) and add 3 surfaces that are neuron-specific (vision + Mage-VL StreamMind gate, decision scoring, multi-source model registry).
+neuron exposes **9 capability surfaces** that mirror the OpenAI wire format where it exists (chat completions, audio, embeddings, rerank, forecast) and add 3 surfaces that are neuron-specific (vision + Mage-VL StreamMind gate, decision scoring, multi-source model registry).
+
+> The authoritative model × backend matrix lives at [/reference/models](/reference/models).
 
 ## LLM — Large Language Model
 
@@ -12,7 +14,7 @@ neuron exposes **8 capability surfaces** that mirror the OpenAI wire format wher
 
 **Engines**:
 - **candle** (default) — Qwen 2/2.5/3/3.5, Llama 2/3, Phi-3, Mistral, ChatGLM, **MiniCPM5-1B (platform default) / MiniCPM5-2B** via `candle-transformers`. Auto-detected from `config.json`'s `model_type` field (MiniCPM5 ships `model_type = "llama"` and dispatches through the same Llama arch path)
-- **litert_lm** (opt-in, `--features litert`) — Gemma 3 via Google LiteRT-LM subprocess (shells out to the `lit` binary)
+- **litert_lm** (opt-in, `--features litert`) — Gemma 3 / 3n / 4 via Google LiteRT-LM subprocess (shells out to the `lit` binary)
 - **mistralrs** (opt-in, `--features mistralrs`) — 40+ model families via mistral.rs engine, with PagedAttention, prefix caching, KV cache, per-token streaming, ISQ (in-situ quantization)
 - **mage_vl** (no extra feature; ships with default `candle`) — Microsoft Mage-VL: from-scratch candle port of MageViT (24-layer codec-native ViT with 3D RoPE over t/h/w on a 16×16 grid + I/P-frame patch sparsity) + Qwen3-4B-Instruct-2507 decoder + StreamMind gate (~0.5B event classifier). Reaches both `/v1/chat/completions` (OpenAI vision) and `/v1/messages` (Anthropic vision) via the `adapter_dispatch` system
 
@@ -28,12 +30,12 @@ neuron exposes **8 capability surfaces** that mirror the OpenAI wire format wher
 
 **Endpoints**: `POST /v1/audio/speech` (OpenAI), streaming via `stream: true` SSE
 
-**Engine**: **burn** (VoxCpm, opt-in via `--features voxcpm`)
+**Engine**: **burn** (VoxCpm 0.5B and VoxCPM2, opt-in via `--features voxcpm`)
 
-**Model**: VoxCpm 0.5B (Apache-2.0 weights pre-converted to burn `.mpk` format). Voice cloning supported. Chinese + English.
+**Model**: VoxCpm 0.5B (Apache-2.0 weights pre-converted to burn `.mpk` format) or **VoxCPM2** (`NEURON_TTS_RUNTIME=voxcpm2`, 2B params / 48 kHz, 30 languages — loads the upstream `openbmb/VoxCPM2` checkpoints directly, no conversion, ~10 GB RAM). Voice cloning supported.
 
 **Configuration**:
-- `NEURON_TTS_RUNTIME=voxcpm` (no other TTS engines)
+- `NEURON_TTS_RUNTIME=voxcpm` (0.5B `.mpk` weights) or `voxcpm2` (2B/48 kHz upstream checkpoints, ~10 GB RAM)
 - `NEURON_TTS_MODEL_PATH=/path/to/voxcpm-mpk-dir` (must contain `config.json` + `tokenizer.json` + `model.mpk` + `audiovae.mpk`)
 - `voice` (OpenAI): `alloy` / `echo` / `fable` / `onyx` / `nova` / `shimmer` (mapped to VoxCpm speakers; pick closest)
 
@@ -47,7 +49,7 @@ neuron exposes **8 capability surfaces** that mirror the OpenAI wire format wher
 
 **Engine**: **candle** (Whisper, default) · **sherpa** (SenseVoiceSmall) · **tract** (SenseVoiceSmall, prepped graph)
 
-**Model**: Whisper base / small / medium / large-v3 via `candle-transformers` (multilingual); or SenseVoiceSmall from sherpa-onnx releases (Apache 2.0, zh/en/ja/ko/yue + emotion/event tags + optional ITN) on either of the two new engines.
+**Model**: `whisper-base` via `candle-transformers` (multilingual) — the sole Whisper entry in the default catalog (larger variants — small / medium / large-v3 — are not in the default catalog); or SenseVoiceSmall from sherpa-onnx releases (Apache 2.0, zh/en/ja/ko/yue + emotion/event tags + optional ITN) on either of the two new engines.
 
 **Configuration**:
 - `NEURON_ASR_RUNTIME=candle` (default) — set `NEURON_ASR_MODEL_PATH=/path/to/whisper-dir`
@@ -129,7 +131,7 @@ neuron exposes **8 capability surfaces** that mirror the OpenAI wire format wher
 
 **Engines**:
 - **candle** (default) — YOLOv8 (n/s/11n), RT-DETR (r50), DETR (resnet50)
-- **ort** (ONNX pluggable: ort / tract / onnxruntime) — YOLOv8-ONNX, RF-DETR (base/large), Florence-2 (vision-language)
+- **ort** (ONNX pluggable: ort / tract / onnxruntime) — RF-DETR (base/large), Florence-2 (vision-language)
 
 **Configuration**:
 - `NEURON_VISION_RUNTIME=candle-yolo|candle-rtdetr|candle-detr|ort`
@@ -238,9 +240,20 @@ Question `type` is `choice` (pick one of N), `score` (rate N levels) or `noul` (
 | Vision | `/v1/vision/{detect,classify,segment,pose,lora/*,gate/score}` | — | candle / ort (tract, ort, onnxruntime) | `candle` (default) | ✅ |
 | Chronos2 | `/v1/forecast` | — | candle (T5-style vendored) | `chronos2` | — |
 | Decision | `/v1/decisions` | — | tract (Laya int8 ONNX) | `tract` | — |
+| OCR | `/v1/ocr/recognize` | — | paddle-ocr engine: tract-onnx (default) / ort (fast executor) | `tract` or `ort` | — |
 | Model mgmt | `/v1/models/*`, `/v1/catalog/sources`, `/v1/models/pull` | — | (HTTP-only) | — | ✅ |
 | Liveness | `/health`, `/v1/info` | — | — | — | ✅ |
 
+### OCR — text detection + recognition
+
+`POST /v1/ocr/recognize` serves the two-stage PP-OCR pipeline (DB++
+detection + SVTR-LCNet recognition) over the official PaddlePaddle
+PP-OCRv5/v6 ONNX exports (Apache-2.0), engine `paddle-ocr` with a
+pluggable session executor: `tract` (pure Rust, default) or `ort`
+(onnxruntime, ~10x faster). Optional add-on models: `rec-<pack>/`
+language packs (109 scripts), `layout.onnx` (PP-DocLayoutV3 document
+layout) and `table.onnx` (SLANeXt table structure -> HTML). See
+[the OCR how-to](/howto/ocr).
 ## Next steps
 
 - [Runtime Traits](/concepts/runtime-traits) — the contracts each capability runtime implements
@@ -248,3 +261,5 @@ Question `type` is `choice` (pick one of N), `score` (rate N levels) or `noul` (
 - [Vision Tasks How-to](/howto/vision-tasks) — concrete detection / classification / segmentation / pose examples
 - [LoRA Adapters How-to](/howto/lora-adapters) — extending detection classes without retraining
 - [OpenAI-compatible API](/reference/api) — full route reference
+- [Supported Models & Backends](/reference/models) — the authoritative model × engine matrix
+- [Benchmarks](/reference/benchmarks) — measured speed and memory numbers

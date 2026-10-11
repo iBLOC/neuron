@@ -11,7 +11,7 @@ neuron 支持 **3 个 ML 框架**以及**每个框架的多个实现**，覆盖�
 | 能力面 | 引擎 | 特性开关 | 是否默认 | 后端 |
 |---|---|---|---|---|
 | LLM | candle | `candle` | ✅ | 经 `candle-transformers` 支持 Qwen 2/2.5/3/3.5、Llama 2/3、Phi-3、Mistral、ChatGLM、**MiniCPM5-1B / MiniCPM5-2B** |
-| LLM | litert_lm | `litert` | — | 经 Google LiteRT-LM 子进程支持 Gemma 3（shell 出 `lit` 二进制） |
+| LLM | litert_lm | `litert` | — | 经 Google LiteRT-LM 子进程支持 Gemma 3 / 3n / 4（shell 出 `lit` 二进制） |
 | LLM | mistralrs | `mistralrs` | — | 经 mistral.rs 引擎支持 40+ 模型家族（PagedAttention、prefix caching、KV cache、ISQ） |
 | LLM | mage_vl | （默认 `candle`） | — | **neuron 原生的 Microsoft Mage-VL candle 移植**：MageViT 24 层 codec 原生 ViT（3D RoPE、I/P 帧补丁稀疏化）+ Qwen3-4B-Instruct-2507 解码器 + StreamMind 门控；经 `adapter_dispatch` 系统覆盖 OpenAI `/v1/chat/completions` 与 Anthropic `/v1/messages` |
 | TTS | burn (VoxCpm) | `voxcpm` | — | **VoxCPM 0.5B 与 VoxCPM2 均可加载**（burn 0.21 + `hound`）。0.5B：预转换的 `.mpk` 权重。VoxCPM2（2B、48 kHz、30 种语言）：直接加载上游 `openbmb/VoxCPM2` 检查点（无需转换），约需 10 GB 内存 |
@@ -25,6 +25,7 @@ neuron 支持 **3 个 ML 框架**以及**每个框架的多个实现**，覆盖�
 | Vision | ort (YOLOv8 / RT-DETR / DETR / RF-DETR / Florence-2) | `ort` | — | 可插拔 ONNX 执行器：`ort` / `tract` / `onnxruntime` |
 | Chronos2 | candle | `chronos2` | — | ✅ 2026-07-19 落地：vendored T5 编码器 + 解码器 + 线性输出头，`CandleChronos2Runtime`（844 行，19 个测试） |
 | Decision | tract (Laya int8 ONNX) | `tract` | — | ✅ 2026-09-24 落地：纯 Rust ONNX 执行器（无 C++ 工具链 / 系统 ONNX Runtime）。纯编码器 int8，每问题一次前向，无解码。图必须先用 `scripts/prep-laya-onnx.py` 预处理。该引擎**无法**与 onnxruntime 做到逐位一致——见[规格说明](../superpowers/specs/2026-09-24-laya-decision.md)；当需要逐位一致时，`src/vision/ort_runtime.rs` 中的 `ort` 执行器槽位是现成的替代方案。 |
+| OCR | paddle-ocr | `tract`（默认）/ `ort`（快速执行器） | — | tract-onnx / ort（ONNX）—— PP-OCRv5/v6 文本检测 + 识别，可选版面分析（PP-DocLayoutV3）与表格结构（SLANeXt） |
 
 ## 选择方式
 
@@ -142,7 +143,7 @@ curl -X POST http://localhost:8083/v1/chat/completions \
 | candle (CPU) | 低（仅模型大小；F32 默认会翻倍——见 `NEURON_LLM_DTYPE`） | 快 | 快 | ≤3B 模型表现良好 |
 | candle (CUDA) | 高（显存） | 慢（首次构建约 5-10 分钟） | 快 | 7B+ 模型最佳 |
 | candle (Metal) | 高（统一内存） | 中 | 快 | Apple Silicon 最佳 |
-| litert_lm | 低（子进程） | 快 | 子进程开销 | 模型集合有限（Gemma 3） |
+| litert_lm | 低（子进程） | 快 | 子进程开销 | 模型集合有限（Gemma 3 / 3n / 4） |
 | mistralrs | 高（显存） | 慢 | 快 | 并发服务多请求最佳 |
 | burn (VoxCpm) | 低 | 中（burn + hound） | 快 | 单模型吞吐 |
 

@@ -31,7 +31,7 @@ curl -X POST http://localhost:8085/v1/vision/detect \
 | Form field | Required | Type | Default | Description |
 |---|---|---|---|---|
 | `file` | ✅ | binary | — | Image bytes (PNG, JPEG, WebP) |
-| `model` | ✅ | string | — | One of the registered model IDs (e.g. `yolov8n`, `rtdetr-r50`, `grounding-dino-base`) |
+| `model` | ✅ | string | — | One of the registered model IDs (e.g. `yolov8n`, `rtdetr-r50`) |
 | `confidence` | — | float | `0.25` | Minimum confidence threshold (0.0-1.0) |
 | `iou` | — | float | `0.45` | IoU threshold for NMS (detection only) |
 | `lora_adapter` | — | string | — | Name of a registered LoRA adapter (see below) |

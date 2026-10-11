@@ -212,13 +212,17 @@ pub fn default_capabilities() -> Vec<ModelCapabilities> {
             &[ApiStyle::openai_chat(), ApiStyle::anthropic_messages()], true, false, false, false),
         cap("litert", "gemma-3-12b-it", &[TextInput], &[TextOutput],
             &[ApiStyle::openai_chat(), ApiStyle::anthropic_messages()], true, false, false, false),
-        // Platform default — Gemma 4 E4B (Google, 4B effective
-        // params). Small enough for embedded / mobile / dev tier
+        // Platform default for the litert engine — Gemma 4 E4B (Google, 4B
+        // effective params). Small enough for embedded / mobile / dev tier
         // while still scoring well on general chat and instruction
         // following. Source: https://www.modelscope.cn/models/google/gemma-4-E4B
         cap("litert", "gemma-4-e2b-it", &[TextInput], &[TextOutput],
             &[ApiStyle::openai_chat(), ApiStyle::anthropic_messages()], true, false, false, false),
-        cap("litert", DEFAULT_MODEL_ID, &[TextInput], &[TextOutput],
+        // NB: the platform-wide default model is minicpm5-1b (registered
+        // under candle above); this entry is litert's own default and must
+        // not reuse DEFAULT_MODEL_ID — register() overwrites by model_id,
+        // so reusing it here would shadow minicpm5-1b's candle entry.
+        cap("litert", "gemma-4-e4b-it", &[TextInput], &[TextOutput],
             &[ApiStyle::openai_chat(), ApiStyle::anthropic_messages()],
             true, false, false, false),
         cap("litert", "gemma-4-12b-it", &[TextInput], &[TextOutput],

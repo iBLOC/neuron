@@ -259,9 +259,11 @@ v1 scope: the scheduler gates the LLM capability (the only one with multiple swa
 
 ## Supported Models
 
-The matrix below splits models by capability (LLM / TTS / ASR / Rerank / Embedding / Vision / Chronos2 / Decision) and lists which inference backends can serve each one. A ✓ means the model is loadable on that backend today; a blank cell means not supported. Default models (per env-var registration in `ServerState::new`) are shown in **bold**; everything else is auto-registered when the corresponding weights directory exists under `$NEURON_MODEL_DIRS`. See [`src/capabilities/catalog.rs::default_capabilities`](src/capabilities/catalog.rs) for the source of truth.
+The consolidated model × backend matrix lives at [docs/reference/models](https://ibloc.github.io/neuron/reference/models) and measured numbers at [docs/reference/benchmarks](https://ibloc.github.io/neuron/reference/benchmarks).
 
-Legend: candle · burn · litert · mistralrs · mage_vl · sherpa · tract · ort · Cohere (hosted). Backends marked **opt** need an extra Cargo feature or external binary; see the footnotes below the matrices.
+The matrix below splits models by capability (LLM / TTS / ASR / Rerank / Embedding / Vision / OCR / Chronos2 / Decision) and lists which inference backends can serve each one. A ✓ means the model is loadable on that backend today; a blank cell means not supported. Default models (per env-var registration in `ServerState::new`) are shown in **bold**; everything else is auto-registered when the corresponding weights directory exists under `$NEURON_MODEL_DIRS`. See [`src/capabilities/catalog.rs::default_capabilities`](src/capabilities/catalog.rs) for the source of truth.
+
+Legend: candle · burn · litert · mistralrs · mage_vl · sherpa · tract · ort · paddle-ocr (OCR engine — tract default / `NEURON_OCR_EXECUTOR=ort` fast executor) · Cohere (hosted). Backends marked **opt** need an extra Cargo feature or external binary; see the footnotes below the matrices.
 
 ### LLM (chat completions + Anthropic Messages v1)
 
@@ -399,6 +401,7 @@ The same engines also broken down by what they serve, with build flags:
 | **sherpa** | sherpa-onnx 1.13.x | ASR (SenseVoiceSmall) | `sherpa` |
 | **tract** | tract-onnx 0.21 | ASR (SenseVoiceSmall), Decision (Laya), Vision (ONNX pluggable), OCR (PP-OCRv5/v6 det+rec) | `tract` |
 | **ort** | onnxruntime | Vision (RF-DETR / Florence-2 / custom), Decision (Laya, bit-exact path), OCR (designated fast executor — verified against `ort` 2.0.0-rc.13) | opt-in `ort` integration or `tract` fallback |
+| **paddle-ocr** | tract-onnx / ort (ONNX) | OCR (PP-OCRv5/v6 det + rec, optional layout + table structure) | `tract` (default) or `ort` (fast executor) |
 | **Cohere (hosted)** | HTTP proxy | Rerank | none (no local weights) |
 
 ### Engine overview

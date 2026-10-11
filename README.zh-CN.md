@@ -257,9 +257,11 @@ v1 范围：调度器仅覆盖 LLM 能力（这是目前唯一存在多模型常
 
 ## 支持的模型
 
-下面的矩阵按能力拆分（LLM / TTS / ASR / Rerank / Embedding / Vision / Chronos2 / Decision），逐行列出每个模型可以跑在哪些推理后端上。✓ 表示该后端今天即可加载该模型；空白格表示不支持。**加粗**的 model id 是在 `ServerState::new` 中按 env var 注册的默认模型；其余模型会在对应权重目录存在于 `$NEURON_MODEL_DIRS` 时被自动注册。源码真值在 [`src/capabilities/catalog.rs::default_capabilities`](src/capabilities/catalog.rs)。
+整合后的模型 × 后端矩阵见 [docs/reference/models](https://ibloc.github.io/neuron/zh/reference/models)，实测数据见 [docs/reference/benchmarks](https://ibloc.github.io/neuron/zh/reference/benchmarks)。
 
-图例：candle · burn · litert · mistralrs · mage_vl · sherpa · tract · ort · Cohere（托管）。标记 **opt** 的后端需要额外的 Cargo feature 或外部二进制；具体见下方脚注。
+下面的矩阵按能力拆分（LLM / TTS / ASR / Rerank / Embedding / Vision / OCR / Chronos2 / Decision），逐行列出每个模型可以跑在哪些推理后端上。✓ 表示该后端今天即可加载该模型；空白格表示不支持。**加粗**的 model id 是在 `ServerState::new` 中按 env var 注册的默认模型；其余模型会在对应权重目录存在于 `$NEURON_MODEL_DIRS` 时被自动注册。源码真值在 [`src/capabilities/catalog.rs::default_capabilities`](src/capabilities/catalog.rs)。
+
+图例：candle · burn · litert · mistralrs · mage_vl · sherpa · tract · ort · paddle-ocr（OCR 引擎——tract 默认 / `NEURON_OCR_EXECUTOR=ort` 快速执行器）· Cohere（托管）。标记 **opt** 的后端需要额外的 Cargo feature 或外部二进制；具体见下方脚注。
 
 ### LLM（chat completions + Anthropic Messages v1）
 
@@ -380,6 +382,7 @@ Laya 上游**只发 safetensors**，所以要 tract 加载的图需要先跑上�
 | **sherpa** | sherpa-onnx 1.13.x | ASR（SenseVoiceSmall） | `sherpa` |
 | **tract** | tract-onnx 0.21 | ASR（SenseVoiceSmall）、Decision（Laya）、Vision（ONNX 可插拔）、OCR（PP-OCRv5/v6 检测+识别） | `tract` |
 | **ort** | onnxruntime | Vision（RF-DETR / Florence-2 / 自定义）、Decision（Laya，bit-exact 路径）、OCR（指定快速执行器——已对 `ort` 2.0.0-rc.13 验证） | opt-in `ort` 集成或 `tract` 回退 |
+| **paddle-ocr** | tract-onnx / ort（ONNX） | OCR（PP-OCRv5/v6 检测+识别，可选版面分析 + 表格结构） | `tract`（默认）或 `ort`（快速执行器） |
 | **Cohere（托管）** | HTTP 代理 | Rerank | 无（无本地权重） |
 
 ### 引擎概览

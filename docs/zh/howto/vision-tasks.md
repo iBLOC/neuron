@@ -31,7 +31,7 @@ curl -X POST http://localhost:8085/v1/vision/detect \
 | 表单字段 | 必填 | 类型 | 默认值 | 说明 |
 |---|---|---|---|---|
 | `file` | ✅ | binary | — | 图像字节（PNG、JPEG、WebP） |
-| `model` | ✅ | string | — | 已注册的模型 ID 之一（例如 `yolov8n`、`rtdetr-r50`、`grounding-dino-base`） |
+| `model` | ✅ | string | — | 已注册的模型 ID 之一（例如 `yolov8n`、`rtdetr-r50`） |
 | `confidence` | — | float | `0.25` | 最低置信度阈值（0.0-1.0） |
 | `iou` | — | float | `0.45` | NMS 的 IoU 阈值（仅检测） |
 | `lora_adapter` | — | string | — | 已注册 LoRA 适配器的名称（见下文） |

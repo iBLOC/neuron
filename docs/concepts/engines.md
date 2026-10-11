@@ -11,7 +11,7 @@ neuron supports **3 ML frameworks** and **multiple impls per framework** to cove
 | Capability | Engine | Feature flag | Default? | Backend |
 |---|---|---|---|---|
 | LLM | candle | `candle` | ✅ | Qwen 2/2.5/3/3.5, Llama 2/3, Phi-3, Mistral, ChatGLM, **MiniCPM5-1B / MiniCPM5-2B** via `candle-transformers` |
-| LLM | litert_lm | `litert` | — | Gemma 3 via Google LiteRT-LM subprocess (shells out to `lit` binary) |
+| LLM | litert_lm | `litert` | — | Gemma 3 / 3n / 4 via Google LiteRT-LM subprocess (shells out to `lit` binary) |
 | LLM | mistralrs | `mistralrs` | — | 40+ model families via mistral.rs engine (PagedAttention, prefix caching, KV cache, ISQ) |
 | LLM | mage_vl | (default `candle`) | — | **neuron-native candle port of Microsoft Mage-VL**: MageViT 24-layer codec-native ViT (3D RoPE, I/P-frame patch sparsity) + Qwen3-4B-Instruct-2507 decoder + StreamMind gate; reaches OpenAI `/v1/chat/completions` + Anthropic `/v1/messages` via the `adapter_dispatch` system |
 | TTS | burn (VoxCpm) | `voxcpm` | — | **VoxCPM 0.5B and VoxCPM2 both loadable** (burn 0.21 + `hound`). 0.5B: pre-converted `.mpk` weights. VoxCPM2 (2B, 48 kHz, 30 languages): loads the upstream `openbmb/VoxCPM2` checkpoints directly (no conversion), ~10 GB RAM |
@@ -25,6 +25,7 @@ neuron supports **3 ML frameworks** and **multiple impls per framework** to cove
 | Vision | ort (YOLOv8 / RT-DETR / DETR / RF-DETR / Florence-2) | `ort` | — | Pluggable ONNX executors: `ort` / `tract` / `onnxruntime` |
 | Chronos2 | candle | `chronos2` | — | ✅ landed 2026-07-19: vendored T5 encoder + decoder + linear output head, `CandleChronos2Runtime` (844 LOC, 19 tests) |
 | Decision | tract (Laya int8 ONNX) | `tract` | — | ✅ landed 2026-09-24: pure-Rust ONNX executor (no C++ toolchain / system ONNX Runtime). Encoder-only int8, one forward per question, no decoding. Graph must be prepped with `scripts/prep-laya-onnx.py` first. Bit-exact parity with onnxruntime is **not** achievable on this engine — see [the spec](../superpowers/specs/2026-09-24-laya-decision.md); the `ort` executor slot in `src/vision/ort_runtime.rs` is the drop-in alternative when it is. |
+| OCR | paddle-ocr | `tract` (default) / `ort` (fast executor) | — | tract-onnx / ort (ONNX) — PP-OCRv5/v6 text detection + recognition, optional layout (PP-DocLayoutV3) and table structure (SLANeXt) |
 
 ## Selection
 
@@ -139,7 +140,7 @@ curl -X POST http://localhost:8083/v1/chat/completions \
 | candle (CPU) | Low (model size only; F32 default doubles it — see `NEURON_LLM_DTYPE`) | Fast | Fast | Good for ≤3B models |
 | candle (CUDA) | High (VRAM) | Slow (~5-10min first build) | Fast | Best for 7B+ models |
 | candle (Metal) | High (unified memory) | Medium | Fast | Best for Apple Silicon |
-| litert_lm | Low (subprocess) | Fast | Subprocess overhead | Limited model set (Gemma 3) |
+| litert_lm | Low (subprocess) | Fast | Subprocess overhead | Limited model set (Gemma 3 / 3n / 4) |
 | mistralrs | High (VRAM) | Slow | Fast | Best for serving many concurrent requests |
 | burn (VoxCpm) | Low | Medium (burn + hound) | Fast | Single-model throughput |
 
