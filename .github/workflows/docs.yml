@@ -136,7 +136,6 @@ jobs:
           args: >-
             --no-progress
             --exclude-loopback
-            --exclude-mail
             --exclude 'docs/superpowers/**'
             --exclude 'docs/.vitepress/**'
             --exclude 'docs/node_modules/**'
@@ -162,7 +161,7 @@ jobs:
           echo "Broken-link warnings are non-blocking (fail: false). Treat as fix-before-merge." >> $GITHUB_STEP_SUMMARY
 
   deploy:
-    name: Deploy to GitHub Pages
+    name: Deploy to GitHub Pages (gh-pages branch)
     needs: [build, link-check]
     if: github.event_name == 'workflow_dispatch' && inputs.deploy == true
     runs-on: ubuntu-latest
@@ -174,26 +173,28 @@ jobs:
     concurrency:
       group: pages-deploy-${{ github.ref }}
       cancel-in-progress: false
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+    # Pushing the gh-pages branch needs contents:write (job-level
+    # permissions override the workflow-level read-only grant).
+    permissions:
+      contents: write
     steps:
       - name: Download build artifact
         uses: actions/download-artifact@v4
         with:
           name: neuron-docs-${{ github.sha }}
-          path: docs/.vitepress/dist
+          path: dist
 
-      - name: Setup Pages
-        uses: actions/configure-pages@v5
-
-      - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v4
+      # Branch-based Pages deployment. The actions/deploy-pages service
+      # rejected this repo's artifacts with a deterministic
+      # "deployment_content_failed" (2026-10-09/11; artifact verified
+      # clean: 3.1 MB, 83 files, no links) — the classic gh-pages-branch
+      # path bypasses that service entirely.
+      - name: Deploy to gh-pages branch
+        uses: peaceiris/actions-gh-pages@v4
         with:
-          artifact_name: neuron-docs-${{ github.sha }}
-          token: ${{ secrets.GITHUB_TOKEN }}
-          retention-days: 14
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: dist
+          force_orphan: true
 
       - name: Post-deploy summary
         run: |
