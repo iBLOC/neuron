@@ -45,10 +45,12 @@ jobs:
     name: Build VitePress site
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    env:
-      # VitePress respects these for the build output
-      NODE_ENV: production
     steps:
+      # NOTE: no job-level NODE_ENV=production here. npm skips
+      # devDependencies when NODE_ENV=production, so vitepress/vue (both
+      # dev deps) were never installed on the runner and `npx vitepress
+      # build` failed with "Cannot find package 'vitepress'". VitePress
+      # sets its own build mode; the variable is unnecessary.
       - name: Checkout
         uses: actions/checkout@v4
         with:
