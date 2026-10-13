@@ -260,4 +260,4 @@ Decision 是一种*打分*型能力面，而非生成式能力面：给定一个
 - [LoRA 适配器 How-to](/zh/howto/lora-adapters) — 无需重训即可扩展检测类别
 - [OpenAI 兼容 API](/zh/reference/api) — 完整路由参考
 - [支持的模型与后端](/zh/reference/models) — 权威的模型 × 引擎矩阵
-- [基准测试](/zh/reference/benchmarks) — 实测速度与内存数据
+- [基准测试](/zh/benchmarks/) — 实测速度与内存数据

@@ -7,7 +7,7 @@ title: 支持的模型与后端
 本页由权威目录
 [`src/capabilities/catalog.rs`](https://github.com/iBLOC/neuron/blob/main/src/capabilities/catalog.rs)
 (`default_capabilities()`)生成,即 `/v1/models` 端点返回的全部条目。实测速度与内存数据见
-[/zh/reference/benchmarks](/zh/reference/benchmarks)。
+[/zh/reference/benchmarks](/zh/benchmarks/)。
 
 ## 平台默认模型
 

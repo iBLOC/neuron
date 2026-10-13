@@ -33,7 +33,7 @@ neuron is a **library-only** Rust crate (no standalone binary) that host process
 |---|---|---|
 | Add a new LLM architecture | `src/llm/candle_runtime.rs` | Update `Qwen3::new` / use correct model struct from `candle_transformers::models` |
 | Add a new TTS model | `src/tts/voxcpm_burn/` | 0.5B: vendored from `madushan1000/voxcpm_rs`, pre-converted burn `.mpk` weights. VoxCPM2: `voxcpm2_model.rs` + `audiovae_v2.rs`, loads upstream safetensors/pth directly via `weights.rs` |
-| Add a new model type (e.g. embedding) | Create new `src/<model_type>/mod.rs` | Follow the 10-step pattern in README's "Adding a new model type" section |
+| Add a new model type (e.g. embedding) | Create new `src/<model_type>/mod.rs` | Follow the 10-step pattern (see the "Adding a new model type" checklist below and prior specs under docs/superpowers/specs/) |
 | Add a new vision task (classify/segment/pose) | Extend `src/vision/lora.rs` + `candle_yolo.rs` | v1.0 implements full task dispatch + response shape + LoRA; detect head has preprocessing/NMS wired, classify/segment/pose are stubs pending heads |
 | Add a new vision model family (RT-DETR / DETR / RF-DETR / Florence-2) | Create new `<family>.rs` in `src/vision/`, add a new `VisionImpl` variant, wire the loader | Wire into `default_capabilities()` in `src/capabilities/catalog.rs` |
 | Add a new output layout to the ONNX backend | Extend `OrtOutputLayout` in `src/vision/ort_runtime.rs` and add a new decoder function (see `decode_yolov8_output` / `decode_rfdetr_output` for templates) | The unified `decode_detection_output` dispatcher routes by layout; add a new match arm |
@@ -43,7 +43,7 @@ neuron is a **library-only** Rust crate (no standalone binary) that host process
 | Wire registrations from config | `state.rs` (process `config.registrations` per capability) | Each cap needs its own `Impl::parse` loop |
 | Add a new model source (e.g. ModelScope, hf-mirror) | `src/models/<name>.rs` + `src/models/source.rs` + `src/server/state.rs` | Implement `Source` trait; register in `SourceRegistry::with_defaults()` AND in `ServerState::new`'s source registry block. If the source speaks HF-protocol use `HuggingFaceSource::with_identity()` so it gets a unique id. |
 | Add a new HTTP endpoint | `src/server/mod.rs` (handler) + `routes` block | Follow OpenAI shape if it's a vendor endpoint |
-| Add a new env var | `src/config.rs` (default field) + `src/server/mod.rs` (env-var dispatch in `ServerState::new`) | Document in README's "Engine selection via env vars" section |
+| Add a new env var | `src/config.rs` (default field) + `src/server/mod.rs` (env-var dispatch in `ServerState::new`) | Document in docs/reference/env-vars.md (both locales) and docs/concepts/engines.md |
 | Add a new Tauri command (when embedded) | `src/embedded.rs` (the public API) + host project's `src-tauri` integration | Don't break the `NeuronHandle` contract |
 | Add a new reranker family (e.g. Cohere) | `src/rerank/<name>.rs` + register `RerankImpl` variant in `src/rerank/mod.rs` | Match `RerankRuntime` trait shape; add env-var arm in `state.rs` |
 | Add a new TTS stream format (mp3 streaming, opus) | extend `synthesize_stream` impl or override per-runtime | The trait's default impl uses 16 KiB chunks; override if the runtime can yield in a more efficient shape |
@@ -192,7 +192,7 @@ The OpenBMB 2026-04 release of VoxCPM (2B params, 48 kHz AudioVAE V2, 30 languag
 
 1. **Wire format is OpenAI byte-for-byte compatible** for `/v1/chat/completions`, `/v1/audio/speech`, `/v1/audio/transcriptions`, `/v1/rerank`, `/v1/embeddings`, AND Anthropic Messages v1 compatible for `/v1/messages`. Any client that works with OpenAI / vLLM / ollama / llama.cpp server / Anthropic SDK should work with neuron unchanged.
 
-2. **All model types share the same trait shape**: `load`, `infer`, `list_models`, `name`. See the README "Adding a new model type" section for the full pattern.
+2. **All model types share the same trait shape**: `load`, `infer`, `list_models`, `name`. See the "Adding a new model type" checklist in existing specs and the trait shapes under src/.
 
 3. **`run_embedded()` returns a `NeuronHandle` that owns the server lifetime**. Hosts MUST call `request_shutdown()` + `join().await` for graceful drain. Dropping the handle without shutdown leaks the bind port.
 
@@ -449,7 +449,7 @@ neuron has **no direct dependency** on any particular host — the integration c
 
 - `docs/superpowers/specs/` — current design docs (8). These are **maintainer-facing**: spec rationales, design pivots, and post-mortems for major features. End users do not need them.
 
-When you add a new model type or engine, write a one-page spec under `docs/superpowers/specs/` and link it from the README.
+When you add a new model type or engine, write a one-page spec under `docs/superpowers/specs/` and link it from the docs (docs/concepts/engines.md) and AGENTS.md.
 
 ## Source registry (multi-source puller)
 
@@ -490,7 +490,7 @@ Catalog dedup: the same `(engine, id)` may appear multiple times in `SUPPORTED_C
 - **Runtime**: `candle` — same `model_type = "llama"` dispatch as MiniCPM5-1B. `candle_arch::detect_arch` returns `CausalArch::Llama` and the structural fields (42 layers, GQA 2, hidden_size 2048, intermediate_size 6144, vocab_size 130560, `rope_theta=5_000_000`, `tie_word_embeddings=false`) are preserved end-to-end. Verified by `src/llm/candle_arch.rs::test_detect_arch_minicpm5_2b_dispatches_to_llama` against a synthetic config blob mirroring OpenBMB's published checkpoint spec (see `src/capabilities/catalog.rs` top-of-file doc-comment for the side-by-side 1B/2B field table).
 - **Hybrid `<think>`**: same `enable_thinking` chat-template flag as MiniCPM5-1B — no per-model code change needed.
 
-Other catalog families — loadable by capability, by backend. ✓ = the model is served by that backend today; the source of truth is `default_capabilities()` in `src/capabilities/catalog.rs` (see the README's "Supported Models" section for the full table including defaults + build flags):
+Other catalog families — loadable by capability, by backend. ✓ = the model is served by that backend today; the source of truth is `default_capabilities()` in `src/capabilities/catalog.rs` (see docs/reference/models.md for the full table including defaults + build flags):
 
 | Capability | candle | burn | litert | mistralrs | mage_vl | sherpa | tract | ort | Cohere |
 |---|---|---|---|---|---|---|---|---|---|---|

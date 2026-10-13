@@ -45,6 +45,7 @@ export default defineConfig({
           { text: 'Guide', link: '/guide/intro' },
           { text: 'Concepts', link: '/concepts/architecture' },
           { text: 'How-to', link: '/howto/embed-into-host' },
+          { text: 'Benchmarks', link: '/benchmarks/' },
           { text: 'API', link: '/reference/api' },
           {
             text: 'v0.1.0',
@@ -55,6 +56,14 @@ export default defineConfig({
         ],
 
         sidebar: {
+          '/benchmarks/': [
+            {
+              text: 'Benchmarks',
+              items: [
+                { text: 'Speed, Latency & Accuracy', link: '/benchmarks/' },
+              ],
+            },
+          ],
           '/guide/': [
             {
               text: 'Introduction',
@@ -99,7 +108,6 @@ export default defineConfig({
                 { text: 'Environment Variables', link: '/reference/env-vars' },
                 { text: 'ServerState Fields', link: '/reference/server-state' },
             { text: 'Supported Models & Backends', link: '/reference/models' },
-            { text: 'Benchmarks', link: '/reference/benchmarks' },
               ],
             },
           ],
@@ -146,6 +154,7 @@ export default defineConfig({
           { text: '指南', link: '/zh/guide/intro' },
           { text: '概念', link: '/zh/concepts/architecture' },
           { text: '教程', link: '/zh/howto/embed-into-host' },
+          { text: '基准测试', link: '/zh/benchmarks/' },
           { text: 'API', link: '/zh/reference/api' },
           {
             text: 'v0.1.0',
@@ -156,6 +165,14 @@ export default defineConfig({
         ],
 
         sidebar: {
+          '/zh/benchmarks/': [
+            {
+              text: '基准测试',
+              items: [
+                { text: '速度、延迟与精度', link: '/zh/benchmarks/' },
+              ],
+            },
+          ],
           '/zh/guide/': [
             {
               text: '介绍',
@@ -200,7 +217,6 @@ export default defineConfig({
                 { text: '环境变量', link: '/zh/reference/env-vars' },
                 { text: 'ServerState 字段', link: '/zh/reference/server-state' },
             { text: '支持的模型与后端', link: '/zh/reference/models' },
-            { text: '基准测试', link: '/zh/reference/benchmarks' },
               ],
             },
           ],

@@ -262,4 +262,4 @@ layout) and `table.onnx` (SLANeXt table structure -> HTML). See
 - [LoRA Adapters How-to](/howto/lora-adapters) — extending detection classes without retraining
 - [OpenAI-compatible API](/reference/api) — full route reference
 - [Supported Models & Backends](/reference/models) — the authoritative model × engine matrix
-- [Benchmarks](/reference/benchmarks) — measured speed and memory numbers
+- [Benchmarks](/benchmarks/) — measured speed and memory numbers

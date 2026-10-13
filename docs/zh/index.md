@@ -12,6 +12,9 @@ hero:
       text: 快速开始
       link: /zh/guide/quick-start
     - theme: alt
+      text: 基准测试
+      link: /zh/benchmarks/
+    - theme: alt
       text: GitHub
       link: https://github.com/iBLOC/neuron
     - theme: alt

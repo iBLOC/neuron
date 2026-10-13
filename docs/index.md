@@ -12,6 +12,9 @@ hero:
       text: Quick Start
       link: /guide/quick-start
     - theme: alt
+      text: Benchmarks
+      link: /benchmarks/
+    - theme: alt
       text: GitHub
       link: https://github.com/ibloc/neuron
     - theme: alt
@@ -90,6 +93,7 @@ Most inference servers (vLLM, ollama, llama.cpp server) are standalone daemons �
 ## Where to next?
 
 - [Quick Start](/guide/quick-start) — embed neuron in a Rust binary in 20 lines
+- [Benchmarks](/benchmarks/) — decode throughput, latency, memory and accuracy per model × backend
 - [Architecture](/concepts/architecture) — how the data flow works end-to-end
 - [Capabilities](/concepts/capabilities) — the 9 model surfaces, in detail
 - [OpenAI-compatible API](/reference/api) — full route table

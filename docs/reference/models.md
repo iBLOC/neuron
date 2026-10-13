@@ -8,7 +8,7 @@ This page is generated from the authoritative catalog in
 [`src/capabilities/catalog.rs`](https://github.com/iBLOC/neuron/blob/main/src/capabilities/catalog.rs)
 (`default_capabilities()`). Every entry is what `/v1/models` advertises with
 `is_default` / engine metadata. For measured speed and memory numbers see
-[/reference/benchmarks](/reference/benchmarks).
+[/reference/benchmarks](/benchmarks/).
 
 ## Platform default
 
