@@ -34,3 +34,4 @@ impl<T: LlmRuntime + ?Sized> AnyCapabilityEngine for T {}
 
 pub mod bridge;
 pub mod registry;
+pub mod remote;

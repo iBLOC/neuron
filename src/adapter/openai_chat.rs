@@ -164,23 +164,65 @@ pub fn openai_to_canonical(req: OpenAiChatRequest) -> Result<CanonicalRequest, S
                 }
             }
         }
+        // Assistant tool calls: OpenAI wires them as
+        // `{id, type: "function", function: {name, arguments: "<json str>"}}`.
+        let mut tool_calls = Vec::new();
+        if let Some(calls) = &m.tool_calls {
+            for c in calls {
+                let id = c.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let name = c["function"]["name"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string();
+                let arguments = match c["function"]["arguments"].as_str() {
+                    Some(s) => serde_json::from_str(s)
+                        .unwrap_or(Value::String(s.to_string())),
+                    None => Value::Null,
+                };
+                tool_calls.push(crate::canonical::ToolCall { id, name, arguments });
+            }
+        }
         let mut content = Vec::with_capacity(1 + images.len());
         content.push(ContentBlock::Text(TextBlock { text: content_text }));
         content.extend(images);
         messages.push(CanonicalMessage {
             role,
             content,
-            tool_calls: vec![],
+            tool_calls,
             tool_call_id: m.tool_call_id,
             reasoning_content: None,
         });
+    }
+
+    // OpenAI tool definitions
+    // `[{type: "function", function: {name, description, parameters}}]`
+    // flatten to canonical ToolDefinition {name, description, input_schema}.
+    let mut tools = Vec::new();
+    if let Some(defs) = &req.tools {
+        for d in defs {
+            let function = &d["function"];
+            let Some(name) = function.get("name").and_then(|n| n.as_str()) else {
+                continue;
+            };
+            tools.push(crate::canonical::ToolDefinition {
+                name: name.to_string(),
+                description: function
+                    .get("description")
+                    .and_then(|x| x.as_str())
+                    .map(str::to_string),
+                input_schema: function
+                    .get("parameters")
+                    .cloned()
+                    .unwrap_or(Value::Null),
+            });
+        }
     }
 
     let canonical = CanonicalLlmRequest {
         model: req.model,
         system: vec![],
         messages,
-        tools: vec![],
+        tools,
         sampling: SamplingParams {
             temperature: req.temperature,
             top_p: req.top_p,
@@ -198,14 +240,191 @@ pub fn openai_to_canonical(req: OpenAiChatRequest) -> Result<CanonicalRequest, S
     Ok(CanonicalRequest::Llm(canonical))
 }
 
+/// Serialize a canonical LLM request back to OpenAI wire JSON — the
+/// request-direction counterpart of [`canonical_to_openai`]. Tools,
+/// assistant tool_calls and tool-result messages round-trip so a
+/// forwarding engine (see `engine::remote`) can proxy agentic
+/// conversations verbatim.
+pub fn canonical_request_to_openai_wire(req: &CanonicalLlmRequest) -> Value {
+    let mut messages: Vec<Value> = Vec::new();
+    if !req.system.is_empty() {
+        let text = req
+            .system
+            .iter()
+            .map(|b| b.text.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
+        messages.push(serde_json::json!({"role": "system", "content": text}));
+    }
+    for m in &req.messages {
+        let role = match m.role {
+            MessageRole::System => "system",
+            MessageRole::User => "user",
+            MessageRole::Assistant => "assistant",
+            MessageRole::Tool => "tool",
+        };
+        let text = m
+            .content
+            .iter()
+            .filter_map(|b| match b {
+                ContentBlock::Text(t) => Some(t.text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut msg = serde_json::json!({"role": role, "content": text});
+        if m.role == MessageRole::Tool {
+            if let Some(id) = &m.tool_call_id {
+                msg["tool_call_id"] = Value::String(id.clone());
+            }
+        }
+        if !m.tool_calls.is_empty() {
+            let calls: Vec<Value> = m
+                .tool_calls
+                .iter()
+                .map(|c| {
+                    serde_json::json!({
+                        "id": c.id,
+                        "type": "function",
+                        "function": {
+                            "name": c.name,
+                            // OpenAI wires arguments as a JSON STRING.
+                            "arguments": c.arguments.to_string(),
+                        }
+                    })
+                })
+                .collect();
+            msg["tool_calls"] = Value::Array(calls);
+            // A tool_calls message carries no content per the OpenAI
+            // contract — drop the (always empty) text field.
+            msg["content"] = Value::Null;
+        }
+        messages.push(msg);
+    }
+
+    let mut wire = serde_json::json!({
+        "model": req.model,
+        "messages": messages,
+        "stream": false,
+    });
+    if !req.tools.is_empty() {
+        let tools: Vec<Value> = req
+            .tools
+            .iter()
+            .map(|t| {
+                serde_json::json!({
+                    "type": "function",
+                    "function": {
+                        "name": t.name,
+                        "description": t.description,
+                        "parameters": t.input_schema,
+                    }
+                })
+            })
+            .collect();
+        wire["tools"] = Value::Array(tools);
+    }
+    if let Some(t) = req.sampling.temperature {
+        wire["temperature"] = serde_json::json!(t);
+    }
+    if let Some(p) = req.sampling.top_p {
+        wire["top_p"] = serde_json::json!(p);
+    }
+    if let Some(mt) = req.sampling.max_tokens {
+        wire["max_tokens"] = serde_json::json!(mt);
+    }
+    if !req.stop_sequences.is_empty() {
+        wire["stop"] = serde_json::json!(req.stop_sequences);
+    }
+    wire
+}
+
+/// Parse a remote OpenAI chat-completion response body into canonical
+/// form — the response-direction counterpart of
+/// [`canonical_request_to_openai_wire`]. Tool calls become
+/// `ContentBlock::ToolUse` entries and `finish_reason` maps to
+/// `StopReason` ("tool_calls" → `StopReason::ToolUse`).
+pub fn openai_wire_response_to_canonical(
+    body: &Value,
+    local_model: &str,
+) -> Result<CanonicalLlmResponse, String> {
+    let choice = body["choices"]
+        .get(0)
+        .ok_or_else(|| "remote response has no choices".to_string())?;
+    let message = &choice["message"];
+    let text = message["content"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+
+    let mut content = Vec::new();
+    if !text.is_empty() {
+        content.push(ContentBlock::Text(TextBlock { text }));
+    }
+    if let Some(calls) = message["tool_calls"].as_array() {
+        for c in calls {
+            let arguments = match c["function"]["arguments"].as_str() {
+                Some(s) => serde_json::from_str(s).unwrap_or(Value::String(s.to_string())),
+                None => Value::Null,
+            };
+            content.push(ContentBlock::ToolUse(crate::canonical::ToolUseBlock {
+                id: c["id"].as_str().unwrap_or_default().to_string(),
+                name: c["function"]["name"].as_str().unwrap_or_default().to_string(),
+                input: arguments,
+            }));
+        }
+    }
+
+    let stop_reason = match choice["finish_reason"].as_str() {
+        Some("tool_calls") => StopReason::ToolUse,
+        Some("length") => StopReason::MaxTokens,
+        Some("content_filter") => StopReason::Refusal,
+        Some(other) => StopReason::Other(other.to_string()),
+        _ => StopReason::EndTurn,
+    };
+
+    let usage = body.get("usage").map(|u| crate::canonical::UsageInfo {
+        input_tokens: u["prompt_tokens"].as_u64().unwrap_or(0) as u32,
+        output_tokens: u["completion_tokens"].as_u64().unwrap_or(0) as u32,
+        ..Default::default()
+    }).unwrap_or_default();
+
+    Ok(CanonicalLlmResponse {
+        id: body["id"].as_str().unwrap_or("remote").to_string(),
+        model: local_model.to_string(),
+        stop_reason,
+        content,
+        usage,
+        extensions: Default::default(),
+    })
+}
+
 pub fn canonical_to_openai(resp: &CanonicalLlmResponse) -> OpenAiChatResponse {
-    let content = resp.content.iter()
+    let text = resp.content.iter()
         .filter_map(|b| match b {
             ContentBlock::Text(t) => Some(t.text.clone()),
             _ => None,
         })
         .collect::<Vec<_>>()
         .join("");
+
+    // ToolUse blocks round-trip to OpenAI response tool_calls (arguments
+    // as a JSON string per the wire contract).
+    let tool_calls: Vec<Value> = resp
+        .content
+        .iter()
+        .filter_map(|b| match b {
+            ContentBlock::ToolUse(t) => Some(serde_json::json!({
+                "id": t.id,
+                "type": "function",
+                "function": {
+                    "name": t.name,
+                    "arguments": t.input.to_string(),
+                }
+            })),
+            _ => None,
+        })
+        .collect();
 
     let finish_reason = match &resp.stop_reason {
         StopReason::EndTurn => Some("stop".to_string()),
@@ -225,8 +444,8 @@ pub fn canonical_to_openai(resp: &CanonicalLlmResponse) -> OpenAiChatResponse {
             index: 0,
             message: OpenAiChatResponseMessage {
                 role: "assistant".to_string(),
-                content,
-                tool_calls: None,
+                content: text,
+                tool_calls: (!tool_calls.is_empty()).then_some(tool_calls),
             },
             finish_reason,
         }],

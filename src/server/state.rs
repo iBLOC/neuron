@@ -194,6 +194,37 @@ impl ServerState {
             _ => {}
         }
 
+        // Remote-forwarded models (cloud behind the same OpenAI face).
+        // NEURON_REMOTE_BASE_URL + NEURON_REMOTE_MODELS="a,b" register
+        // each id as a capability engine that proxies to the remote
+        // endpoint verbatim — tools included. This is what lets the
+        // brain container serve cloud-quality models for benchmarking
+        // the full production stack without local weights.
+        if let Ok(base) = std::env::var("NEURON_REMOTE_BASE_URL") {
+            if !base.trim().is_empty() {
+                if let Ok(ids) = std::env::var("NEURON_REMOTE_MODELS") {
+                    let key = std::env::var("NEURON_REMOTE_API_KEY").unwrap_or_default();
+                    for id in ids.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                        let engine: std::sync::Arc<dyn crate::engine::AnyCapabilityEngine> =
+                            std::sync::Arc::new(crate::engine::remote::RemoteLlmEngine::new(
+                                base.trim().to_string(),
+                                key.clone(),
+                                id.to_string(),
+                            ));
+                        engines.llm.register(id.to_string(), engine.clone());
+                        if engines.llm.default().is_none() {
+                            engines.llm.set_default(engine);
+                        }
+                        eprintln!("[neuron] registered remote model {id} → {}", base.trim());
+                    }
+                } else {
+                    eprintln!(
+                        "[neuron] NEURON_REMOTE_BASE_URL set but NEURON_REMOTE_MODELS missing — no remote models registered"
+                    );
+                }
+            }
+        }
+
         // Also register models from NeuronConfig.registrations (LLM
         // slice — TTS/ASR/Rerank/Embedding are processed below after
         // their own registries are constructed).

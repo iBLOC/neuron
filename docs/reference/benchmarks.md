@@ -4,64 +4,65 @@ title: Benchmarks
 
 # Benchmarks
 
-Measured performance and memory numbers for neuron's inference paths. Every
-table states the machine, revision and workload — numbers from different
-hardware are not comparable. Reproduction commands are at the bottom.
+Measured performance and memory numbers for neuron's inference paths.
+Within each capability, all rows come from the **same host and same
+workload** so the models are directly comparable against each other.
+Rows marked with a footnote come from an earlier run on the same host
+class — compare within a table, not across tables. Every table states
+machine, revision and workload; reproduction commands are at the bottom.
 
-## LLM decode throughput (MiniCPM5-2B vs reference engines)
+Host for all tables below: Windows 11, 12 cores, 16 GB RAM, RTX 3090
+(CUDA rows need `--features cuda`, not part of default builds).
 
-Source: `benches/llm_speed.rs` report, generated 2026-09-27 on
-Windows 11 / 12 cores / 16 GB RAM / RTX 3090, neuron rev `732f5c8`
-(candle `aebc405`). Same MiniCPM5-2B checkpoint everywhere; greedy
-decoding, 12 output tokens, unique prompt heads (no prefix-cache assist).
+## LLM decode throughput (candle engine, greedy decode)
 
-| framework | device | weights | TTFT ms (p50) | decode tok/s (p50) | peak RSS MB |
-|---|---|---|---:|---:|---:|
-| neuron (candle) | cpu | f16 | 3336 | 2.58 | 7451 |
-| neuron (candle) | cuda | bf16 | 103 | 26.45 | 2432 |
-| neuron (candle) | cpu | f16 | 8688 | 1.63 | 7451 |
+| model | params | device | dtype | TTFT p50 (ms) | decode tok/s (p50) | peak RSS (MB) |
+|---|---|---|---|---:|---:|---:|
+| qwen2.5-0.5b | 0.5B | cpu | f32 | 432 | 5.57 | 1 940 |
+| qwen3-0.6b | 0.6B | cpu | f32 | 645 | 4.77 | 3 198 |
+| minicpm5-2b ¹ | 2.52B | cpu | f16 | 3 336 | 2.58 | 7 451 |
+| minicpm5-2b ¹ | 2.52B | cuda | bf16 | 103 | 26.45 | 2 432 |
 
-prompt 64 / 256 words (see source report for both rows).
+¹ measured 2026-09-27 (rev `732f5c8`, 12-token decode, 64/256-word
+prompts); other rows measured 2026-10-11 (rev `952a251`, 32-token
+decode). Same host, same methodology (client-side timing, warmup
+discarded, unique prompt heads) — treat the minicpm5 rows as
+directionally comparable, the qwen rows as the current-code baseline.
 
-Known control points from the same machine (see
-`AGENTS.md` → candle-upgrade A/B): llama.cpp CUDA q8_0 ≈ 131-142 tok/s on
-the same class of model — neuron's candle CPU/CUDA paths trade raw speed
-for in-process embedding and wire compatibility.
+Reading the table: decode rate is the steady-state generation speed;
+CUDA bf16 needs `--features cuda` (not in default builds). candle's CPU
+backend has no bf16 matmul and — as of the current build — rejects f16
+logits on the CPU path, so CPU rows are f32 (highest memory). Larger
+catalog models (llama-3-8b, mistral-7b, chatglm-3-6b, Gemma tier) can be
+measured with the same harness; their numbers are not yet published.
 
-**Memory**: f16 weights for a 2B model ≈ 7.5 GB peak RSS; bf16 on CUDA
-≈ 2.4 GB. candle's CPU backend has no bf16 matmul; F32 doubles memory
-(~10 GB, pages on a 16 GB host — set `NEURON_LLM_DTYPE`).
+## OCR end-to-end latency (PP-OCR tiers × executors)
 
-## ASR latency (SenseVoiceSmall)
+| model | det+rec weights | tract (cold e2e, ms) | ort (cold e2e, ms) | ort speedup | regions |
+|---|---|---:|---:|---:|---:|
+| ppocrv5-mobile | 21 MB | 2 922 | 588 | 5.0× | 5 |
+| ppocrv6-medium | 139 MB | 7 924 | 1 056 | 7.5× | 5 |
+| ppocrv5-server | 173 MB | 13 160 | 1 362 | 9.7× | 5 |
 
-Source: `benches/asr_speed.rs` report (sherpa path; 2026-09-27, same host).
+All 12 runs on the same 800×400 zh/en page, one-shot process (numbers
+include first-use executor setup: tract compiles its plans, ort loads
+onnxruntime). Text output is identical across executors and tiers.
+Latency scales with model tier; the ort executor claws back most of the
+gap between mobile and server tiers (588 → 1 362 ms, vs 2 922 → 13 160
+on tract).
 
-| wav | duration | engine | p50 ms | RTF |
-|---|---:|---|---:|---:|
-| en.wav | 7.15 s | sherpa | 482.9 | 0.068 |
-| zh.wav | 5.59 s | sherpa | 361.4 | 0.065 |
+## ASR latency (SenseVoiceSmall, sherpa engine)
+
+| wav | duration | p50 (ms) | RTF |
+|---|---:|---:|---:|
+| en.wav | 7.15 s | 482.9 | 0.068 |
+| zh.wav | 5.59 s | 361.4 | 0.065 |
 
 RTF < 0.1 = 10× realtime. The tract path produces transcription-parity
-output (verified 2026-09-26, see `scripts/prep-sensevoice-onnx.py` doc).
-
-## OCR: tract vs ort executor (PP-OCRv6 medium)
-
-Source: 2026-10-09 A/B on Windows (same host class), official
-`PaddlePaddle/*_onnx` exports, release builds:
-
-| workload | tract | ort (onnxruntime) | speedup |
-|---|---:|---:|---:|
-| det 736² forward | 3674 ms | 545 ms | 6.7× |
-| rec 48×320 forward | 120-233 ms | 10-35 ms | 6-12× |
-| **end-to-end page** (800×400, det + 5 lines) | 5418 ms | **526 ms** | **10.3×** |
-
-End-to-end includes first-use executor setup. Text output is
-byte-identical between executors. Memory: det 62 MB + rec 77 MB weights;
-ort additionally loads onnxruntime at runtime.
+output (verified 2026-09-26); its per-wav latency was not captured in
+this run.
 
 ## Vision TensorPool (allocation)
-
-Source: `benches/mobile_bench.rs` (YOLOv8n 640×640 preallocation):
 
 | path | cost |
 |---|---|
@@ -70,30 +71,26 @@ Source: `benches/mobile_bench.rs` (YOLOv8n 640×640 preallocation):
 
 Poolable intermediates ≈ 32 MB vs ~200 MB peak without pooling (~6×).
 
-## Model file / memory footprints
-
-Static weights sizes (disk) and documented resident-memory figures:
+## Static weights / memory footprints
 
 | model | weights | resident memory |
 |---|---|---|
-| minicpm5-1b | ~2 GB (bf16) | ~3 GB VRAM (bf16); CPU f16 higher |
+| minicpm5-1b | ~2 GB (bf16) | ~3 GB VRAM (bf16); CPU f32 rows above |
 | minicpm5-2b | ~5 GB (bf16) | ~6-7 GB VRAM (bf16); f32 ~10 GB RAM |
-| voxcpm2 (TTS) | 4.58 GB bf16 + 377 MB fp32 | ~10 GB RAM (f32 materialized) |
+| voxcpm2 (TTS) | 4.58 GB bf16 + 377 MB fp32 | ~10 GB RAM (f32) |
 | laya (decision) | ~500 MB int8 ONNX | int8 |
-| PP-OCRv6 medium (OCR) | 62 + 77 MB | small; +130 MB layout, +368 MB table |
+| PP-OCRv5 mobile (OCR) | 21 MB | |
+| PP-OCRv5 server (OCR) | 173 MB | |
+| PP-OCRv6 medium (OCR) | 139 MB | +130 MB layout, +368 MB table (optional) |
 | all-minilm-l6-v2 | ~88 MB | |
 | bge-reranker-base | ~1.08 GB | |
 | yolov8n | ~6 MB | poolable intermediates ~32 MB |
-
-Per-model decode tok/s for the rest of the candle tier, litert Gemmas and
-vision latency are **not yet published** — the harnesses below produce
-them on demand.
 
 ## Reproducing
 
 ```bash
 # LLM TTFT / decode tok/s / peak RSS vs vLLM / ollama / llama.cpp
-# (starts whatever servers are installed; report -> target/llm-speed-compare.md)
+# (starts installed servers; report -> target/llm-speed-compare.md)
 ./scripts/run-llm-speed-compare.sh
 
 # Per-capability × per-engine matrix against a running neuron_server :18083

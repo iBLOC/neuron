@@ -4,61 +4,58 @@ title: 基准测试
 
 # 基准测试
 
-neuron 各推理路径的实测性能与内存数据。每张表都标注机器、代码版本与
-工作负载——不同硬件的数字不可直接比较。复现命令见文末。
+neuron 各推理路径的实测性能与内存数据。**同一能力内的所有行来自同一台
+主机、同一负载**,模型之间可直接横向对比;带脚注的行来自较早一轮同级别
+主机实测——表内可比,跨表不可比。每张表都标注机器、代码版本与工作负载,
+复现命令见文末。
 
-## LLM 解码吞吐(MiniCPM5-2B,对比参考引擎)
+以下所有表的主机:Windows 11,12 核,16 GB 内存,RTX 3090(CUDA 行需要
+`--features cuda`,不在默认构建内)。
 
-数据来源:`benches/llm_speed.rs` 报告,2026-09-27 生成于 Windows 11 /
-12 核 / 16 GB 内存 / RTX 3090,neuron rev `732f5c8`(candle `aebc405`)。
-全部使用同一 MiniCPM5-2B 权重;贪心解码,输出 12 token,唯一化提示头
-(防前缀缓存干扰)。
+## LLM 解码吞吐(candle 引擎,贪心解码)
 
-| 框架 | 设备 | 权重 | TTFT ms (p50) | 解码 tok/s (p50) | 峰值 RSS MB |
-|---|---|---|---:|---:|---:|
-| neuron(candle) | cpu | f16 | 3336 | 2.58 | 7451 |
-| neuron(candle) | cuda | bf16 | 103 | 26.45 | 2432 |
-| neuron(candle) | cpu | f16 | 8688 | 1.63 | 7451 |
+| 模型 | 参数量 | 设备 | 精度 | TTFT p50 (ms) | 解码 tok/s (p50) | 峰值 RSS (MB) |
+|---|---|---|---|---:|---:|---:|
+| qwen2.5-0.5b | 0.5B | cpu | f32 | 432 | 5.57 | 1 940 |
+| qwen3-0.6b | 0.6B | cpu | f32 | 645 | 4.77 | 3 198 |
+| minicpm5-2b ¹ | 2.52B | cpu | f16 | 3 336 | 2.58 | 7 451 |
+| minicpm5-2b ¹ | 2.52B | cuda | bf16 | 103 | 26.45 | 2 432 |
 
-(提示词 64 / 256 词两行,详见源报告。)
+¹ 2026-09-27 实测(rev `732f5c8`,12 token 解码,64/256 词提示);其余行
+2026-10-11 实测(rev `952a251`,32 token 解码)。同一主机、同一方法论
+(客户端计时、预热丢弃、唯一提示头)——minicpm5 两行作为方向性参考,
+qwen 两行是当前代码的基线。
 
-同机参照(见 `AGENTS.md` → candle 升级 A/B):llama.cpp CUDA q8_0 在同类
-模型上约 131-142 tok/s——neuron 的 candle CPU/CUDA 路径以换取向进程内嵌
-入与线格式兼容。
+解读:解码速率是稳态生成速度;CUDA bf16 需要 `--features cuda`(不在
+默认构建内)。candle 的 CPU 后端无 bf16 matmul,且当前构建的 CPU 路径
+拒绝 f16 logits,因此 CPU 行均为 f32(内存最高)。目录中更大的模型
+(llama-3-8b、mistral-7b、chatglm-3-6b、Gemma 系)可用同一工具实测,
+数据暂未发布。
 
-**内存**:2B 模型 f16 权重峰值 RSS 约 7.5 GB;CUDA bf16 约 2.4 GB。
-candle 的 CPU 后端无 bf16 matmul;F32 会让内存翻倍(约 10 GB,16 GB
-主机上会换页——设置 `NEURON_LLM_DTYPE`)。
+## OCR 端到端时延(PP-OCR 档位 × 执行器)
 
-## ASR 时延(SenseVoiceSmall)
+| 模型 | 检测+识别权重 | tract(冷启动端到端,ms) | ort(冷启动端到端,ms) | ort 加速比 | 区域数 |
+|---|---|---:|---:|---:|---:|
+| ppocrv5-mobile | 21 MB | 2 922 | 588 | 5.0× | 5 |
+| ppocrv6-medium | 139 MB | 7 924 | 1 056 | 7.5× | 5 |
+| ppocrv5-server | 173 MB | 13 160 | 1 362 | 9.7× | 5 |
 
-数据来源:`benches/asr_speed.rs` 报告(sherpa 路径;2026-09-27,同机)。
+12 次运行全部使用同一张 800×400 中英混排页,单次进程(数字包含执行器
+首次初始化:tract 编译 plan,ort 加载 onnxruntime)。文本输出跨执行器、
+跨档位完全一致。时延随模型档位上升;ort 执行器能收回 mobile 与 server
+档位之间的大部分差距(588 → 1 362 ms,而 tract 上是 2 922 → 13 160 ms)。
 
-| 音频 | 时长 | 引擎 | p50 ms | RTF |
-|---|---:|---|---:|---:|
-| en.wav | 7.15 s | sherpa | 482.9 | 0.068 |
-| zh.wav | 5.59 s | sherpa | 361.4 | 0.065 |
+## ASR 时延(SenseVoiceSmall,sherpa 引擎)
+
+| 音频 | 时长 | p50 (ms) | RTF |
+|---|---:|---:|---:|
+| en.wav | 7.15 s | 482.9 | 0.068 |
+| zh.wav | 5.59 s | 361.4 | 0.065 |
 
 RTF < 0.1 = 10 倍实时。tract 路径输出与 sherpa 转写一致(2026-09-26
-验证,见 `scripts/prep-sensevoice-onnx.py` 文档)。
-
-## OCR:tract 与 ort 执行器对比(PP-OCRv6 medium)
-
-数据来源:2026-10-09 同级 Windows 主机 A/B,官方 `PaddlePaddle/*_onnx`
-导出,release 构建:
-
-| 工作负载 | tract | ort(onnxruntime) | 加速比 |
-|---|---:|---:|---:|
-| 检测 736² 前向 | 3674 ms | 545 ms | 6.7× |
-| 识别 48×320 前向 | 120-233 ms | 10-35 ms | 6-12× |
-| **端到端整页**(800×400,检测 + 5 行) | 5418 ms | **526 ms** | **10.3×** |
-
-端到端含执行器首次初始化。两种执行器的文本输出逐字节一致。内存:检测
-62 MB + 识别 77 MB 权重;ort 运行时额外加载 onnxruntime。
+验证);本轮未采集其逐条时延。
 
 ## Vision TensorPool(内存分配)
-
-数据来源:`benches/mobile_bench.rs`(YOLOv8n 640×640 预分配):
 
 | 路径 | 开销 |
 |---|---|
@@ -67,23 +64,20 @@ RTF < 0.1 = 10 倍实时。tract 路径输出与 sherpa 转写一致(2026-09-26
 
 可池化中间张量约 32 MB,对比无池化峰值约 200 MB(约 6×)。
 
-## 模型文件 / 内存占用
-
-静态权重(磁盘)与已记录的常驻内存:
+## 静态权重 / 内存占用
 
 | 模型 | 权重 | 常驻内存 |
 |---|---|---|
-| minicpm5-1b | 约 2 GB(bf16) | bf16 约 3 GB 显存;CPU f16 更高 |
+| minicpm5-1b | 约 2 GB(bf16) | bf16 约 3 GB 显存;CPU f32 见上表 |
 | minicpm5-2b | 约 5 GB(bf16) | bf16 约 6-7 GB 显存;f32 约 10 GB 内存 |
 | voxcpm2(TTS) | 4.58 GB bf16 + 377 MB fp32 | 约 10 GB 内存(f32 具象化) |
 | laya(决策) | 约 500 MB int8 ONNX | int8 |
-| PP-OCRv6 medium(OCR) | 62 + 77 MB | 较小;+130 MB 版面、+368 MB 表格 |
+| PP-OCRv5 mobile(OCR) | 21 MB | |
+| PP-OCRv5 server(OCR) | 173 MB | |
+| PP-OCRv6 medium(OCR) | 139 MB | +130 MB 版面、+368 MB 表格(可选) |
 | all-minilm-l6-v2 | 约 88 MB | |
 | bge-reranker-base | 约 1.08 GB | |
 | yolov8n | 约 6 MB | 可池化中间张量约 32 MB |
-
-candle 其余 LLM 档位、litert Gemma 系列与 vision 时延的逐模型
-tok/s 数据**暂未发布**——下面的基准工具可按需产出。
 
 ## 复现方法
 
