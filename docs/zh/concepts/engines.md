@@ -110,7 +110,7 @@ curl -X POST http://localhost:8083/v1/chat/completions \
 - **candle（默认）**：最适合开发 + CPU/Mac 上的小模型。覆盖 Qwen 2/2.5/3/3.5 + Llama 2/3 + Phi-3 + Mistral + ChatGLM + MiniCPM5-1B / MiniCPM5-2B。迭代快，无额外依赖。`minicpm5-1b` 是平台默认（1B，可放进 2 核 4 GB 的边缘设备）；`minicpm5-2b` 是服务器级备选（2.52B，约 6–7 GB 显存）。
 - **litert_lm**：需要端上 LLM（Android、iOS、嵌入式 Linux）时。要求 `PATH` 上有 `lit` 二进制和 Gemma 3 权重。适合无 GPU 的边缘部署。
 - **mistralrs**：需要生产级多家族支持（PagedAttention / prefix caching / KV cache）时。覆盖 40+ 家族。适合高吞吐并发服务多个模型。
-- **mage_vl**：需要 VLM（图像 + 多帧视频理解）、且由带 codec 原生 75% token 缩减的 Microsoft Mage-VL 支撑时使用。要求 `NEURON_MAGE_VL_SHARD_DIR` 指向来自 `microsoft/Mage-VL` 的两个 `model-0000X-of-00002.safetensors` 分片。经同一个 `MageVlRuntime` 同时覆盖 OpenAI 与 Anthropic 线上格式。
+- **mage_vl**：需要 VLM（图像 + 多帧视频理解）、且由带 codec 原生 75% token 缩减的 Microsoft Mage-VL 支撑时使用。要求 `NEURON_MAGE_VL_SHARD_DIR` 指向来自 `microsoft/Mage-VL` 的两个 `model-0000X-of-00002.safetensors` 分片。经同一个 `MageVlRuntime` 同时覆盖 OpenAI 与 Anthropic 线上格式。2026-10-13 首次在 POPE / MME / MMStar 上跑了精度评估 — 分数与 0-token 诊断见 [VLM 评测 spec](/zh/superpowers/specs/2026-10-13-mage-vl-vlm-bench)，复现脚本在 `scripts/vlm-bench/`。
 
 ### TTS
 

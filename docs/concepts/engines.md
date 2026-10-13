@@ -107,7 +107,7 @@ curl -X POST http://localhost:8083/v1/chat/completions \
 - **candle (default)**: best for development + small models on CPU/Mac. Covers Qwen 2/2.5/3/3.5 + Llama 2/3 + Phi-3 + Mistral + ChatGLM + MiniCPM5-1B / MiniCPM5-2B. Fast iteration, no extra dependencies. `minicpm5-1b` is the platform default (1B, fits on 2-core 4 GB edge devices); `minicpm5-2b` is the server-grade alternative (2.52B, ~6–7 GB VRAM).
 - **litert_lm**: when you need on-device LLM (Android, iOS, embedded Linux). Requires the `lit` binary on `PATH` and Gemma 3 weights. Good for edge deployment with no GPU.
 - **mistralrs**: when you need production-grade multi-family support with PagedAttention / prefix caching / KV cache. Covers 40+ families. Use for serving multiple models concurrently with high throughput.
-- **mage_vl**: use when you need a VLM (image + multi-frame video understanding) backed by Microsoft Mage-VL with codec-native 75% token reduction. Requires `NEURON_MAGE_VL_SHARD_DIR` pointing at the two `model-0000X-of-00002.safetensors` shards from `microsoft/Mage-VL`. Reaches both OpenAI and Anthropic wire formats via the same `MageVlRuntime`.
+- **mage_vl**: use when you need a VLM (image + multi-frame video understanding) backed by Microsoft Mage-VL with codec-native 75% token reduction. Requires `NEURON_MAGE_VL_SHARD_DIR` pointing at the two `model-0000X-of-00002.safetensors` shards from `microsoft/Mage-VL`. Reaches both OpenAI and Anthropic wire formats via the same `MageVlRuntime`. First accuracy pass on POPE / MME / MMStar landed 2026-10-13 — see the [VLM benchmark spec](/superpowers/specs/2026-10-13-mage-vl-vlm-bench) for scores and the 0-token diagnosis; reproduction harness lives in `scripts/vlm-bench/`.
 
 ### TTS
 
