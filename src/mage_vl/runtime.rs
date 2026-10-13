@@ -35,10 +35,17 @@ use super::config::MageVLConfig;
 pub struct MageVlRuntime {
     config: MageVLConfig,
     shard_dir: PathBuf,
-    /// Cached model. Loaded lazily on first `execute` so the host
-    /// can register the runtime without paying the 3.5GB text
+    /// Dedicated worker thread. Every CUDA call for this model —
+    /// weight load, image preprocessing, forward, sampling — runs on
+    /// that one OS thread: cudarc binds the primary context to the
+    /// thread that created it, and calls from any other thread fail
+    /// with CUDA_ERROR_INVALID_CONTEXT (first observed when tokio's
+    /// multithreaded runtime handed request 2 to a different worker).
+    /// Jobs serialize on the channel, which the single-tenant KV cache
+    /// requires anyway. The model loads lazily inside the worker so
+    /// hosts can register the runtime without paying the ~11 GB
     /// checkpoint cost until a chat request actually arrives.
-    model: OnceCell<Arc<MageVlCachedModel>>,
+    worker: OnceCell<MageVlWorker>,
 }
 
 struct MageVlCachedModel {
@@ -55,55 +62,172 @@ struct MageVlCachedModel {
     tokenizer: Option<Tokenizer>,
 }
 
+enum Job {
+    Execute {
+        req: Box<CanonicalLlmRequest>,
+        reply: tokio::sync::oneshot::Sender<crate::llm::ChatResult<CanonicalLlmResponse>>,
+    },
+}
+
+struct MageVlWorker {
+    tx: std::sync::mpsc::Sender<Job>,
+}
+
+impl MageVlWorker {
+    fn spawn(config: MageVLConfig, shard_dir: PathBuf) -> Self {
+        let (tx, rx) = std::sync::mpsc::channel::<Job>();
+        std::thread::Builder::new()
+            .name("mage-vl-worker".into())
+            .spawn(move || {
+                let mut loaded: Option<Arc<MageVlCachedModel>> = None;
+                for job in rx {
+                    match job {
+                        Job::Execute { req, reply } => {
+                            let result =
+                                run_request(&config, &shard_dir, &mut loaded, *req);
+                            let _ = reply.send(result);
+                        }
+                    }
+                }
+            })
+            .expect("spawn mage-vl worker thread");
+        Self { tx }
+    }
+}
+
+/// One request, executed entirely on the mage-vl worker thread.
+/// Loads the model on first use; a failed load is not cached so a
+/// later request can retry (e.g. shards appear on disk).
+fn run_request(
+    config: &MageVLConfig,
+    shard_dir: &PathBuf,
+    loaded: &mut Option<Arc<MageVlCachedModel>>,
+    req: CanonicalLlmRequest,
+) -> crate::llm::ChatResult<CanonicalLlmResponse> {
+    let cached: Arc<MageVlCachedModel> = match loaded {
+        Some(c) => c.clone(),
+        None => {
+            let c = Arc::new(load_model(config, shard_dir)?);
+            *loaded = Some(c.clone());
+            c
+        }
+    };
+    // Drop KV entries the previous request left behind — candle's
+    // text tower appends forever and never resets on its own.
+    // Safe to call before the first request (no-op on an empty
+    // cache).
+    cached.model.reset_cache();
+    let (input_ids, pixel_values, image_grid_thw) = build_qwen3_inputs(
+        &req,
+        &cached.device,
+        &cached.tokenizer,
+    )
+    .map_err(|e| NeuronError::new(format!("build mage-vl inputs: {e}")))?;
+
+    // `<|im_end|>` is Qwen3's EOS. Fall back to the known id if
+    // the tokenizer is absent.
+    let eos_token_id = cached
+        .tokenizer
+        .as_ref()
+        .and_then(|t| t.token_to_id("<|im_end|>"))
+        .unwrap_or(151_645);
+    let max_new_tokens = req
+        .sampling
+        .max_tokens
+        .map(|n| (n as usize).min(512))
+        .unwrap_or(256);
+
+    let generated = cached
+        .model
+        .generate(
+            &input_ids,
+            pixel_values.as_ref(),
+            image_grid_thw.as_ref(),
+            max_new_tokens,
+            eos_token_id,
+        )
+        .map_err(|e| NeuronError::new(format!("mage-vl generate: {e}")))?;
+    tracing::info!(
+        "mage-vl: prompt_len={} generated={} first={:?} eos={}",
+        input_ids.dim(1).unwrap_or(0),
+        generated.len(),
+        generated.first().copied().unwrap_or(0),
+        eos_token_id,
+    );
+
+    let text = match &cached.tokenizer {
+        Some(t) if !generated.is_empty() => t
+            .decode(&generated, true)
+            .map_err(|e| NeuronError::new(format!("mage-vl decode: {e}")))?,
+        _ => String::new(),
+    };
+
+    Ok(CanonicalLlmResponse {
+        id: format!("mage-vl-{}", uuid::Uuid::new_v4()),
+        model: req.model,
+        stop_reason: StopReason::EndTurn,
+        content: vec![ContentBlock::Text(TextBlock { text })],
+        usage: UsageInfo::default(),
+        extensions: Default::default(),
+    })
+}
+
+/// Load the checkpoint on the calling thread. Only valid on the
+/// mage-vl worker thread — the CUDA context it binds must stay the
+/// one every later forward runs on.
+fn load_model(
+    config: &MageVLConfig,
+    shard_dir: &PathBuf,
+) -> std::result::Result<MageVlCachedModel, NeuronError> {
+    let (device, dtype) = resolve_device();
+    let shard1 = shard_dir.join("model-00001-of-00002.safetensors");
+    let shard2 = shard_dir.join("model-00002-of-00002.safetensors");
+    if !shard1.exists() || !shard2.exists() {
+        return Err(NeuronError::new(format!(
+            "MageVlRuntime: missing shards at {} (need both \
+             model-00001-of-00002.safetensors and \
+             model-00002-of-00002.safetensors)",
+            shard_dir.display()
+        )));
+    }
+    let model = super::MageVLModel::load_safetensors(
+        &[shard1.as_path(), shard2.as_path()],
+        config.clone(),
+        dtype,
+        &device,
+    )
+    .map_err(|e| NeuronError::new(format!("MageVLModel::load_safetensors failed: {e}")))?;
+    let tokenizer = load_tokenizer_from(shard_dir);
+    if tokenizer.is_none() {
+        tracing::warn!(
+            "mage-vl: no tokenizer.json under {}; text encode \
+             degrades to byte-level ids",
+            shard_dir.display()
+        );
+    }
+    Ok(MageVlCachedModel {
+        model: Arc::new(model),
+        device,
+        _device_sel: DeviceSelection::Cpu,
+        tokenizer,
+    })
+}
+
 impl MageVlRuntime {
     pub fn new(config: MageVLConfig, shard_dir: impl Into<PathBuf>) -> Self {
         Self {
             config,
             shard_dir: shard_dir.into(),
-            model: OnceCell::new(),
+            worker: OnceCell::new(),
         }
     }
 
-    async fn ensure_loaded(&self) -> std::result::Result<Arc<MageVlCachedModel>, NeuronError> {
-        self.model
-            .get_or_try_init(|| async {
-                let (device, dtype) = resolve_device();
-                let shard1 = self.shard_dir.join("model-00001-of-00002.safetensors");
-                let shard2 = self.shard_dir.join("model-00002-of-00002.safetensors");
-                if !shard1.exists() || !shard2.exists() {
-                    return Err(NeuronError::new(format!(
-                        "MageVlRuntime: missing shards at {} (need both \
-                         model-00001-of-00002.safetensors and \
-                         model-00002-of-00002.safetensors)",
-                        self.shard_dir.display()
-                    )));
-                }
-                let model = super::MageVLModel::load_safetensors(
-                    &[shard1.as_path(), shard2.as_path()],
-                    self.config.clone(),
-                    dtype,
-                    &device,
-                )
-                .map_err(|e| {
-                    NeuronError::new(format!("MageVLModel::load_safetensors failed: {e}"))
-                })?;
-                let tokenizer = load_tokenizer_from(&self.shard_dir);
-                if tokenizer.is_none() {
-                    tracing::warn!(
-                        "mage-vl: no tokenizer.json under {}; text encode \
-                         degrades to byte-level ids",
-                        self.shard_dir.display()
-                    );
-                }
-                Ok(Arc::new(MageVlCachedModel {
-                    model: Arc::new(model),
-                    device,
-                    _device_sel: DeviceSelection::Cpu,
-                    tokenizer,
-                }))
-            })
+    async fn worker(&self) -> &MageVlWorker {
+        let config = self.config.clone();
+        let shard_dir = self.shard_dir.clone();
+        self.worker
+            .get_or_init(|| async { MageVlWorker::spawn(config, shard_dir) })
             .await
-            .cloned()
     }
 
     fn capabilities() -> &'static ModelCapabilities {
@@ -130,13 +254,22 @@ impl MageVlRuntime {
 }
 
 fn resolve_device() -> (Device, DType) {
-    // Every gated Mage-VL test on this machine has run on CPU.
-    // Candle's CPU backend has no BF16 matmul kernel ("unsupported
-    // dtype BF16 for op matmul"), so the BF16 shards are upcast to
-    // F32 at load time (~18 GB resident for the 4B text tower —
-    // sized for a 32 GB host; CUDA / Metal / quantization are
-    // follow-ups).
-    (Device::Cpu, DType::F32)
+    // CUDA (bf16) is the fast path: the BF16 shards load as-is
+    // (~10.8 GB, fits a 24 GB card) and Ampere-class BF16 matmul is
+    // served by tensor cores. Candle's CPU backend has no BF16
+    // matmul kernel ("unsupported dtype BF16 for op matmul"), so the
+    // CPU fallback upcasts to F32 at load time (~18 GB resident for
+    // the 4B text tower — needs a 32 GB host; a 16 GB host swaps).
+    match Device::new_cuda(0) {
+        Ok(device) => {
+            tracing::info!("mage-vl: CUDA device acquired, loading bf16 weights");
+            (device, DType::BF16)
+        }
+        Err(e) => {
+            tracing::info!("mage-vl: CUDA unavailable ({e}); loading f32 weights on CPU");
+            (Device::Cpu, DType::F32)
+        }
+    }
 }
 
 #[async_trait]
@@ -145,56 +278,18 @@ impl LlmRuntime for MageVlRuntime {
         &self,
         req: CanonicalLlmRequest,
     ) -> crate::llm::ChatResult<CanonicalLlmResponse> {
-        let cached = self.ensure_loaded().await?;
-        // Drop KV entries the previous request left behind — candle's
-        // text tower appends forever and never resets on its own.
-        // Safe to call before the first request (no-op on an empty
-        // cache). Serializes concurrent requests on the same model.
-        cached.model.reset_cache();
-        let (input_ids, pixel_values, image_grid_thw) =
-            build_qwen3_inputs(&req, &cached.device, &cached.tokenizer)
-                .await
-                .map_err(|e| NeuronError::new(format!("build mage-vl inputs: {e}")))?;
-
-        // `<|im_end|>` is Qwen3's EOS. Fall back to the known id if
-        // the tokenizer is absent.
-        let eos_token_id = cached
-            .tokenizer
-            .as_ref()
-            .and_then(|t| t.token_to_id("<|im_end|>"))
-            .unwrap_or(151_645);
-        let max_new_tokens = req
-            .sampling
-            .max_tokens
-            .map(|n| (n as usize).min(512))
-            .unwrap_or(256);
-
-        let generated = cached
-            .model
-            .generate(
-                &input_ids,
-                pixel_values.as_ref(),
-                image_grid_thw.as_ref(),
-                max_new_tokens,
-                eos_token_id,
-            )
-            .map_err(|e| NeuronError::new(format!("mage-vl generate: {e}")))?;
-
-        let text = match &cached.tokenizer {
-            Some(t) if !generated.is_empty() => t
-                .decode(&generated, true)
-                .map_err(|e| NeuronError::new(format!("mage-vl decode: {e}")))?,
-            _ => String::new(),
-        };
-
-        Ok(CanonicalLlmResponse {
-            id: format!("mage-vl-{}", uuid::Uuid::new_v4()),
-            model: req.model,
-            stop_reason: StopReason::EndTurn,
-            content: vec![ContentBlock::Text(TextBlock { text })],
-            usage: UsageInfo::default(),
-            extensions: Default::default(),
-        })
+        let worker = self.worker().await;
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        worker
+            .tx
+            .send(Job::Execute {
+                req: Box::new(req),
+                reply: reply_tx,
+            })
+            .map_err(|_| NeuronError::new("mage-vl worker thread has died"))?;
+        reply_rx
+            .await
+            .map_err(|_| NeuronError::new("mage-vl worker dropped the reply"))?
     }
 
     async fn execute_stream(
@@ -234,7 +329,10 @@ impl LlmRuntime for MageVlRuntime {
 /// template (`<|im_start|>` turns, `<|vision_start|><|image_pad|>×N
 /// <|vision_end|>` for images) and encoded with the real BPE
 /// tokenizer when available.
-async fn build_qwen3_inputs(
+///
+/// Sync by design: it allocates CUDA tensors, so it must run on the
+/// mage-vl worker thread (see `MageVlRuntime::worker`).
+fn build_qwen3_inputs(
     req: &CanonicalLlmRequest,
     device: &Device,
     tokenizer: &Option<Tokenizer>,
@@ -271,7 +369,7 @@ async fn build_qwen3_inputs(
     // Decode + preprocess the image FIRST so the prompt can carry
     // exactly N = (h/32)*(w/32) `<|image_pad|>` placeholders.
     let preprocessed = match &image {
-        Some(img) => decode_image_block(img, device).await?,
+        Some(img) => decode_image_block(img, device)?,
         None => None,
     };
     let n_pad_tokens = preprocessed
@@ -292,8 +390,20 @@ async fn build_qwen3_inputs(
         &user_texts,
         n_pad_tokens,
     );
-    let token_ids = encode_prompt(&prompt, tokenizer);
-    let input_ids = Tensor::from_vec(token_ids.clone(), (1usize, token_ids.len()), device)?;
+    let mut token_ids = encode_prompt(&prompt, tokenizer);
+    // The jinja template writes exactly one `<|image_pad|>` per image.
+    // BPE keeps it as the special id 151_655, so we can duplicate the
+    // id post-tokenization to match the merged-token count without
+    // the scatter step searching for plain-text "image_pad" substrings.
+    if n_pad_tokens > 0 {
+        let pad_id = tokenizer
+            .as_ref()
+            .and_then(|t| t.token_to_id("<|image_pad|>"))
+            .unwrap_or(151_655);
+        token_ids = expand_image_pad_token(token_ids, pad_id, n_pad_tokens);
+    }
+    let ids_len = token_ids.len();
+    let input_ids = Tensor::from_vec(token_ids, (1usize, ids_len), device)?;
 
     let (pixel_values, image_grid_thw) = match preprocessed {
         Some((p, g)) => (Some(p), Some(g)),
@@ -303,21 +413,31 @@ async fn build_qwen3_inputs(
 }
 
 /// Render the Qwen3 chat template for a single-turn exchange:
-/// system turn, user turn (with optional image placeholders),
-/// then an open assistant turn for generation.
+/// system turn, user turn (with optional image placeholders), then
+/// an open assistant turn for generation.
+///
+/// The template (see `chat_template.jinja` shipped with the
+/// checkpoint) emits a single literal `<|vision_start|><|image_pad|>
+/// <|vision_end|>` per image — exactly one pad token. The
+/// `image_pad` count is then expanded post-tokenization by
+/// `expand_image_pad_token` so the scatter step still gets one
+/// placeholder per merged vision token, but every pad stays the
+/// special token 151_655 (writing N literal pad strings makes BPE
+/// treat them as plain text and the scatter never finds them).
 fn render_chat_template(system: &str, user_texts: &[&str], n_pad_tokens: usize) -> String {
-    const IMAGE_PAD: &str = "<|image_pad|>";
     let mut s = String::with_capacity(256 + user_texts.iter().map(|t| t.len()).sum::<usize>());
     s.push_str("<|im_start|>system\n");
     s.push_str(system);
     s.push_str("<|im_end|>\n");
     s.push_str("<|im_start|>user\n");
+    // The jinja template emits `<|vision_start|><|image_pad|><|vision_end|>`
+    // for every user turn with an image (and it may also emit a text
+    // block from the user). With Mage-VL v1 we accept only one image
+    // per request, so the literal "image_pad" count is always 1 here —
+    // it gets expanded to `n_pad_tokens` after BPE in
+    // `expand_image_pad_token`.
     if n_pad_tokens > 0 {
-        s.push_str("<|vision_start|>");
-        for _ in 0..n_pad_tokens {
-            s.push_str(IMAGE_PAD);
-        }
-        s.push_str("<|vision_end|>");
+        s.push_str("<|vision_start|><|image_pad|><|vision_end|>");
     }
     for t in user_texts {
         s.push_str(t);
@@ -328,6 +448,39 @@ fn render_chat_template(system: &str, user_texts: &[&str], n_pad_tokens: usize) 
     s
 }
 
+/// After BPE, duplicate the single `<|image_pad|>` (id 151_655) so
+/// the number of placeholders equals the number of merged vision
+/// tokens. BPE keeps `<|image_pad|>` as one token per occurrence, so
+/// the scatter step's `placeholder_positions` finds exactly N
+/// placeholders and the loop body `n_pad_tokens = (h/2)*(w/2)` stays
+/// correct.
+fn expand_image_pad_token(mut ids: Vec<u32>, pad_id: u32, n: usize) -> Vec<u32> {
+    if n == 0 {
+        return ids;
+    }
+    let mut out = Vec::with_capacity(ids.len().saturating_add(n));
+    let mut expanded = 0u32;
+    for id in ids.drain(..) {
+        if id == pad_id {
+            for _ in 0..n {
+                out.push(pad_id);
+            }
+            expanded += 1;
+        } else {
+            out.push(id);
+        }
+    }
+    if expanded == 0 {
+        // Defensive: caller forgot the template marker. Refuse to
+        // silently produce a token sequence that has zero placeholders
+        // — every request needs them in lockstep with merged tokens.
+        tracing::warn!(
+            "mage-vl: prompt has zero <|image_pad|>; expected 1 (expanding to {n})"
+        );
+    }
+    out
+}
+
 /// Decode one `ImageSource::Base64` into the (pixel_values,
 /// image_grid_thw) pair candle expects, using the real Qwen
 /// image preprocessing pipeline:
@@ -336,7 +489,7 @@ fn render_chat_template(system: &str, user_texts: &[&str], n_pad_tokens: usize) 
 /// `[1, 3, 1, H, W]` with grid `[1, h/16, w/16]` (patchify is the
 /// strided conv inside MageViT's PatchEmbed).
 /// Returns `None` for URLs/FileIds (no fetcher wired in).
-async fn decode_image_block(
+fn decode_image_block(
     block: &crate::canonical::ImageBlock,
     device: &Device,
 ) -> Result<Option<(Tensor, Tensor)>> {
@@ -383,7 +536,11 @@ fn preprocess_image_qwen(bytes: &[u8], device: &Device) -> Result<(Tensor, Tenso
     let (raw_w, raw_h) = (rgb.width() as usize, rgb.height() as usize);
     // Resize so both dims are multiples of patch*merge (=28).
     let unit = PATCH_SIZE * SPATIAL_MERGE;
-    let round_to_unit = |v: usize| ((v.max(unit) as f32 / unit as f32).round() as usize).max(1) * unit;
+    // Qwen-VL family convention: floor to a multiple of 32 (patch=16,
+    // merge=2). `round` would *enlarge* an image like 500×332 to 512×352
+    // and shift the patch grid by 31 pixels, which on a small image
+    // obscures the original content and breaks inference.
+    let round_to_unit = |v: usize| ((v.max(unit) / unit).max(1)) * unit;
     let target_w = round_to_unit(raw_w);
     let target_h = round_to_unit(raw_h);
     let resized = image::imageops::resize(&rgb, target_w as u32, target_h as u32, image::imageops::FilterType::Lanczos3);
@@ -468,9 +625,11 @@ mod tests {
 
     #[test]
     fn render_chat_template_has_vision_tokens_and_assistant_turn() {
-        let p = render_chat_template("You are helpful.", &["describe"], 4);
+        let p = render_chat_template("You are helpful.", &["describe"], 1);
         assert!(p.starts_with("<|im_start|>system\nYou are helpful.<|im_end|>\n"));
-        assert!(p.contains("<|vision_start|><|image_pad|><|image_pad|><|image_pad|><|image_pad|><|vision_end|>"));
+        // jinja-template parity: ONE literal <|image_pad|>, expanded
+        // post-tokenization in `expand_image_pad_token`.
+        assert!(p.contains("<|vision_start|><|image_pad|><|vision_end|>"));
         assert!(p.contains("describe\n<|im_end|>\n"));
         assert!(p.ends_with("<|im_start|>assistant\n"));
 
@@ -571,9 +730,7 @@ mod tests {
             extensions: Default::default(),
         };
         let device = Device::Cpu;
-        let (ids, pixels, grid) = build_qwen3_inputs(&req, &device, &None)
-            .await
-            .unwrap();
+        let (ids, pixels, grid) = build_qwen3_inputs(&req, &device, &None).unwrap();
         // No image attached → vision tensors stay None and the
         // template still opens the assistant turn for generation.
         assert!(pixels.is_none());

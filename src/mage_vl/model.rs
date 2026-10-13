@@ -217,6 +217,9 @@ impl MageVLModel {
 /// logits) or `[batch, vocab]` (already-reduced last-position
 /// logits, as returned by the vendored text tower).
 fn argmax_last(logits: &Tensor) -> Result<u32> {
+    // The towers run in the checkpoint dtype (bf16 on CUDA); sampling
+    // reads f32, so upcast once here rather than at every call site.
+    let logits = logits.to_dtype(DType::F32)?;
     let last = match logits.rank() {
         2 => logits.get(0)?,
         3 => {

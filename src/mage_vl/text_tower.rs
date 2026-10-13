@@ -23,6 +23,11 @@ use candle_nn::{
 };
 use candle_transformers::models::qwen3_vl::config::TextConfig;
 
+/// Initial KV-cache sequence capacity, before the cache cat-grows.
+/// See the `KvCache::new` call site for why this must NOT be the
+/// model's 262K `max_position_embeddings`.
+const KV_CACHE_INITIAL_SEQ: usize = 2048;
+
 #[derive(Debug, Clone)]
 struct RotaryEmbedding {
     cos: Tensor,
@@ -157,7 +162,15 @@ impl Attention {
             rotary_emb,
             n_kv_groups: cfg.num_attention_heads / cfg.num_key_value_heads,
             softmax_scale: 1.0 / (cfg.head_dim as f64).sqrt(),
-            kv_cache: Arc::new(Mutex::new(KvCache::new(2, cfg.max_position_embeddings))),
+            // Candle's KvCache PREALLOCATES `max_seq_len` positions on
+            // first append (candle-nn kv_cache.rs `Cache::append`), so
+            // sizing it to the model's 262K context would commit
+            // 36 layers x 2 x [1, 8, 262144, 128] bf16 = 36 GiB of
+            // zero-filled KV before the first token — an instant OOM on
+            // a 24 GB card (and 36 GB RAM on CPU). Start from a
+            // practical window; `append` cats in `KV_CACHE_INITIAL_SEQ`
+            // chunks when the window overflows.
+            kv_cache: Arc::new(Mutex::new(KvCache::new(2, KV_CACHE_INITIAL_SEQ))),
         })
     }
 
