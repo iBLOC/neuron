@@ -51,6 +51,33 @@ sizes the same GPU's ceiling. The candle CUDA upgrade was perf-neutral
 on single-stream decode (26.5/26.0 vs 30.6/38.0 before — within
 run-to-run noise); the upgrade bought features, not speed.
 
+## BitNet spike (microsoft/bitnet.cpp — not shipped, NO-GO 2026-10-13)
+
+A 6-gate spike against the BitNet T-MAC inference stack ran on the
+spike box (Zen 3 / RTX 3090) and is **not merged** — see
+[target/bitnet-spike/REPORT.md](https://github.com/iBLOC/neuron/blob/main/target/bitnet-spike/REPORT.md)
+for the full report. The TL-OFF i2_s path compiled cleanly under MSVC
++ 4 scratch patches; the T-MAC fast path is upstream dead code on the
+fork the wrapper pins, so the table below is the LLAMAFILE sgemm
+fallback. The official `ggml-model-i2_s.gguf` ships without
+`tokenizer.ggml.pre` and the spike ships a 1-KV `patch_pre.py` to inject
+`pre=llama-bpe` before model load.
+
+| stack | model / quant | device | decode tok/s | peak RSS (MB) | notes |
+|---|---|---|---:|---:|---|
+| neuron / candle | 1B f16 | cpu | 1.6–2.6 | n/a | baseline (row above) |
+| neuron / candle | 2.5B f16 | cpu | 2.58 | 7 451 | baseline (row above) |
+| **bitnet.cpp spike ³** | 2B i2_s (1.58-bit) | cpu AVX2 | **16.8–18.6** | ~2 000 | 4 patches, no T-MAC; Zen 3 (no AVX-512, no VNNI); 127-token run at `--temp 0, -t 4` |
+
+³ Not a neuron backend. Numbers are from the standalone `llama-completion.exe`
+built under `target/bitnet-spike/BitNet/build-static/` and run on the
+spike box (Zen 3 / RTX 3090, same as the rows above). The 6-7× CPU
+ratio over candle's f32/f16 is real but conditional on (a) a working
+T-MAC build, (b) the patched gguf artifact, and (c) chat-template
+assembly staying in the OpenAI adapter (fork `-cnv` crashes on the
+custom `bitnet-b1.58` arch). Re-evaluation gates are listed in the
+spike report's §4.
+
 ## VLM accuracy & throughput (Mage-VL, first pass 2026-10-13)
 
 `microsoft/Mage-VL` (MageViT + Qwen3-4B) on the `mage_vl` engine,
@@ -151,6 +178,10 @@ python eval_vlm.py  --base-url http://127.0.0.1:18093 --bench pope
 # Allocation / pooling microbenchmarks
 cargo bench --bench mobile_bench
 cargo bench --bench perf -- --quick
+
+# BitNet spike (numbers above, not part of neuron)
+# All artifacts under target/bitnet-spike/ are scratch from a one-off
+# NO-GO assessment; see target/bitnet-spike/REPORT.md for context.
 ```
 
 Methodology notes (prompt-nonce anti-caching, client-side timing,

@@ -46,6 +46,31 @@ chatglm-3-6b)可用同一 harness 测量,数字尚未发布。
 单流解码性能中性(26.5/26.0 vs 升级前 30.6/38.0 —— 在噪声范围内),
 升级买到的是特性而非速度。
 
+## BitNet spike(microsoft/bitnet.cpp —— 未合入,NO-GO 2026-10-13)
+
+针对 BitNet T-MAC 推理栈跑了一轮 6-gate spike,跑在 spike 主机
+(Zen 3 / RTX 3090),**未合入** —— 完整报告见
+[target/bitnet-spike/REPORT.md](https://github.com/iBLOC/neuron/blob/main/target/bitnet-spike/REPORT.md)。
+TL-OFF i2_s 路径在 MSVC + 4 个 scratch patch 下能编,但 T-MAC 快路径
+在 wrapper 钉死的 fork 快照上是死代码,下面表是 LLAMAFILE sgemm
+回退路径的数据。官方 `ggml-model-i2_s.gguf` 缺 `tokenizer.ggml.pre`,
+spike 配了一个 1-KV 的 `patch_pre.py` 在模型加载前注入
+`pre=llama-bpe`。
+
+| 技术栈 | 模型 / 量化 | 设备 | 解码 tok/s | 峰值 RSS (MB) | 备注 |
+|---|---|---|---:|---:|---|
+| neuron / candle | 1B f16 | cpu | 1.6–2.6 | n/a | 基线(上表) |
+| neuron / candle | 2.5B f16 | cpu | 2.58 | 7 451 | 基线(上表) |
+| **bitnet.cpp spike ³** | 2B i2_s (1.58-bit) | cpu AVX2 | **16.8–18.6** | ~2 000 | 4 个 patch,无 T-MAC;Zen 3(无 AVX-512、无 VNNI);`--temp 0, -t 4` 下 127 token |
+
+³ 不是 neuron 后端。数据来自 spike 目录里
+`target/bitnet-spike/BitNet/build-static/` 自建的 `llama-completion.exe`,
+在 spike 主机(Zen 3 / RTX 3090,与上表同机)上跑。CPU 上对 candle f32/f16
+的 6-7× 优势是真的,但有三个前提:(a) T-MAC 路径能编译过;(b) 用了补丁
+过的 gguf;(c) chat-template 装配仍然放在 OpenAI adapter 里(fork 的
+`-cnv` 在自定义 `bitnet-b1.58` arch 下崩溃)。重新评估的门见 spike
+报告 §4。
+
 ## VLM 精度与吞吐(Mage-VL 首轮,2026-10-13)
 
 `microsoft/Mage-VL`(MageViT + Qwen3-4B),`mage_vl` 引擎,CUDA bf16,

@@ -6,9 +6,21 @@ pub mod usage;
 
 pub use content::{
     AudioBlock, AudioSource, ContentBlock, DocumentBlock,
-    ImageBlock, ImageSource, ReasoningBlock, TextBlock, ToolResultBlock,
-    ToolUseBlock, VideoBlock, VideoSource,
+    ImageBlock, ImageSource, MediaAttachment, ReasoningBlock, TextBlock,
+    ToolResultBlock, ToolUseBlock, VideoBlock, VideoSource,
 };
+
+/// The default media marker llama.cpp's `mtmd` module uses
+/// (`<__media__>`). The OpenAI→canonical translator inserts this
+/// string at each image block's position in the text stream so a
+/// multimodal backend can split text+image tokens correctly.
+///
+/// This is `pub` (not just crate-private) so downstream hosts that
+/// build their own `CanonicalLlmRequest` can produce a multimodal
+/// prompt without re-importing llama-cpp-2.
+pub fn mtmd_marker() -> &'static str {
+    "<__media__>"
+}
 pub use sampling::{CacheControl, CacheType, SamplingParams};
 pub use tool::{ToolCall, ToolDefinition};
 pub use types::{

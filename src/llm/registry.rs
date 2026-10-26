@@ -121,6 +121,15 @@ impl LlmRuntimeRegistry {
                     })?;
                 Arc::from(loaded)
             }
+            #[cfg(feature = "llamacpp")]
+            LlmImpl::LlamaCpp => {
+                let loaded = super::LlamaCppLlmRuntime::load(&entry.model_id, &entry.device)
+                    .await
+                    .map_err(|e| {
+                        NeuronError::new(format!("LlamaCppLlmRuntime load failed: {e}"))
+                    })?;
+                Arc::from(loaded)
+            }
             // Stub backend for unit tests only — never wired by
             // production code. Rejecting here keeps the cache-eviction
             // test path observable without needing real weights.

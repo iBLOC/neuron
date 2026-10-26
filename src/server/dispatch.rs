@@ -96,9 +96,33 @@ pub async fn adapter_dispatch_at(
     let adapter_for_stream: Arc<dyn ApiAdapter> = Arc::clone(&adapter);
     match canonical_req {
         CanonicalRequest::Llm(llm_req) => {
+            // Multimodal dispatch: if any user message carries an
+            // Image block, extract the bytes and route through
+            // `execute_with_media` / `execute_with_media_stream`.
+            // Text-only requests take the original path (preserves
+            // existing per-engine streaming semantics; backends
+            // without a `chat_with_media` override get the
+            // `not_implemented` default from the trait).
+            let (media, media_error) = extract_media(&llm_req);
+            if let Some(e) = media_error {
+                drop(lease);
+                return Err(e);
+            }
+            let has_media = media.is_some();
+            let media = media.unwrap_or_default();
+
             if llm_req.stream {
-                let stream = engine.execute_stream(llm_req).await
-                    .map_err(|e| ApiError::Execution(e.to_string()))?;
+                let stream = if has_media {
+                    engine
+                        .execute_with_media_stream(llm_req, media)
+                        .await
+                        .map_err(|e| ApiError::Execution(e.to_string()))?
+                } else {
+                    engine
+                        .execute_stream(llm_req)
+                        .await
+                        .map_err(|e| ApiError::Execution(e.to_string()))?
+                };
                 let wire_stream = stream.filter_map(move |event| {
                     let adapter = Arc::clone(&adapter_for_stream);
                     async move {
@@ -115,8 +139,17 @@ pub async fn adapter_dispatch_at(
                     .body(Body::from_stream(body_stream))
                     .unwrap())
             } else {
-                let canonical_resp = engine.execute(llm_req).await
-                    .map_err(|e| ApiError::Execution(e.to_string()))?;
+                let canonical_resp = if has_media {
+                    engine
+                        .execute_with_media(llm_req, media)
+                        .await
+                        .map_err(|e| ApiError::Execution(e.to_string()))?
+                } else {
+                    engine
+                        .execute(llm_req)
+                        .await
+                        .map_err(|e| ApiError::Execution(e.to_string()))?
+                };
                 let wire_body = adapter.serialize_response(
                     &CanonicalResponse::Llm(canonical_resp)
                 )?;
@@ -128,6 +161,71 @@ pub async fn adapter_dispatch_at(
             }
         }
         _ => Err(ApiError::UnsupportedCapability(format!("{capability:?}"))),
+    }
+}
+
+/// Pull image blocks out of a `CanonicalLlmRequest` and convert
+/// them into `MediaAttachment`s ready to hand to a multimodal
+/// backend. Returns `Ok(None)` for text-only requests (so the
+/// caller can take the legacy dispatch path); `Ok(Some(vec))` for
+/// requests with at least one image; `Err(ApiError)` for malformed
+/// image sources (e.g. an http(s) URL when v1 only supports
+/// `data:` URIs).
+fn extract_media(
+    llm_req: &crate::canonical::CanonicalLlmRequest,
+) -> (Option<Vec<crate::canonical::MediaAttachment>>, Option<ApiError>) {
+    use crate::canonical::{ContentBlock, ImageSource};
+    use base64::Engine as _;
+
+    let mut media: Vec<crate::canonical::MediaAttachment> = Vec::new();
+    for m in &llm_req.messages {
+        for b in &m.content {
+            if let ContentBlock::Image(img) = b {
+                match &img.source {
+                    ImageSource::Base64 { media_type, data } => {
+                        match base64::engine::general_purpose::STANDARD.decode(data) {
+                            Ok(bytes) => media.push(crate::canonical::MediaAttachment {
+                                bytes,
+                                mime_type: media_type.clone(),
+                                detail: img.detail.clone(),
+                            }),
+                            Err(e) => {
+                                return (
+                                    None,
+                                    Some(ApiError::Execution(format!(
+                                        "base64 decode failed for image block: {e}"
+                                    ))),
+                                )
+                            }
+                        }
+                    }
+                    ImageSource::Url(u) => {
+                        return (
+                            None,
+                            Some(ApiError::Execution(format!(
+                                "ImageSource::Url not supported in v1 (set \
+                                 NEURON_MEDIA_FETCH_HOST_ALLOWLIST for http(s) fetch, or \
+                                 pre-decode to a data URI): {u}"
+                            ))),
+                        )
+                    }
+                    ImageSource::FileId(f) => {
+                        return (
+                            None,
+                            Some(ApiError::Execution(format!(
+                                "ImageSource::FileId is a placeholder — pre-resolve to \
+                                 a Base64 ImageSource in the adapter: {f}"
+                            ))),
+                        )
+                    }
+                }
+            }
+        }
+    }
+    if media.is_empty() {
+        (None, None)
+    } else {
+        (Some(media), None)
     }
 }
 

@@ -42,6 +42,14 @@ candle-flash-attn = { git = "https://github.com/huggingface/candle.git", rev = "
 tokenizers = { version = "0.22", optional = true }
 litert-lm = { version = "0.1", optional = true }
 mistralrs = { git = "https://github.com/EricLBuehler/mistral.rs", rev = "v0.8.22", optional = true }
+# llama.cpp backend — safe Rust binding (llama-cpp-2 / utilityai/llama-cpp-rs).
+# Default features include OpenMP + `common` + `mtmd` (multimodal: vision
+# projector + audio). The first time you turn on the `llamacpp` feature,
+# the build script compiles llama.cpp via `cmake` and therefore needs a
+# C++ toolchain on PATH: Windows → Visual Studio Build Tools (MSVC) +
+# cmake; Linux → gcc/clang + cmake; macOS → Xcode + cmake. Default builds
+# (no `llamacpp` feature) do not touch this dep.
+llama-cpp-2 = { version = "0.1", optional = true, features = ["mtmd"] }
 
 burn = { version = "0.21", features = ["ndarray"], optional = true }
 burn-store = { version = "0.21", features = ["safetensors"], optional = true }
@@ -121,6 +129,16 @@ harness = false
 name = "asr_speed"
 harness = false
 
+# llama.cpp backend speed: drives neuron's own `LlamaCppLlmRuntime`
+# in-process. Complements `llm_speed.rs` (which drives external HTTP
+# servers) by measuring the embedded adapter path — what a host using
+# `NEURON_LLM_RUNTIME=llamacpp` actually pays per request. Build needs
+# the `llamacpp` feature (cmake + C++ toolchain + libclang on PATH).
+[[bench]]
+name = "llamacpp_speed"
+harness = false
+required-features = ["llamacpp"]
+
 # Per-capability x per-engine x per-device model matrix. Drives a running
 # neuron server (start with examples/neuron_server) and reports latency /
 # peak RSS / RTF per row.
@@ -143,6 +161,10 @@ voxcpm = ["dep:burn", "dep:burn-store", "dep:hound", "dep:base64", "dep:tokenize
 litert = ["dep:litert-lm"]
 asr-audio = ["dep:symphonia", "dep:rubato"]
 mistralrs = ["dep:mistralrs", "candle"]
+# Pure-Rust GGUF inference via the llama-cpp-2 binding. Build needs cmake
+# + a C++ compiler (see the dep comment above). The `candle` feature is
+# NOT pulled in — llama-cpp-2 compiles its own ggml-backed inference stack.
+llamacpp = ["dep:llama-cpp-2"]
 ndarray = ["dep:ndarray"]
 # Own-ONNX ASR (SenseVoice via tract) reuses the tract feature; rustfft
 # backs the kaldi-style fbank extraction in src/asr/fbank.rs.

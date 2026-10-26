@@ -28,6 +28,12 @@ mod mistralrs_runtime;
 #[cfg(feature = "mistralrs")]
 pub use mistralrs_runtime::MistralRsLlmRuntime;
 
+#[cfg(feature = "llamacpp")]
+mod llamacpp_runtime;
+
+#[cfg(feature = "llamacpp")]
+pub use llamacpp_runtime::LlamaCppLlmRuntime;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelInfo {
     pub id: String,
@@ -197,6 +203,15 @@ pub enum LlmImpl {
     Litert,
     #[cfg(feature = "mistralrs")]
     MistralRs,
+    /// GGUF inference via the [`llama-cpp-2`](https://github.com/utilityai/llama-cpp-rs)
+    /// safe binding to ggerganov/llama.cpp. 40+ model families
+    /// (Qwen 2/3, Llama 2/3, Mistral, DeepSeek, GLM, Phi 4, Gemma 2/3,
+    /// Mixtral, DBRX, ...) load directly from a local `.gguf` file —
+    /// no safetensors→GGUF conversion needed. Build prereq: a C++
+    /// toolchain on PATH (cmake + MSVC / gcc / clang / Xcode) — gated
+    /// behind the `llamacpp` Cargo feature.
+    #[cfg(feature = "llamacpp")]
+    LlamaCpp,
     /// Stub backend used by `LlmRuntimeRegistry` unit tests so they
     /// can drive `runtime_for`'s cache path without real weights on
     /// disk. `parse("stub")` accepts it; `runtime_for` with a stub
@@ -215,6 +230,8 @@ impl LlmImpl {
             Self::Litert => "litert",
             #[cfg(feature = "mistralrs")]
             Self::MistralRs => "mistralrs",
+            #[cfg(feature = "llamacpp")]
+            Self::LlamaCpp => "llamacpp",
             Self::Stub => "stub",
         }
     }
@@ -227,6 +244,8 @@ impl LlmImpl {
             "litert" => Ok(Self::Litert),
             #[cfg(feature = "mistralrs")]
             "mistralrs" => Ok(Self::MistralRs),
+            #[cfg(feature = "llamacpp")]
+            "llamacpp" => Ok(Self::LlamaCpp),
             "stub" => Ok(Self::Stub),
             other => Err(format!("unknown LlmImpl: {other}")),
         }
@@ -259,6 +278,35 @@ pub trait ChatLlmRuntime: Send + Sync {
     async fn chat(&self, req: ChatRequest) -> ChatResult<ChatResponse>;
 
     async fn chat_stream(&self, req: ChatRequest) -> ChatResult<BoxStream<'static, ChatChunk>>;
+
+    /// Multimodal chat — chat() plus a list of decoded image/audio
+    /// attachments. Default impl returns `not_implemented` so the
+    /// existing text-only backends (candle / mistral.rs / litert)
+    /// compile unchanged; only the llama.cpp backend with an mmproj
+    /// GGUF loaded overrides this.
+    async fn chat_with_media(
+        &self,
+        _req: ChatRequest,
+        _media: Vec<crate::canonical::MediaAttachment>,
+    ) -> ChatResult<ChatResponse> {
+        Err(NeuronError::not_implemented(
+            "this LlmRuntime does not support media input; \
+             the llamacpp backend with an mmproj GGUF does",
+        ))
+    }
+
+    /// Streaming variant of `chat_with_media`. Same default
+    /// `not_implemented` fallback.
+    async fn chat_with_media_stream(
+        &self,
+        _req: ChatRequest,
+        _media: Vec<crate::canonical::MediaAttachment>,
+    ) -> ChatResult<BoxStream<'static, ChatChunk>> {
+        Err(NeuronError::not_implemented(
+            "this LlmRuntime does not support media input; \
+             the llamacpp backend with an mmproj GGUF does",
+        ))
+    }
 
     fn list_models(&self) -> Vec<ModelInfo>;
 
@@ -497,6 +545,17 @@ mod tests {
     #[test]
     fn test_llm_impl_as_str_candle() {
         assert_eq!(LlmImpl::Candle.as_str(), "candle");
+    }
+
+    #[cfg(feature = "llamacpp")]
+    #[test]
+    fn test_llm_impl_llamacpp_roundtrip() {
+        // Same parse/as_str symmetry as the candle test: if either
+        // direction drifts, the env-var dispatch in ServerState::new
+        // silently registers the wrong engine.
+        let parsed = LlmImpl::parse("llamacpp").expect("llamacpp is a valid impl id");
+        assert_eq!(parsed.as_str(), "llamacpp");
+        assert_eq!(parsed, LlmImpl::LlamaCpp);
     }
 
     #[cfg(feature = "candle")]

@@ -155,6 +155,46 @@ impl ServerState {
                     );
                 }
             }
+            Some("llamacpp") => {
+                #[cfg(feature = "llamacpp")]
+                {
+                    // The model_id is the path to a local GGUF file
+                    // (or a bare id resolved under
+                    // $NEURON_MODEL_DIRS/{llamacpp,candle}/<id>/model.gguf
+                    // by LlamaCppLlmRuntime::load). NEURON_LLM_DEFAULT_MODEL
+                    // is the documented knob; falls back to a generic
+                    // "gguf" placeholder so registration still succeeds
+                    // even when the file isn't there yet — the load
+                    // itself emits a clear path-not-found error.
+                    let model_id = crate::config::env_var_result("LLM_DEFAULT_MODEL")
+                        .unwrap_or_else(|_| "gguf".to_string());
+                    if let Err(e) = llm_registry.register(
+                        model_id.clone(),
+                        LlmImpl::LlamaCpp,
+                        device.clone(),
+                        8_000_000_000,
+                    ) {
+                        eprintln!(
+                            "[neuron] LlamaCpp LLM register failed: {e}"
+                        );
+                    } else {
+                        eprintln!(
+                            "[neuron] LlamaCpp LLM registered model={model_id:?} \
+                             device={device:?} (set NEURON_LLAMA_CPP_N_CTX, \
+                             NEURON_LLAMA_CPP_GPU_LAYERS to override defaults; \
+                             build prereq: cmake + C++ toolchain)"
+                        );
+                    }
+                }
+                #[cfg(not(feature = "llamacpp"))]
+                {
+                    eprintln!(
+                        "[neuron] NEURON_LLM_RUNTIME=llamacpp but llamacpp feature not enabled. \
+                         Build with `cargo build --features llamacpp` (needs cmake + a C++ toolchain \
+                         on PATH; see AGENTS.md 'Llama.cpp backend')."
+                    );
+                }
+            }
             Some("mage_vl") => {
                 let model_id = crate::config::env_var_result("MAGE_VL_MODEL_ID")
                     .unwrap_or_else(|_| "microsoft/Mage-VL".to_string());
