@@ -66,7 +66,8 @@ POST /v1/vision/pose
 ```
 POST   /v1/vision/lora/register
 GET    /v1/vision/lora/list
-POST   /v1/vision/lora/unregister
+GET    /v1/vision/lora/{id}       (单个适配器)
+DELETE /v1/vision/lora/{id}       (注销)
 ```
 
 ### Mage-VL StreamMind gate(门控,neuron 专属)

@@ -593,6 +593,10 @@ neuron has **no direct dependency** on any particular host — the integration c
 | `MODELSCOPE_TOKEN` | (unset) | Bearer token sent on every ModelScope HTTP download. Same semantics as `HF_TOKEN`. |
 | `NEURON_LLM_RUNTIME` | (unset) | `candle` \| `litert` \| `mistralrs` \| `llamacpp` — which LLM engine to load. `llamacpp` requires the `llamacpp` Cargo feature (`cmake` + C++ toolchain + `libclang` on PATH) and a local GGUF file at the resolved path; see the "Llama.cpp (loadable)" section. |
 | `NEURON_LLM_DTYPE` | `f32` | `f32` \| `f16` \| `bf16` — storage dtype the candle runtime materialises weights (and the Llama KV cache) in. `f16`/`bf16` halve resident weight memory. candle's CPU backend has **no BF16 matmul** (loads but fails forward), so `f16` is the memory-lean choice on CPU; F32 for a 2B model is ~10 GB resident and pages on a 16 GB host. |
+| `NEURON_USE_FLASH_ATTN` | (unset) | `1` / `true` opts into FlashAttention-2 in the candle runtime. Requires the `flash-attn` Cargo feature **and** a CUDA device to be useful |
+| `NEURON_REMOTE_BASE_URL` | (unset) | Base URL of an OpenAI-compatible endpoint registered as a remote LLM engine — each id in `NEURON_REMOTE_MODELS` is proxied verbatim (tools included). Lets a host serve cloud-quality models without local weights |
+| `NEURON_REMOTE_MODELS` | (unset) | Comma-separated model ids registered against `NEURON_REMOTE_BASE_URL`. The first id becomes the default engine |
+| `NEURON_REMOTE_API_KEY` | (unset) | Bearer token sent to the remote endpoint |
 | `NEURON_MISTRALRS_ISQ` | `q4_0` | `q4_0` \| `q8_0` \| `none` — in-situ quantization applied by mistral.rs at load time |
 | `NEURON_LLAMA_CPP_N_CTX` | `2048` | Llama.cpp context length (tokens) for KV-cache sizing. Each `chat()` / `chat_stream()` call allocates a fresh context sized by this. Set lower on small-VRAM hosts (a 7B f16 model needs ~1 GiB at 2048). |
 | `NEURON_LLAMA_CPP_GPU_LAYERS` | (auto from `DeviceSelection`) | Override GPU layer offload count for the llama.cpp backend. `0` = full CPU; `u32::MAX` = full GPU offload; integer in between = partial offload. Ignored unless `NEURON_LLM_RUNTIME=llamacpp`. |

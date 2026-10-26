@@ -16,6 +16,7 @@ neuron exposes its full feature set as Cargo features, so the host binary pays c
 | `cuda` | `candle-core/cuda` + `candle-nn/cuda` + `candle-transformers/cuda` | — | NVIDIA CUDA GPU acceleration |
 | `chronos2` | (re-uses candle) | — | Time-series forecasting (Sprint 3 in progress; candle runtime WIP) |
 | `voxcpm` | `burn`, `burn-store`, `hound` | — | TTS via VoxCpm (burn 0.21) |
+| `voxcpm-cuda` | (re-uses burn) + `burn/cuda` | — | GPU backend for the VoxCPM2 TTS runtime (burn's CubeCL CUDA kernels, f16 weights). Needs `NEURON_DEVICE=nvidia` at runtime. Separate from `cuda` above, which is candle's. |
 | `litert` | `litert-lm` | — | On-device LLM via Google LiteRT-LM subprocess (Gemma 3) |
 | `asr-audio` | `symphonia`, `rubato` | — | MP3 / FLAC / OGG-Vorbis ASR decoding (otherwise WAV only) |
 | `mistralrs` | `mistralrs` + (re-uses candle) | — | LLM via mistral.rs engine (40+ model families) |
@@ -105,6 +106,7 @@ Some features are mutually dependent or have specific orderings. Common pitfalls
 - `flash-attn` **requires CUDA** to be useful (the build succeeds on macOS but `flash_attn` calls will fail at runtime). Always combine with `cuda`.
 - `mistralrs` **implicitly activates candle** because mistral.rs is built on candle-core 0.10.2 internally.
 - `voxcpm` **adds burn** as a fresh dependency tree (~3-5 min compile time). If you don't need TTS, leave it out.
+- `voxcpm-cuda` **adds the CubeCL stack** (burn's GPU kernels) on top of `voxcpm` — a few more minutes of compile time, but **no build-time CUDA toolkit**: cudarc uses the driver API + NVRTC with a dynamic-loading fallback. At runtime the CUDA toolkit's `bin` directory must be on `PATH` so NVRTC can be loaded. It is independent of the candle-side `cuda` feature; combine them as `--features cuda,voxcpm-cuda` to put both the LLM and the TTS on the GPU.
 - `litert` **adds `litert-lm`** but you also need the `lit` binary on `PATH` at runtime (the Rust crate is a subprocess wrapper, not a self-contained engine).
 
 ## Compile time table
@@ -113,6 +115,7 @@ Some features are mutually dependent or have specific orderings. Common pitfalls
 |---|---|---|
 | `--features candle` | 3-4 min | 30-60 s |
 | `--features candle,voxcpm` | 5-6 min | 1-2 min |
+| `--features candle,voxcpm-cuda` | 8-10 min | 2-3 min |
 | `--features candle,mistralrs` | 8-10 min | 1-3 min |
 | `--features candle,voxcpm,litert,mistralrs,asr-audio` | 10-12 min | 2-3 min |
 | Full kitchen sink (+ `flash-attn,cuda,chronos2`) | 12-15 min | 2-4 min |

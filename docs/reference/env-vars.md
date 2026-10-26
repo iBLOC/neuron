@@ -24,14 +24,26 @@ neuron reads its configuration from environment variables on startup. The full m
 | `NEURON_RERANK_MODEL_PATH` | (unset) | Path to the Rerank model directory (BGE/mxbai/jina; not used for cohere) |
 | `NEURON_EMBEDDING_MODEL_PATH` | (unset) | Path to the Embedding model directory (MiniLM BERT) |
 | `NEURON_VISION_MODEL_PATH` | (unset) | Path to the Vision model directory (YOLOv8: `config.json` + `yolov8n.safetensors`) |
+| `NEURON_CHRONOS2_DEFAULT_MODEL` | (unset) | Model id registered for the Chronos2 capability |
 
 ## Engine selection
 
 | Variable | Default | Description |
 |---|---|---|
-| `NEURON_LLM_RUNTIME` | (unset) | `candle` \| `litert` \| `mistralrs` \| `mage_vl` — which LLM engine to load |
+| `NEURON_LLM_RUNTIME` | (unset) | `candle` \| `litert` \| `mistralrs` \| `llamacpp` \| `mage_vl` — which LLM engine to load. `llamacpp` requires the `llamacpp` Cargo feature (cmake + a C++ toolchain + libclang on PATH) and a local GGUF file — see [/concepts/engines](/concepts/engines) |
+| `NEURON_LLM_DEFAULT_MODEL` | (unset) | Model id registered by the llama.cpp backend (its path or a bare id resolved under `$NEURON_MODEL_DIRS/llamacpp/<id>/model.gguf`) |
+| `NEURON_LLM_DTYPE` | `f32` | `f32` \| `f16` \| `bf16` — storage dtype the candle runtime materialises weights (and the Llama KV cache) in. `f16`/`bf16` halve resident weight memory; candle's CPU backend has no BF16 matmul, so `f16` is the memory-lean choice on CPU |
+| `NEURON_USE_FLASH_ATTN` | (unset) | `1` / `true` opts into FlashAttention-2 in the candle runtime. Requires the `flash-attn` Cargo feature **and** a CUDA device to be useful |
+| `NEURON_LLAMA_CPP_N_CTX` | `2048` | Context length (in tokens) for the llama.cpp backend's KV cache. Each in-flight request allocates a fresh context of this size — a 7B f16 model needs ~1 GiB at 2048 |
+| `NEURON_LLAMA_CPP_GPU_LAYERS` | from the device selection | Override the llama.cpp GPU offload count. `0` = full CPU; `u32::MAX` (or a device that implies it) = full offload; a number in between = partial offload |
+| `NEURON_LLAMA_CPP_FORCE_CHATML` | (unset) | `1` / `true` skips the GGUF's embedded chat template and renders every request through the ChatML fallback (`<\|im_start\|>` framing) |
+| `NEURON_LLAMA_CPP_MMPROJ` | (unset) | Path to a vision-projector GGUF for multimodal requests. When unset, the runtime auto-discovers `mmproj-*.gguf` next to the text GGUF; without one, the model loads as text-only |
+| `NEURON_REMOTE_BASE_URL` | (unset) | Base URL of an OpenAI-compatible endpoint to register as a remote LLM engine (each id in `NEURON_REMOTE_MODELS` is proxied verbatim, tools included) |
+| `NEURON_REMOTE_MODELS` | (unset) | Comma-separated model ids to register against `NEURON_REMOTE_BASE_URL` (e.g. `gpt-4o,claude-3-5-sonnet`). The first one becomes the default engine |
+| `NEURON_REMOTE_API_KEY` | (unset) | Bearer token sent to the remote endpoint |
 | `NEURON_MAGE_VL_SHARD_DIR` | (unset) | Path to Mage-VL shards directory (must contain `model-00001-of-00002.safetensors` + `model-00002-of-00002.safetensors`); required when `NEURON_LLM_RUNTIME=mage_vl` |
 | `NEURON_MAGE_VL_MODEL_ID` | `microsoft/Mage-VL` | Override the registered Mage-VL model id (HF repo id or local path string used for `engines.llm` keying) |
+| `NEURON_MAGE_VL_GATE_PATH` | (unset) | Path to the Mage-VL StreamMind gate model directory (used by `POST /v1/vision/gate/score`) |
 | `NEURON_MISTRALRS_ISQ` | `q4_0` | `q4_0` \| `q8_0` \| `none` — in-situ quantization applied by mistral.rs at load time |
 | `NEURON_EMBEDDING_RUNTIME` | (unset) | `candle` — which Embedding engine to load |
 | `NEURON_TTS_RUNTIME` | (unset) | `voxcpm` / `burn` (0.5B, requires `--features voxcpm`) \| `voxcpm2` (2B/48 kHz, same feature; loads upstream checkpoints directly, ~10 GB RAM) |
@@ -59,6 +71,7 @@ neuron reads its configuration from environment variables on startup. The full m
 | `NEURON_OCR_SESSIONS` | `2` | ort sessions per graph (concurrency); tract plans are shared and ignore this |
 | `NEURON_OCR_LAYOUT` | `true` | `false` skips an optional `layout.onnx` even when present |
 | `NEURON_OCR_TABLES` | `true` | `false` skips an optional `table.onnx` even when present |
+| `NEURON_OCR_DEBUG` | (unset) | `1` / `true` prints the OCR pipeline's intermediate tensors (detection maps, recognition logits) — debugging aid, not a production setting |
 | `ORT_DYLIB_PATH` | (unset) | Path to `onnxruntime.dll`/`.so` for the `ort` crate's load-dynamic linking (falls back to `PATH`) |
 
 ## Model scheduler
@@ -87,8 +100,15 @@ neuron reads its configuration from environment variables on startup. The full m
 | `NEURON_MODEL_SOURCE_ASR_<ID>` | (unset) | Per-model source id override (ASR) |
 | `NEURON_MODEL_SOURCE_RERANK_<ID>` | (unset) | Per-model source id override (Rerank) |
 | `NEURON_SOURCE_<ID>_ENDPOINT` | (unset) | Base URL for the named source (e.g. `NEURON_SOURCE_HUGGINGFACE_ENDPOINT=https://my-mirror.com`) |
+| `NEURON_SOURCE_HUGGINGFACE_ENDPOINT` | (unset) | Base URL of the `huggingface` source — the concrete form of `NEURON_SOURCE_<ID>_ENDPOINT` (e.g. `https://hf-mirror.com`) |
 | `NEURON_HUGGINGFACE_CLI` | (auto, on PATH) | Path to `huggingface-cli` binary for `HuggingFaceSource` (also used by `hf-mirror`) |
 | `NEURON_MODELSCOPE_CLI` | (auto, on PATH) | Path to `modelscope-cli` binary for `ModelScopeSource` |
+
+## Multimodal input
+
+| Variable | Default | Description |
+|---|---|---|
+| `NEURON_MEDIA_FETCH_HOST_ALLOWLIST` | (unset) | Comma-separated host allowlist for http(s) image fetches in the multimodal path. **Not implemented in v1** — the knob is reserved and referenced in the error messages; v1 only accepts `data:` URIs via `ImageSource::Base64` |
 
 ## Authentication
 
@@ -134,6 +154,29 @@ The first time neuron starts, it registers a default model per capability based 
 | `NEURON_DEFAULT_EMBEDDING_MODEL` | (system) | Model id for embedding requests |
 | `NEURON_DEFAULT_VISION_MODEL` | (system) | Model id for vision requests |
 
+## Benchmarks & tooling
+
+These are read by the benchmark harnesses and smoke examples under `benches/` and `examples/` — not by the embedded server.
+
+| Variable | Default | Description |
+|---|---|---|
+| `NEURON_BENCH_URL` | `http://127.0.0.1:8083` | Base URL of the running neuron server the model-matrix harness drives (`benches/model_matrix.rs`) |
+| `NEURON_BENCH_PROFILE` | `quick` | `quick` / `standard` / `full` preset for warmup × repeats |
+| `NEURON_BENCH_WARMUP` / `NEURON_BENCH_REPEATS` | (profile) | Override the warmup / repeat counts |
+| `NEURON_BENCH_OUT` | `target/model-matrix.md` | Model-matrix report path |
+| `NEURON_BENCH_DISABLE` | (unset) | Comma-separated `cap.engine` pairs to skip (e.g. `asr.tract,vision.tract`) |
+| `NEURON_BENCH_<CAP>_DIR` | (unset) | Override the directory the harness looks up model weights in (`<cap>` = llm / tts / asr / rerank / embedding / vision / chronos2 / decision) |
+| `NEURON_BENCH_<CAP>_RUNTIME` | (unset) | Steer which engine the harness registers for a capability |
+| `NEURON_BENCH_MODEL_DIRS` | (unset) | Colon-separated roots; the harness joins each with `<cap>/<model_id>` |
+| `NEURON_BENCH_ENDPOINTS` / `NEURON_BENCH_MODELS` / `NEURON_BENCH_CONCURRENCY` / `NEURON_BENCH_MAX_TOKENS` / `NEURON_BENCH_PROMPT_WORDS` / `NEURON_BENCH_PIDS` / `NEURON_BENCH_HELP` / `NEURON_BENCH_HOST_INFO` | (harness-specific) | Cross-framework LLM speed harness knobs (`benches/llm_speed.rs`) — set `NEURON_BENCH_HELP=1` for the full contract |
+| `NEURON_LLAMACPP_MODEL_PATH` | (unset) | GGUF path for the in-process llama.cpp benchmark (`benches/llamacpp_speed.rs`) |
+| `NEURON_LLAMACPP_N_CTX` | `2048` | Context length the llama.cpp benchmark passes to `LlamaContextParams` (bench-only; the runtime itself reads `NEURON_LLAMA_CPP_N_CTX`) |
+| `NEURON_LLAMACPP_BENCH_OUT` / `_PROFILE` / `_PROMPTS` / `_REPEATS` / `_WARMUP` | (harness-specific) | llama.cpp benchmark knobs |
+| `NEURON_ASR_BENCH_WAVS` / `_PROFILE` / `_REPEATS` / `_WARMUP` | (harness-specific) | ASR speed benchmark knobs (`benches/asr_speed.rs`) |
+| `NEURON_SMOKE_INPUT` / `NEURON_SMOKE_TAG` | (unset) | Input text / output tag for the VoxCPM2 streaming HTTP smoke (`examples/voxcpm2_stream_http_smoke.rs`) |
+| `NEURON_DECISION_SMOKE_MAX_LEN` / `NEURON_DECISION_SMOKE_HEAD_MAX_LEN` | (unset) | Question-length caps for the decision smoke example |
+| `NEURON_TEST_RESOLVE_VAR` | (unset) | Test-only fixture for the env-var resolution unit tests |
+
 ## Examples
 
 ### Minimal desktop config (Tauri app)
@@ -175,7 +218,7 @@ export RUST_LOG=warn
 neuron reads all `NEURON_*` env vars at startup. If a value is invalid (e.g. unknown runtime name, malformed source URL), you'll see a clear error in stderr:
 
 ```
-Error: invalid value for NEURON_LLM_RUNTIME: "candl" (expected one of: candle, litert, mistralrs, mage_vl)
+Error: invalid value for NEURON_LLM_RUNTIME: "candl" (expected one of: candle, litert, mistralrs, llamacpp, mage_vl)
 Error: invalid value for NEURON_RERANK_RUNTIME: "coher" (expected one of: candle, bge, mxbai, jina, cohere)
 ```
 

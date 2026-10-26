@@ -16,6 +16,7 @@ neuron 把完整的特性集暴露为 Cargo 特性，宿主二进制只需为实
 | `cuda` | `candle-core/cuda` + `candle-nn/cuda` + `candle-transformers/cuda` | — | NVIDIA CUDA GPU 加速 |
 | `chronos2` | （复用 candle） | — | 时间序列预测（Sprint 3 进行中；candle 运行时开发中） |
 | `voxcpm` | `burn`、`burn-store`、`hound` | — | 经 VoxCpm 的 TTS（burn 0.21） |
+| `voxcpm-cuda` | （复用 burn）+ `burn/cuda` | — | VoxCPM2 TTS 运行时的 GPU 后端（burn 的 CubeCL CUDA 内核，f16 权重）。运行期需 `NEURON_DEVICE=nvidia`；与上面的 candle 侧 `cuda` 相互独立 |
 | `litert` | `litert-lm` | — | 经 Google LiteRT-LM 子进程的端上 LLM（Gemma 3） |
 | `asr-audio` | `symphonia`、`rubato` | — | MP3 / FLAC / OGG-Vorbis ASR 解码（否则仅 WAV） |
 | `mistralrs` | `mistralrs` + （复用 candle） | — | 经 mistral.rs 引擎的 LLM（40+ 模型家族） |
@@ -105,6 +106,7 @@ matrix:
 - `flash-attn` **需要 CUDA** 才有用（macOS 上能构建成功，但 `flash_attn` 调用会在运行时失败）。务必与 `cuda` 组合。
 - `mistralrs` **隐式激活 candle**，因为 mistral.rs 内部基于 candle-core 0.10.2 构建。
 - `voxcpm` **引入 burn**，这是一棵全新的依赖树（约 3-5 分钟编译时间）。不需要 TTS 就不要加。
+- `voxcpm-cuda` 在 `voxcpm` 之上**再引入 CubeCL 栈**（burn 的 GPU 内核）——多几分钟编译时间，但**构建期不需要 CUDA Toolkit**：cudarc 走 driver API + NVRTC 并带动态加载回退。运行期需要把 CUDA Toolkit 的 `bin` 目录放进 `PATH` 以加载 NVRTC。它与 candle 侧的 `cuda` 特性相互独立；用 `--features cuda,voxcpm-cuda` 可让 LLM 与 TTS 同时跑在 GPU 上。
 - `litert` **引入 `litert-lm`**，但运行时你还需要 `PATH` 上有 `lit` 二进制（该 Rust crate 只是子进程包装器，不是自包含引擎）。
 
 ## 编译时间表
@@ -113,6 +115,7 @@ matrix:
 |---|---|---|
 | `--features candle` | 3-4 分钟 | 30-60 秒 |
 | `--features candle,voxcpm` | 5-6 分钟 | 1-2 分钟 |
+| `--features candle,voxcpm-cuda` | 8-10 分钟 | 2-3 分钟 |
 | `--features candle,mistralrs` | 8-10 分钟 | 1-3 分钟 |
 | `--features candle,voxcpm,litert,mistralrs,asr-audio` | 10-12 分钟 | 2-3 分钟 |
 | 全量（+ `flash-attn,cuda,chronos2`） | 12-15 分钟 | 2-4 分钟 |

@@ -24,14 +24,26 @@ neuron 在启动时从环境变量读取配置。下表完整列出每一个 `NE
 | `NEURON_RERANK_MODEL_PATH` | (未设置) | Rerank 模型目录路径(BGE/mxbai/jina;cohere 不使用) |
 | `NEURON_EMBEDDING_MODEL_PATH` | (未设置) | Embedding 模型目录路径(MiniLM BERT) |
 | `NEURON_VISION_MODEL_PATH` | (未设置) | Vision 模型目录路径(YOLOv8:`config.json` + `yolov8n.safetensors`) |
+| `NEURON_CHRONOS2_DEFAULT_MODEL` | (未设置) | Chronos2 能力注册的模型 id |
 
 ## 引擎选择
 
 | 变量 | 默认值 | 说明 |
 |---|---|---|
-| `NEURON_LLM_RUNTIME` | (未设置) | `candle` \| `litert` \| `mistralrs` \| `mage_vl` — 加载哪个 LLM 引擎 |
+| `NEURON_LLM_RUNTIME` | (未设置) | `candle` \| `litert` \| `mistralrs` \| `llamacpp` \| `mage_vl` — 加载哪个 LLM 引擎。`llamacpp` 需要 `llamacpp` Cargo 特性(构建需 cmake + C++ 工具链 + libclang)以及本地 GGUF 文件——见 [/zh/concepts/engines](/zh/concepts/engines) |
+| `NEURON_LLM_DEFAULT_MODEL` | (未设置) | llama.cpp 后端注册的模型 id(GGUF 路径,或按 `$NEURON_MODEL_DIRS/llamacpp/<id>/model.gguf` 解析的裸 id) |
+| `NEURON_LLM_DTYPE` | `f32` | `f32` \| `f16` \| `bf16` — candle 运行时物化权重(及 Llama KV cache)的存储 dtype。`f16`/`bf16` 让常驻权重内存减半;candle 的 CPU 后端没有 BF16 matmul,CPU 上省内存选 `f16` |
+| `NEURON_USE_FLASH_ATTN` | (未设置) | `1` / `true` 在 candle 运行时启用 FlashAttention-2。需要 `flash-attn` Cargo 特性**且**有 CUDA 设备才有用 |
+| `NEURON_LLAMA_CPP_N_CTX` | `2048` | llama.cpp 后端 KV cache 的上下文长度(token)。每个在途请求分配一份该大小的全新上下文——7B f16 模型在 2048 时约需 1 GiB |
+| `NEURON_LLAMA_CPP_GPU_LAYERS` | 取自设备选择 | 覆盖 llama.cpp 的 GPU 卸载层数。`0` = 全 CPU;`u32::MAX`(或隐含它的设备)= 全卸载;中间数字 = 部分卸载 |
+| `NEURON_LLAMA_CPP_FORCE_CHATML` | (未设置) | `1` / `true` 跳过 GGUF 内嵌的 chat template,把所有请求都走 ChatML 回退(`<\|im_start\|>` 框架) |
+| `NEURON_LLAMA_CPP_MMPROJ` | (未设置) | 多模态请求的视觉投影器 GGUF 路径。未设置时运行时会在文本 GGUF 旁自动发现 `mmproj-*.gguf`;找不到则按纯文本模型加载 |
+| `NEURON_REMOTE_BASE_URL` | (未设置) | 要注册为远程 LLM 引擎的 OpenAI 兼容端点基础 URL(`NEURON_REMOTE_MODELS` 里的每个 id 都被原样代理,含工具) |
+| `NEURON_REMOTE_MODELS` | (未设置) | 逗号分隔的模型 id,注册到 `NEURON_REMOTE_BASE_URL`(如 `gpt-4o,claude-3-5-sonnet`)。第一个 id 成为默认引擎 |
+| `NEURON_REMOTE_API_KEY` | (未设置) | 发给远程端点的 Bearer token |
 | `NEURON_MAGE_VL_SHARD_DIR` | (未设置) | Mage-VL 分片目录路径(必须包含 `model-00001-of-00002.safetensors` + `model-00002-of-00002.safetensors`);`NEURON_LLM_RUNTIME=mage_vl` 时必填 |
 | `NEURON_MAGE_VL_MODEL_ID` | `microsoft/Mage-VL` | 覆盖已注册的 Mage-VL 模型 id(用于 `engines.llm` 键的 HF 仓库 id 或本地路径字符串) |
+| `NEURON_MAGE_VL_GATE_PATH` | (未设置) | Mage-VL StreamMind gate 模型目录路径(`POST /v1/vision/gate/score` 使用) |
 | `NEURON_MISTRALRS_ISQ` | `q4_0` | `q4_0` \| `q8_0` \| `none` — mistral.rs 在加载时就地应用的量化(in-situ quantization) |
 | `NEURON_EMBEDDING_RUNTIME` | (未设置) | `candle` — 加载哪个 Embedding 引擎 |
 | `NEURON_TTS_RUNTIME` | (未设置) | `voxcpm` / `burn`(0.5B,需要 `--features voxcpm`) \| `voxcpm2`(2B/48 kHz,同一 feature;直接加载上游检查点,约需 10 GB 内存) |
@@ -59,6 +71,7 @@ neuron 在启动时从环境变量读取配置。下表完整列出每一个 `NE
 | `NEURON_OCR_SESSIONS` | `2` | 每个图的 ort 会话数(并发);tract 计划为共享,忽略此项 |
 | `NEURON_OCR_LAYOUT` | `true` | 设为 `false` 时,即使存在可选的 `layout.onnx` 也跳过 |
 | `NEURON_OCR_TABLES` | `true` | 设为 `false` 时,即使存在可选的 `table.onnx` 也跳过 |
+| `NEURON_OCR_DEBUG` | (未设置) | `1` / `true` 打印 OCR 管线的中间张量(检测图、识别 logits)——调试辅助,不是生产设置 |
 | `ORT_DYLIB_PATH` | (未设置) | `ort` crate load-dynamic 链接所需的 `onnxruntime.dll`/`.so` 路径(回退到 `PATH` 查找) |
 
 ## 模型调度器
@@ -87,8 +100,15 @@ neuron 在启动时从环境变量读取配置。下表完整列出每一个 `NE
 | `NEURON_MODEL_SOURCE_ASR_<ID>` | (未设置) | 按模型覆盖源 id(ASR) |
 | `NEURON_MODEL_SOURCE_RERANK_<ID>` | (未设置) | 按模型覆盖源 id(Rerank) |
 | `NEURON_SOURCE_<ID>_ENDPOINT` | (未设置) | 指定源的基础 URL(如 `NEURON_SOURCE_HUGGINGFACE_ENDPOINT=https://my-mirror.com`) |
+| `NEURON_SOURCE_HUGGINGFACE_ENDPOINT` | (未设置) | `huggingface` 源的基础 URL——`NEURON_SOURCE_<ID>_ENDPOINT` 的具体形式(如 `https://hf-mirror.com`) |
 | `NEURON_HUGGINGFACE_CLI` | (自动,取自 PATH) | `HuggingFaceSource` 使用的 `huggingface-cli` 二进制路径(`hf-mirror` 亦使用) |
 | `NEURON_MODELSCOPE_CLI` | (自动,取自 PATH) | `ModelScopeSource` 使用的 `modelscope-cli` 二进制路径 |
+
+## 多模态输入
+
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `NEURON_MEDIA_FETCH_HOST_ALLOWLIST` | (未设置) | 多模态路径中 http(s) 图片抓取的主机白名单(逗号分隔)。**v1 未实现**——该旋钮为将来预留,错误信息里会引用它;v1 只接受经 `ImageSource::Base64` 的 `data:` URI |
 
 ## 认证
 
@@ -134,6 +154,29 @@ neuron 首次启动时,会根据已安装的 feature 为每个能力注册一个
 | `NEURON_DEFAULT_EMBEDDING_MODEL` | (系统) | 嵌入向量请求使用的模型 id |
 | `NEURON_DEFAULT_VISION_MODEL` | (系统) | 视觉请求使用的模型 id |
 
+## 基准与工具
+
+这些变量由 `benches/` 与 `examples/` 下的基准 harness 和 smoke 示例读取——内嵌服务器本身不用它们。
+
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `NEURON_BENCH_URL` | `http://127.0.0.1:8083` | model-matrix harness(`benches/model_matrix.rs`)驱动的 neuron 服务器地址 |
+| `NEURON_BENCH_PROFILE` | `quick` | `quick` / `standard` / `full` 预设,决定 warmup × repeats |
+| `NEURON_BENCH_WARMUP` / `NEURON_BENCH_REPEATS` | (取预设) | 覆盖 warmup / repeat 次数 |
+| `NEURON_BENCH_OUT` | `target/model-matrix.md` | model-matrix 报告输出路径 |
+| `NEURON_BENCH_DISABLE` | (未设置) | 逗号分隔的 `cap.engine` 对,跳过不测(如 `asr.tract,vision.tract`) |
+| `NEURON_BENCH_<CAP>_DIR` | (未设置) | 覆盖 harness 查找模型权重的目录(`<cap>` = llm / tts / asr / rerank / embedding / vision / chronos2 / decision) |
+| `NEURON_BENCH_<CAP>_RUNTIME` | (未设置) | 指定 harness 为该能力注册的引擎 |
+| `NEURON_BENCH_MODEL_DIRS` | (未设置) | 冒号分隔的根列表;harness 拼接 `<cap>/<model_id>` 查找 |
+| `NEURON_BENCH_ENDPOINTS` / `NEURON_BENCH_MODELS` / `NEURON_BENCH_CONCURRENCY` / `NEURON_BENCH_MAX_TOKENS` / `NEURON_BENCH_PROMPT_WORDS` / `NEURON_BENCH_PIDS` / `NEURON_BENCH_HELP` / `NEURON_BENCH_HOST_INFO` | (随 harness) | 跨框架 LLM 速度 harness(`benches/llm_speed.rs`)的旋钮——设 `NEURON_BENCH_HELP=1` 查看完整约定 |
+| `NEURON_LLAMACPP_MODEL_PATH` | (未设置) | 进程内 llama.cpp 基准(`benches/llamacpp_speed.rs`)的 GGUF 路径 |
+| `NEURON_LLAMACPP_N_CTX` | `2048` | llama.cpp 基准传给 `LlamaContextParams` 的上下文长度(仅基准用;运行时本体读的是 `NEURON_LLAMA_CPP_N_CTX`) |
+| `NEURON_LLAMACPP_BENCH_OUT` / `_PROFILE` / `_PROMPTS` / `_REPEATS` / `_WARMUP` | (随 harness) | llama.cpp 基准旋钮 |
+| `NEURON_ASR_BENCH_WAVS` / `_PROFILE` / `_REPEATS` / `_WARMUP` | (随 harness) | ASR 速度基准旋钮(`benches/asr_speed.rs`) |
+| `NEURON_SMOKE_INPUT` / `NEURON_SMOKE_TAG` | (未设置) | VoxCPM2 流式 HTTP smoke(`examples/voxcpm2_stream_http_smoke.rs`)的输入文本 / 输出标签 |
+| `NEURON_DECISION_SMOKE_MAX_LEN` / `NEURON_DECISION_SMOKE_HEAD_MAX_LEN` | (未设置) | decision smoke 示例的问题长度上限 |
+| `NEURON_TEST_RESOLVE_VAR` | (未设置) | env-var 解析单元测试的测试夹具 |
+
 ## 示例
 
 ### 最小桌面配置(Tauri 应用)
@@ -175,7 +218,7 @@ export RUST_LOG=warn
 neuron 在启动时读取所有 `NEURON_*` 环境变量。若有取值非法(如未知的 runtime 名称、格式错误的源 URL),stderr 会输出清晰的错误:
 
 ```
-Error: invalid value for NEURON_LLM_RUNTIME: "candl" (expected one of: candle, litert, mistralrs, mage_vl)
+Error: invalid value for NEURON_LLM_RUNTIME: "candl" (expected one of: candle, litert, mistralrs, llamacpp, mage_vl)
 Error: invalid value for NEURON_RERANK_RUNTIME: "coher" (expected one of: candle, bge, mxbai, jina, cohere)
 ```
 

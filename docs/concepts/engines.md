@@ -111,7 +111,9 @@ curl -X POST http://localhost:8083/v1/chat/completions \
 
 ### TTS
 
-- **burn (VoxCpm)** is the only TTS engine, with two loadable generations. **VoxCPM 0.5B** (`NEURON_TTS_RUNTIME=voxcpm`): small, fast Chinese/English with voice cloning; pre-converted `.mpk` weights required. **VoxCPM2** (`NEURON_TTS_RUNTIME=voxcpm2`, 2B params, 48 kHz, 30 languages): zero-shot, Voice Design (a "(description)" text prefix on `input`), and voice cloning via optional `reference_audio` + `prompt_text` on `/v1/audio/speech`; loads the upstream `openbmb/VoxCPM2` checkpoints directly (no conversion step). Budget ~10 GB RAM — weights materialize as f32 on the ndarray backend. Model-level streaming is a follow-up (see AGENTS.md); `stream: true` currently returns chunked full-synthesis WAV.
+- **burn (VoxCpm)** is the only TTS engine, with two loadable generations. **VoxCPM 0.5B** (`NEURON_TTS_RUNTIME=voxcpm`): small, fast Chinese/English with voice cloning; pre-converted `.mpk` weights required. **VoxCPM2** (`NEURON_TTS_RUNTIME=voxcpm2`, 2B params, 48 kHz, 30 languages): zero-shot, Voice Design (a "(description)" text prefix on `input`), and voice cloning via optional `reference_audio` + `prompt_text`; loads the upstream `openbmb/VoxCPM2` checkpoints directly (no conversion step). Budget ~10 GB RAM — weights materialize as f32 on the ndarray backend.
+- **Model-level streaming** is served by `POST /v1/audio/speech/stream`: VoxCPM2 decodes each latent patch into audio the moment the model emits it, so the first bytes arrive after one patch instead of after the whole utterance (measured with the real checkpoint: first byte after 51.6 s versus 651.0 s on `/v1/audio/speech`, with byte-identical output). The legacy `stream: true` on `/v1/audio/speech` still returns the full synthesis in 16 KiB chunks.
+- **GPU (opt-in)**: `--features voxcpm-cuda` + `NEURON_DEVICE=nvidia` runs VoxCPM2 through burn's CubeCL CUDA backend in f16 (~4.6 GB of VRAM instead of ~9.2 GB). The CPU stays the default: VoxCPM2's per-patch decode is latency-bound, and the first audio byte arrived after 708 s on an RTX 3090 versus 112 s on a 12-core CPU for the same utterance.
 
 ### ASR
 

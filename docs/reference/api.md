@@ -66,7 +66,8 @@ No OpenAI equivalent — neuron-specific. See [Vision Tasks](/howto/vision-tasks
 ```
 POST   /v1/vision/lora/register
 GET    /v1/vision/lora/list
-POST   /v1/vision/lora/unregister
+GET    /v1/vision/lora/{id}       (single adapter)
+DELETE /v1/vision/lora/{id}       (unregister)
 ```
 
 ### Mage-VL StreamMind gate (neuron-specific)

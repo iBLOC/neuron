@@ -114,7 +114,9 @@ curl -X POST http://localhost:8083/v1/chat/completions \
 
 ### TTS
 
-- **burn (VoxCpm)** 是唯一的 TTS 引擎，有两代可加载模型。**VoxCPM 0.5B**（`NEURON_TTS_RUNTIME=voxcpm`）：小巧快速的中文/英文，带声音克隆；需要预转换的 `.mpk` 权重。**VoxCPM2**（`NEURON_TTS_RUNTIME=voxcpm2`，2B 参数、48 kHz、30 种语言）：零样本、Voice Design（在 `input` 前加 "(description)" 文本前缀）、以及经 `/v1/audio/speech` 上可选 `reference_audio` + `prompt_text` 的声音克隆；直接加载上游 `openbmb/VoxCPM2` 检查点（无转换步骤）。预留约 10 GB 内存——权重在 ndarray 后端上以 f32 物化。模型级流式是后续工作（见 AGENTS.md）；`stream: true` 目前返回分块传输的完整合成 WAV。
+- **burn (VoxCpm)** 是唯一的 TTS 引擎，有两代可加载模型。**VoxCPM 0.5B**（`NEURON_TTS_RUNTIME=voxcpm`）：小巧快速的中文/英文，带声音克隆；需要预转换的 `.mpk` 权重。**VoxCPM2**（`NEURON_TTS_RUNTIME=voxcpm2`，2B 参数、48 kHz、30 种语言）：零样本、Voice Design（在 `input` 前加 "(description)" 文本前缀）、以及经可选 `reference_audio` + `prompt_text` 的声音克隆；直接加载上游 `openbmb/VoxCPM2` 检查点（无转换步骤）。预留约 10 GB 内存——权重在 ndarray 后端上以 f32 物化。
+- **模型级流式**由 `POST /v1/audio/speech/stream` 提供：VoxCPM2 在模型产出每个 latent patch 的瞬间就把它解码成音频，首个字节早于整句合成完毕到达（真实检查点实测：首包 51.6 s，而 `/v1/audio/speech` 为 651.0 s，两者输出字节完全一致）。`/v1/audio/speech` 上原有的 `stream: true` 行为不变，仍是完整合成后按 16 KiB 分块。
+- **GPU（可选）**：`--features voxcpm-cuda` + `NEURON_DEVICE=nvidia` 让 VoxCPM2 跑在 burn 的 CubeCL CUDA 后端上，权重用 f16（显存约 4.6 GB 而非 9.2 GB）。默认仍在 CPU——VoxCPM2 的逐 patch 解码是延迟受限的，同一句话在 RTX 3090 上首个音频字节要 708 s，而 12 核 CPU 只要 112 s。
 
 ### ASR
 

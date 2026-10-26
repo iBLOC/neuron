@@ -31,8 +31,9 @@ features:
       OCR(PP-OCRv5/v6 + 版面分析 + 表格结构) · 决策打分(Laya) · 时序预测(Chronos2)
   - title: 🔌 OpenAI + Anthropic 线格式兼容
     details: |
-      10+ OpenAI 兼容路由(/v1/chat/completions、/v1/audio/speech、/v1/embeddings、
-      /v1/rerank、/v1/vision/*、/v1/ocr/recognize、/v1/models/pull 等)+
+      10+ OpenAI 兼容路由(/v1/chat/completions、/v1/audio/speech、
+      /v1/audio/speech/stream 模型级流式、/v1/embeddings、/v1/rerank、
+      /v1/vision/*、/v1/ocr/recognize、/v1/models/pull 等)+
       /v1/messages 实现 Anthropic Messages v1(vision、tool_use、cache_control、
       extended thinking、SSE 流式)。
   - title: 🛠 3 套 ML 框架按需选择

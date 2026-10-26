@@ -37,9 +37,9 @@ Built on [candle](https://github.com/huggingface/candle) · inspired by
 
 | capability | endpoint(s) | engines |
 |---|---|---|
-| LLM chat | `/v1/chat/completions`, `/v1/messages` | candle, mistralrs, litert, mage_vl |
-| VLM (image+video) | chat with `image_url` parts | mage_vl (Microsoft Mage-VL) |
-| TTS | `/v1/audio/speech` (streaming) | burn (VoxCPM 0.5B / VoxCPM2 2B) |
+| LLM chat | `/v1/chat/completions`, `/v1/messages` | candle, mistralrs, litert, llamacpp, mage_vl |
+| VLM (image+video) | chat with `image_url` parts | mage_vl (Microsoft Mage-VL), llamacpp (mtmd, e.g. MiniCPM-V 4.7) |
+| TTS | `/v1/audio/speech`, `/v1/audio/speech/stream` (model-level streaming) | burn (VoxCPM 0.5B / VoxCPM2 2B) |
 | ASR | `/v1/audio/transcriptions` | sherpa, tract (SenseVoiceSmall), candle (Whisper) |
 | Embedding | `/v1/embeddings` | candle (MiniLM) |
 | Rerank | `/v1/rerank` | candle (BGE / mxbai / jina), Cohere (cloud adapter) |

@@ -35,9 +35,9 @@ Embedding / Vision / OCR —— 通过 **OpenAI 兼容 HTTP API** 对外服务
 
 | 能力 | 端点 | 引擎 |
 |---|---|---|
-| LLM 对话 | `/v1/chat/completions`、`/v1/messages` | candle、mistralrs、litert、mage_vl |
-| VLM（图像+视频） | chat 携带 `image_url` | mage_vl（Microsoft Mage-VL） |
-| TTS | `/v1/audio/speech`（流式） | burn（VoxCPM 0.5B / VoxCPM2 2B） |
+| LLM 对话 | `/v1/chat/completions`、`/v1/messages` | candle、mistralrs、litert、llamacpp、mage_vl |
+| VLM（图像+视频） | chat 携带 `image_url` | mage_vl（Microsoft Mage-VL）、llamacpp（mtmd,如 MiniCPM-V 4.7） |
+| TTS | `/v1/audio/speech`、`/v1/audio/speech/stream`（模型级流式） | burn（VoxCPM 0.5B / VoxCPM2 2B） |
 | ASR | `/v1/audio/transcriptions` | sherpa、tract（SenseVoiceSmall）、candle（Whisper） |
 | Embedding | `/v1/embeddings` | candle（MiniLM） |
 | Rerank | `/v1/rerank` | candle（BGE / mxbai / jina）、Cohere（云适配） |

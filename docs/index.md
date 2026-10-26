@@ -76,7 +76,8 @@ The wire format is byte-for-byte OpenAI / vLLM / ollama / llama.cpp / Anthropic 
 
 | Surface | Endpoints |
 |---|---|
-| **OpenAI-compatible** | `POST /v1/chat/completions`, `POST /v1/audio/speech`, `POST /v1/audio/transcriptions`, `POST /v1/embeddings`, `POST /v1/rerank`, `POST /v1/vision/{detect,classify,segment,pose}`, `POST /v1/vision/lora/{register,unregister}`, `GET /v1/vision/lora/list`, `GET /v1/models`, `POST /v1/models/pull`, `GET /v1/catalog/sources` |
+| **OpenAI-compatible** | `POST /v1/chat/completions`, `POST /v1/audio/speech`, `POST /v1/audio/transcriptions`, `POST /v1/embeddings`, `POST /v1/rerank`, `POST /v1/vision/{detect,classify,segment,pose}`, `POST /v1/vision/lora/register`, `DELETE /v1/vision/lora/{id}`, `GET /v1/vision/lora/list`, `GET /v1/models`, `POST /v1/models/pull`, `GET /v1/catalog/sources` |
+| **Model-level streaming TTS** | `POST /v1/audio/speech/stream` (VoxCPM2 decodes each latent patch as the model emits it) |
 | **Anthropic Messages v1** | `POST /v1/messages` (vision, tool_use, cache_control, extended thinking, streaming SSE) |
 | **Liveness** | `GET /health`, `GET /v1/info` |
 
