@@ -28,6 +28,7 @@ Anthropic Messages v1 API. Supports vision, tool_use, cache_control, extended th
 
 ```
 POST /v1/audio/speech         (TTS — OpenAI)
+POST /v1/audio/speech/stream  (TTS — model-level streaming)
 POST /v1/audio/transcriptions (ASR — OpenAI)
 ```
 
@@ -243,6 +244,39 @@ curl -X POST http://localhost:8085/v1/audio/speech \
 ```
 
 Streams MP3 audio bytes. `voice` is one of `alloy` / `echo` / `fable` / `onyx` / `nova` / `shimmer` (mapped to VoxCpm speakers).
+
+With `"stream": true` the response is the same audio delivered in 16 KiB chunks (chunked transfer) — the synthesis still completes before the first byte is sent. For audio that arrives while the model is still generating, use `/v1/audio/speech/stream` below.
+
+### `POST /v1/audio/speech/stream`
+
+Model-level streaming TTS. The server decodes each latent patch into audio as soon as the model produces it, so the first bytes reach the client long before the utterance is finished.
+
+```bash
+curl -N -X POST http://localhost:8085/v1/audio/speech/stream \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "voxcpm2",
+    "input": "今天天气真不错。",
+    "response_format": "wav"
+  }' \
+  -o output.wav
+```
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `model` | string | `voxcpm2` | Registered TTS model id. |
+| `input` | string | — | Text to synthesize (required). |
+| `voice` | string | — | Voice id, for runtimes with named voices. |
+| `response_format` | string | `wav` | `wav` → WAV container; `pcm` → raw 16-bit LE mono samples. |
+| `reference_audio` | string | — | Voice-clone reference (base64 / `data:` URI / server-local path), decoded to mono 16 kHz. |
+| `prompt_text` | string | — | Transcript of `reference_audio` (continuation-style prompts). |
+
+Container notes:
+
+- `wav` sends a 44-byte header whose size fields are the `0xFFFFFFFF` placeholder — the usual convention for a WAV whose length is only known once the stream ends. Players that need an exact length should request `pcm` and wrap the samples themselves.
+- `pcm` sends raw 16-bit little-endian mono samples at the model's native rate (48 kHz for VoxCPM2) with no header.
+
+Currently served by the VoxCPM2 runtime (`NEURON_TTS_RUNTIME=voxcpm2`); other TTS runtimes fall back to synthesizing the full utterance and then chunking it, so the endpoint always answers.
 
 ### `POST /v1/audio/transcriptions`
 

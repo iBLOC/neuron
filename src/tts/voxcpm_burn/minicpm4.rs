@@ -84,6 +84,15 @@ impl MiniCPMConfig {
                 None
             } else {
                 Some(
+                    // `kv_channels` is the head dim when set (it overrides
+                    // `hidden_size / num_attention_heads` in the attention
+                    // projections), so the RoPE cache must use it too —
+                    // otherwise the `inv_freq` length (head_dim / 2) no
+                    // longer matches the `short_factor` / `long_factor`
+                    // lengths and the cache build fails to broadcast. This
+                    // bites the VoxCPM2 encoder/DiT stacks, whose hidden size
+                    // (1024 / 16 heads = 64) is half their real head dim
+                    // (kv_channels = 128).
                     MiniCPMLongRoPEconfig::new(
                         self.hidden_size,
                         self.num_attention_heads,
@@ -93,6 +102,7 @@ impl MiniCPMConfig {
                         self.max_position_embeddings,
                         self.rope_scaling.original_max_position_embeddings,
                     )
+                    .with_kv_channels(self.kv_channels)
                     .init(device),
                 )
             },
@@ -527,15 +537,17 @@ impl<B: Backend> MiniCPMAttention<B> {
         cos: Tensor<B, 2>,
         sin: Tensor<B, 2>,
     ) -> (Tensor<B, 4>, Tensor<B, 4>) {
-        let orig_dtype = q.dtype();
-        let q = q.cast(FloatDType::F32);
-        let k = k.cast(FloatDType::F32);
-        let sin = sin.unsqueeze();
-        let cos = cos.unsqueeze();
+        // The rotary math runs in the tensors' own dtype. The queries and
+        // the RoPE cache share it (f32 on the CPU backend, f16 on the GPU
+        // one); forcing f32 here would leave the cache f16 against f32
+        // queries and the multiply would be rejected as a dtype mismatch.
+        let dtype = q.dtype();
+        let cos = cos.cast(dtype).unsqueeze();
+        let sin = sin.cast(dtype).unsqueeze();
 
         let q_embed = (q.clone() * cos.clone()) + (Self::rotate_half(q) * sin.clone());
         let k_embed = (k.clone() * cos) + (Self::rotate_half(k) * sin);
-        (q_embed.cast(orig_dtype), k_embed.cast(orig_dtype))
+        (q_embed, k_embed)
     }
 
     fn rotate_half(x: Tensor<B, 4>) -> Tensor<B, 4> {
@@ -603,6 +615,9 @@ impl MiniCPMLongRoPEconfig {
             Some(val) => val,
             None => self.hidden_size / self.num_attention_heads,
         };
+        // The float dtype this device creates tensors with (f32 on the CPU
+        // backend, f16 on the GPU one).
+        let dtype = Tensor::<B, 1>::zeros([1], device).dtype();
 
         let mut rope = MiniCPMLongRoPE {
             dim,
@@ -612,9 +627,15 @@ impl MiniCPMLongRoPEconfig {
             scaling_factor: (1.0
                 + scale.ln() / (self.original_max_position_embeddings as f32).ln())
             .sqrt(),
-            inv_freq: Tensor::from_floats([self.rope_theta], device).powf(
-                Tensor::<B, 1, Int>::arange_step(0i64..dim as i64, 2, &device.clone()).float()
-                    / dim as f32,
+            // `from_floats` always produces f32 data — on an f16 device that
+            // would make the RoPE cache f32 while the queries are f16, and
+            // the rotary multiply would be rejected as a dtype mismatch.
+            inv_freq: Tensor::from_floats([self.rope_theta], device)
+                .cast(dtype)
+                .powf(
+                    Tensor::<B, 1, Int>::arange_step(0i64..dim as i64, 2, &device.clone())
+                        .float()
+                        / dim as f32,
             ),
             max_seq_len_cached: 0,
             cos_cached: Tensor::empty([0, 0], device),
@@ -649,12 +670,18 @@ impl<B: Backend> MiniCPMLongRoPE<B> {
         let seq_len = self.max_position_embeddings;
         self.max_seq_len_cached = seq_len;
         let t = Tensor::arange(0..self.max_seq_len_cached as i64, device).float();
+        // Match the device's float dtype: `from_floats` always yields f32
+        // data, which would leave the cache f32 while the queries are f16
+        // on the GPU backend (the rotary multiply then fails with a dtype
+        // mismatch).
+        let dtype = Tensor::<B, 1>::zeros([1], device).dtype();
 
         let ext_factors = if seq_len > self.original_max_position_embeddings {
             Tensor::from_floats(long_factor, device)
         } else {
             Tensor::from_floats(short_factor, device)
-        };
+        }
+        .cast(dtype);
 
         let freqs: Tensor<B, 2, burn::tensor::Float> = outer(t, 1.0 / ext_factors);
         let freqs = freqs * self.inv_freq.clone().unsqueeze();

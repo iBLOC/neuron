@@ -35,6 +35,7 @@ neuron 在启动时从环境变量读取配置。下表完整列出每一个 `NE
 | `NEURON_MISTRALRS_ISQ` | `q4_0` | `q4_0` \| `q8_0` \| `none` — mistral.rs 在加载时就地应用的量化(in-situ quantization) |
 | `NEURON_EMBEDDING_RUNTIME` | (未设置) | `candle` — 加载哪个 Embedding 引擎 |
 | `NEURON_TTS_RUNTIME` | (未设置) | `voxcpm` / `burn`(0.5B,需要 `--features voxcpm`) \| `voxcpm2`(2B/48 kHz,同一 feature;直接加载上游检查点,约需 10 GB 内存) |
+| `NEURON_DEVICE` | `auto` | LLM 与 TTS 引擎使用的设备:`auto` \| `cpu` \| `nvidia`(别名 `cuda`)\| `apple` \| `vulkan`。candle 的 LLM 路径在 `auto` 下选 GPU;**burn 的 TTS 后端默认留在 CPU**——VoxCPM2 每个 patch 的解码是延迟受限的,实测在 RTX 3090 上比 12 核 CPU 慢约 6 倍(见 AGENTS.md 的 VoxCPM2 章节)。用 `--features voxcpm-cuda` 编译后,`nvidia` 可让 VoxCPM2 跑在 GPU 上(CubeCL 内核,f16)。 |
 | `NEURON_ASR_RUNTIME` | (未设置) | `candle`(Whisper) \| `tract`(SenseVoiceSmall,经 neuron 自研 tract ONNX 栈,需要 `--features tract`) \| `sherpa`(SenseVoiceSmall,经官方 sherpa-onnx Rust 绑定,需要 `--features sherpa`) |
 | `NEURON_ASR_ONNX_FILE` | (未设置) | 覆盖 SenseVoice 图文件(如 `model.int8.onnx`);Whisper 运行时忽略此项 |
 | `NEURON_ASR_SHERPA_NUM_THREADS` | (未设置,默认 2) | sherpa-onnx 识别器的线程数 |

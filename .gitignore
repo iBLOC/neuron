@@ -15,3 +15,5 @@ models/**/*.onnx
 .mimosa/
 __pycache__/
 *.pyc
+# Windows shell redirect artifact (a `> nul` that created a file named "nul")
+/nul

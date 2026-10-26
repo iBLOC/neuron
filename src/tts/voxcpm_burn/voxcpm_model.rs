@@ -369,9 +369,15 @@ impl<B: Backend> VoxCPM<B> {
                 .clone()
                 .argmax(stop_data.rank() - 1)
                 .slice_dim(0, 0..1)
+                // The Int dtype is backend-dependent (i64 on ndarray, i32 on
+                // the CUDA backend) and the data reader does not convert, so
+                // cast to i64 before reading it back.
+                .cast(burn::tensor::IntDType::I64)
                 .to_data()
-                .as_slice()
-                .unwrap()[0];
+                .to_vec::<i64>()
+                .ok()
+                .and_then(|v| v.first().copied())
+                .unwrap_or(0);
 
             if i > min_len && stop_flag == 1 {
                 break;
@@ -521,11 +527,16 @@ impl<B: Backend> ScalarQuantizationLayer<B> {
         let hidden = self.in_proj.forward(hidden);
         let hidden = tanh(hidden);
 
+        // The scale multiplies the activations, so it must be a float
+        // scalar: an integer scalar would make the multiply a mixed
+        // int/float op, which the f16 GPU backend rejects ("DTypeMismatch").
+        let scale = self.scale as f32;
+
         let hidden = if B::ad_enabled(&hidden.device()) {
-            let quantized = (hidden.clone() * self.scale as u32).round() / self.scale as u32;
+            let quantized = (hidden.clone() * scale).round() / scale;
             hidden.clone() + (quantized - hidden).detach()
         } else {
-            (hidden * self.scale as u32).round() / self.scale as u32
+            (hidden * scale).round() / scale
         };
         let out = self.out_proj.forward(hidden);
         out
@@ -814,7 +825,10 @@ impl<B: Backend> SinusoidalPosEmb<B> {
         let emb = (Tensor::arange(0..half_dim as i64, &device).float() * -emb)
             .exp()
             .cast(x.dtype());
-        let emb = scale as u32 * x.unsqueeze_dim::<2>(1) * emb.unsqueeze_dim::<2>(0);
+        // The position scale multiplies the activations, so it must be a
+        // float scalar — an integer scalar makes this a mixed int/float op,
+        // which the f16 GPU backend rejects ("DTypeMismatch").
+        let emb = scale as f32 * x.unsqueeze_dim::<2>(1) * emb.unsqueeze_dim::<2>(0);
 
         let e_len = emb.dims().len();
 

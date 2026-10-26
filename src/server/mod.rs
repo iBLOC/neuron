@@ -27,13 +27,14 @@ pub use dispatch::adapter_dispatch;
 pub use dispatch::adapter_dispatch_at;
 pub use error::ServerError;
 pub use handlers::{
-    audio_speech, audio_transcriptions, chat_completions, decisions, embedding_handler, forecast,
-    gate_score, health_handler, info_handler, list_models, rerank, scheduler_evict,
+    audio_speech, audio_speech_stream, audio_transcriptions, chat_completions, decisions,
+    embedding_handler, forecast, gate_score, health_handler, info_handler, list_models, rerank,
+    scheduler_evict,
     ocr_recognize, scheduler_status, vision_classify, vision_detect, vision_lora_list,
     vision_lora_register,
     vision_lora_unregister, vision_pose, vision_segment, ChatCompletionsRequest,
     DecisionHttpRequest, EmbeddingHttpRequest, ModelList, RerankHttpRequest, SpeechRequest,
-    TranscriptionResponse,
+    SpeechStreamRequest, TranscriptionResponse,
 };
 pub use state::ServerState;
 
@@ -73,6 +74,7 @@ pub fn routes() -> Router<ServerState> {
         .route("/v1/catalog/sources", get(crate::models::handlers::list_sources))
         .route("/v1/chat/completions", post(crate::server::dispatch::adapter_dispatch))
         .route("/v1/audio/speech", post(audio_speech))
+        .route("/v1/audio/speech/stream", post(audio_speech_stream))
         .route("/v1/audio/transcriptions", post(audio_transcriptions))
         .route("/v1/rerank", post(rerank))
         .route("/v1/embeddings", post(embedding_handler))

@@ -489,6 +489,13 @@ impl<B: Backend> WNCausalTransposeConv1d<B> {
 
         let norm = v.clone().powf_scalar(2.0).sum_dim(2).sum_dim(1).sqrt();
 
+        // A reduction may accumulate in a wider dtype than the weights (the
+        // CubeCL CUDA backend sums f16 in f32), and the products below need
+        // both operands to share a dtype — otherwise the op builder rejects
+        // the mismatch ("DTypeMismatch"). Cast the norm back to the weight
+        // dtype before dividing.
+        let norm = norm.cast(v.dtype());
+
         let v_hat = v / (norm + 1e-12);
 
         let w = self.weight_g.val() * v_hat;
@@ -583,6 +590,13 @@ impl<B: Backend> WNCausalConv1d<B> {
         let v = self.weight_v.val();
 
         let norm = v.clone().powf_scalar(2.0).sum_dim(2).sum_dim(1).sqrt();
+
+        // A reduction may accumulate in a wider dtype than the weights (the
+        // CubeCL CUDA backend sums f16 in f32), and the products below need
+        // both operands to share a dtype — otherwise the op builder rejects
+        // the mismatch ("DTypeMismatch"). Cast the norm back to the weight
+        // dtype before dividing.
+        let norm = norm.cast(v.dtype());
 
         let v_hat = v / (norm + 1e-12);
 

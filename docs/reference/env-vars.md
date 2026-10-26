@@ -35,6 +35,7 @@ neuron reads its configuration from environment variables on startup. The full m
 | `NEURON_MISTRALRS_ISQ` | `q4_0` | `q4_0` \| `q8_0` \| `none` — in-situ quantization applied by mistral.rs at load time |
 | `NEURON_EMBEDDING_RUNTIME` | (unset) | `candle` — which Embedding engine to load |
 | `NEURON_TTS_RUNTIME` | (unset) | `voxcpm` / `burn` (0.5B, requires `--features voxcpm`) \| `voxcpm2` (2B/48 kHz, same feature; loads upstream checkpoints directly, ~10 GB RAM) |
+| `NEURON_DEVICE` | `auto` | Device for the LLM and TTS engines: `auto` \| `cpu` \| `nvidia` (alias `cuda`) \| `apple` \| `vulkan`. The candle LLM path picks the GPU under `auto`; the **burn** TTS backend stays on the CPU because VoxCPM2's per-patch decode is latency-bound and measured ~6× slower on an RTX 3090 than on a 12-core CPU. With `--features voxcpm-cuda`, `nvidia` runs VoxCPM2 on the GPU (CubeCL kernels, f16). |
 | `NEURON_ASR_RUNTIME` | (unset) | `candle` (Whisper) \| `tract` (SenseVoiceSmall via neuron's own tract ONNX stack, requires `--features tract`) \| `sherpa` (SenseVoiceSmall via the official sherpa-onnx Rust binding, requires `--features sherpa`) |
 | `NEURON_ASR_ONNX_FILE` | (unset) | Override the SenseVoice graph file (e.g. `model.int8.onnx`); ignored by the Whisper runtime |
 | `NEURON_ASR_SHERPA_NUM_THREADS` | (unset, default 2) | Thread count for the sherpa-onnx recognizer |

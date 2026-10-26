@@ -386,8 +386,7 @@ mod tests {
             cond_type: "scale_bias".to_string(),
             cond_dim: 128,
             cond_out_layer: false,
-        }
-    }
+        }    }
 
     #[test]
     fn test_sr_index_matches_torch_bucketize() {
@@ -477,3 +476,7 @@ mod tests {
         }
     }
 }
+
+// The f16 GPU path is covered end-to-end by `voxcpm2_model::cuda_f16_tests`
+// (one CUDA session per process — the CubeCL runtime does not survive a
+// second session on the same device in one process).

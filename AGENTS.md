@@ -1,6 +1,6 @@
 # neuron (神经元) — AGENTS guide
 
-**Status:** READ-ONLY contributor reference. Updated 2026-10-09 (**OCR capability (PP-OCR) landed** — `POST /v1/ocr/recognize`, config-driven registration, tract **and ort** executors behind the `ocr` meta feature (`NEURON_OCR_EXECUTOR`), DB++ postprocess + CTC, multilingual rec packs routed by `languages`, optional PP-DocLayoutV3 layout model (`layout.onnx`, ort only), ort measured 10.3× faster end-to-end, see the "OCR (PP-OCR, loadable)" section; **679 lib tests** default / **739 with `--features tract`** / **715 with `--features ort`** / **750 with `tract,ort`** as of 2026-10-09; prior 2026-09-27 baseline: post-candle 0.11 upgrade per `huggingface/candle.git#aebc405`; post-`f643c1c` LLM auto-registration + USERPROFILE fallback on Windows GUI processes; **VoxCPM2 (2B/48 kHz) local inference landed** — `NEURON_TTS_RUNTIME=voxcpm2`, direct checkpoint load, see the "VoxCPM2 (loadable)" section; **model scheduler landed** — bounded-memory LLM swap queue behind `/v1/chat/completions` + `/v1/messages`, see the "Model scheduler" bullet and `docs/superpowers/specs/2026-09-29-model-scheduler.md`; GitHub Pages CI now base-URL-configured + adds a `lychee` link-check job; prior 2026-09-25 baseline: post-rename `neure → neuron` per commit `e3d2c41` (2026-09-21); `AppState::register_engine` capability per `bccef7c`; earlier 2026-07-19 baseline: license switch + Shadow decoupling).
+**Status:** READ-ONLY contributor reference. Updated 2026-10-26 (**VoxCPM2 GPU backend landed** — `--features voxcpm-cuda` + `NEURON_DEVICE=nvidia` runs the 2B model on an NVIDIA GPU through burn's CubeCL CUDA backend in f16; five latent dtype assumptions the f32 path hid were fixed; the CPU stays the default because VoxCPM2's per-patch decode measured ~6× *slower* on an RTX 3090 than on a 12-core CPU; **701 lib tests** default / **734 with `--features voxcpm`** / **735 with `--features voxcpm-cuda`**; prior 2026-10-25: **TTS model-level streaming landed** — `POST /v1/audio/speech/stream`, VoxCPM2 decodes each latent patch as the model emits it; verified bit-comparable against the full decode on the real `audiovae.pth`; four real-checkpoint load bugs fixed — pth wrapper, VAE module-tree paths, burn-store contiguous index remapping, RoPE head dim — plus the TTS default-shortcut startup panic; prior 2026-10-15: **llama.cpp backend landed** — `NEURON_LLM_RUNTIME=llamacpp`, gated by the `llamacpp` Cargo feature, see the "Llama.cpp (loadable)" section; **681 lib tests** default as of 2026-10-15; prior 2026-10-09 baseline: post-OCR capability (PP-OCR), **679 lib tests** default / **739 with `--features tract`** / **715 with `--features ort`** / **750 with `tract,ort`**; prior 2026-09-27 baseline: post-candle 0.11 upgrade per `huggingface/candle.git#aebc405`; post-`f643c1c` LLM auto-registration + USERPROFILE fallback on Windows GUI processes; **VoxCPM2 (2B/48 kHz) local inference landed** — `NEURON_TTS_RUNTIME=voxcpm2`, direct checkpoint load, see the "VoxCPM2 (loadable)" section; **model scheduler landed** — bounded-memory LLM swap queue behind `/v1/chat/completions` + `/v1/messages`, see the "Model scheduler" bullet and `docs/superpowers/specs/2026-09-29-model-scheduler.md`; GitHub Pages CI now base-URL-configured + adds a `lychee` link-check job; prior 2026-09-25 baseline: post-rename `neure → neuron` per commit `e3d2c41` (2026-09-21); `AppState::register_engine` capability per `bccef7c`; earlier 2026-07-19 baseline: license switch + Shadow decoupling).
 
 ## What neuron is
 
@@ -10,6 +10,7 @@ neuron is a **library-only** Rust crate (no standalone binary) that host process
 - Runs inference using one of 3 ML frameworks (candle / burn / litert)
 - Serves the result on **10+ OpenAI-compatible HTTP endpoints** + 2 liveness endpoints
 - **TTS chunked-transfer streaming** (`stream: true` on `/v1/audio/speech` → `Body::from_stream`)
+- **TTS model-level streaming** (`POST /v1/audio/speech/stream`) — VoxCPM2 decodes each latent patch into audio the moment the model emits it, so the first bytes arrive after one patch instead of after the whole utterance. The legacy `stream: true` on `/v1/audio/speech` is unchanged (full synthesis, then chunked transfer).
 - **ASR multi-format decoding** (WAV, MP3, FLAC, OGG/Vorbis via symphonia, gated by `asr-audio` feature)
 - **SenseVoiceSmall via sherpa-onnx** (`NEURON_ASR_RUNTIME=sherpa`, feature `sherpa`) — the official `sherpa-onnx` Rust binding (https://github.com/k2-fsa/sherpa-onnx, 1.13.x). Recognizer construction, fbank, LFR, CMVN and greedy CTC all live inside onnxruntime-backed C++ (`src/asr/sherpa.rs`).
 - **SenseVoiceSmall via neuron's own tract ONNX stack** (`NEURON_ASR_RUNTIME=tract`, feature `tract`) — kaldi-style fbank (`src/asr/fbank.rs`), LFR stacking + CMVN stats parsed from the graph's `metadata_props` (`src/asr/onnx_meta.rs`), tract forward, in-repo greedy CTC (`src/asr/sensevoice.rs::ctc_greedy`). The export's dynamic PE chain must be moved out via `scripts/prep-sensevoice-onnx.py` first; the script asserts the export's constants and verifies against the original onnxruntime forward (max diff < `1e-3`, argmax equal across T = 37..250). See `docs/superpowers/specs/2026-09-26-sherpa-onnx-asr-backend.md`.
@@ -182,11 +183,184 @@ The OpenBMB 2026-04 release of VoxCPM (2B params, 48 kHz AudioVAE V2, 30 languag
 2. ~~**2B-parameter model config**~~ — landed as `src/tts/voxcpm_burn/voxcpm2_model.rs` (`VoxCPM2Config` serde-mirrors the upstream `config.json`; `VoxCPM2<B>` model). V2 deltas vs the V1 vendored tree: new `fusion_concat_proj` (`Linear(2h → h)`) fusing encoder output + masked feature embed into the residual LM's input; `residual_lm_no_rope: true` (RALM drops RoPE — `MiniCPMConfig::no_rope`, `rope_emb` is now `Option`); LocDiT V2 feeds the LM condition as **two raw prefix tokens** (`cat(lm_to_dit, res_to_dit)` along features, timestep as a separate token, slice offset `prefix + 2 + 1`); patch_size 4; FSQ latent 512; 28L/2048h TSLM (vocab 73448); 12L LocEnc + LocDiT.
 3. ~~**Voice cloning wire format**~~ — `SpeechRequest` gains optional `reference_audio` (base64 / `data:` URI / server-local file path, decoded to mono 16 kHz via `src/tts/clone_audio.rs`, 30 s cap) and `prompt_text` (transcript). Reference-isolation prefix uses sentinel tokens 103/104. **Voice Design needs no new field**: upstream convention is a "(description)" prefix on `input`. Cloning ignores `stream: true` (returns full WAV). Continuation + combined prompt modes exist at the model layer (`ClonePrompt`) but only reference-isolation is wired to HTTP so far.
 4. ~~**Multi-language (30)**~~ — model-side; no `lang` field needed (upstream auto-detects from text; the multichar-Chinese tokenizer wrapper `VoxCpm2Tokenizer` splits pure-CJK multi-char vocab entries per char, mirroring upstream `mask_multichar_chinese_tokens`).
-5. **Streaming override — pipeline landed, HTTP wiring blocked on fidelity**: `VoxCPM2::generate_streaming` (per-step latent-patch callback) and `audiovae_v2_stream::StreamingVaeDecoder` (per-conv left-context state, mirroring upstream `StreamingVAEDecoder`) are implemented and unit-tested for structure (lengths, state-slot parity, finiteness). NOT wired into `TtsRuntime::synthesize_stream` yet: on the ndarray backend the streamed waveform deviates from the full decode beyond the benign per-chunk boundary-tap error (burn conv view/layout sensitivity under investigation — materializing weights and pad/slice buffers fixes most of it; a residual random-weight deviation remains). The trait default (full synthesis chunked into 16 KiB) keeps `stream: true` fidelity-safe.
+5. ~~**Streaming override — pipeline landed, HTTP wiring blocked on fidelity**~~ — **wired and verified (2026-10-25)**. The old blocker was an artifact of the unit test's randomly-initialized toy weights: the per-chunk boundary taps get amplified through the upsampling stages, so that test could not assert fidelity. On the shipped `audiovae.pth` the streamed decode reproduces the full decode essentially bit-for-bit (measured with `examples/voxcpm2_stream_smoke.rs`): **stage A** (real-encoder latent) max_abs_diff 6.3e-6 / 9.4e-6, pearson r = 0.999999, identical sample count; **stage B** (2B-LM-generated latent) max_abs_diff 7.6e-7, pearson r = 1.000000. The endpoint is `POST /v1/audio/speech/stream` (`src/server/handlers.rs::audio_speech_stream`); the trait method is `TtsRuntime::synthesize_stream_incremental` (`src/tts/mod.rs`), overridden by `VoxCpm2TtsRuntime` (`src/tts/voxcpm2.rs`). `response_format` picks the container: `wav` (default — 44-byte header with `0xFFFFFFFF` placeholder sizes, the standard streamed-WAV convention) or `pcm` (raw 16-bit LE mono). The legacy `/v1/audio/speech` `stream: true` path is **unchanged** (full synthesis, then 16 KiB chunked transfer) so existing hosts see byte-identical output.
+
+**End-to-end HTTP numbers** (`examples/voxcpm2_stream_http_smoke.rs`, real checkpoint, 12-core desktop CPU): first byte after **51.6 s** on the streaming endpoint vs **651.0 s** on `/v1/audio/speech` — a **12.6×** first-byte speedup — and both responses carried **exactly 92 204 bytes** (8 streamed chunks over 430 s), an end-to-end confirmation that the streamed audio is the same audio. Absolute latency is CPU-bound: the 2B model generates ~111 s per latent patch on an ndarray CPU backend, so the streaming win is "hear the first syllable 12× sooner", not "realtime" — a CUDA backend is what turns that into actual realtime.
 
 **Weights load directly — no conversion**: `src/tts/voxcpm_burn/weights.rs` reads `model.safetensors` (SafetensorsStore) / `audiovae.pth` (PytorchStore) via burn-store's snapshot API and adapts per tensor: bf16/fp32 → f32 (ndarray has no bf16 matmul), PyTorch `[out,in]` → burn 0.21 `[in,out]` Linear transpose (2-D `*.weight` not containing `embed`), norm `*.weight` → `*.inner.gamma` rewrite, and `apply(..., skip_enum_variants=true)` to bridge PyTorch's flat `decoder.model.N.…` paths to burn's enum-wrapped module tree. Required model dir: `config.json` + `tokenizer.json` + `model.safetensors` (4.58 GB bf16) + `audiovae.pth` (377 MB fp32) — exactly the upstream download. **Budget ~10 GB RAM** (2.29B params as f32). The registry dispatches `model_id == "voxcpm2"` → `VoxCpm2TtsRuntime` under the shared `TtsImpl::Burn`; `NEURON_TTS_RUNTIME=voxcpm2` registers the catalog id.
 
+**Real-checkpoint load fixes (2026-10-25)** — the "loads upstream checkpoints directly" claim was never exercised against the real files until the streaming smoke pulled `openbmb/VoxCPM2` from ModelScope. Three loader bugs and one model bug surfaced; all are fixed:
+
+1. **`.pth` wrapper** — upstream ships `audiovae.pth` as a Lightning-style `{metadata: {...}, state_dict: {...}}`, not a flat state dict. The loader now tries `with_top_level_key("state_dict")` first and falls back to the flat read (burn-store errors with `KeyNotFound` rather than falling back itself).
+2. **VAE module tree** — upstream nests the decoder under `decoder.model.N` and the sample-rate conditioning under `decoder.sr_cond_model.N`; neuron's burn tree keeps them as siblings (`decoder` / `sr_cond_model`). `remap_vae_path` rewrites the prefixes. The LM checkpoint (`model.safetensors`) has no `decoder.*` keys at all, so the rewrite is a no-op there (verified: 577 tensors applied, 0 missing, 0 unused).
+3. **Contiguous index remapping** — burn-store's `PytorchStore` defaults to `map_indices_contiguous(true)`, which compacts the gaps in upstream's VAE lists and shifts every sample-rate-conditioning tensor onto the wrong decoder stage. The loader now calls `.map_indices_contiguous(false)`.
+4. **RoPE head dim** (`src/tts/voxcpm_burn/minicpm4.rs`) — `MiniCPMConfig::init` built the RoPE cache from `hidden_size / num_attention_heads` while the attention projections use `kv_channels` as the head dim. For the VoxCPM2 encoder/DiT stacks (hidden 1024 / 16 heads = 64 vs `kv_channels` = 128) the `inv_freq` length (32) then mismatched the `short_factor`/`long_factor` length (64) and the cache build panicked with a broadcast error. The rope config now receives `kv_channels`.
+
+**TTS default shortcut** — `TtsRuntimeRegistry::default_runtime` used `Handle::block_on` to load the first registered model, which panics with "Cannot start a runtime from within a runtime" inside `ServerState::new` (i.e. in every host that embeds neuron in a tokio runtime). The registry now exposes `lazy_default_runtime()`, handing out a proxy that resolves the model on the first async call — the same lazy-load intent, no startup panic.
+
+**GPU backend (burn CUDA / CubeCL)** — the VoxCPM2 runtime is backend-generic: `LoadedVoxCpm2` is an enum with one arm per burn backend, and the inference bodies live in generic helpers (`synthesize_generic`, `stream_generic`). Build with `--features voxcpm-cuda` (adds `burn/cuda`) and set `NEURON_DEVICE=nvidia` (alias `cuda`) to run the 2B model on the GPU. **The default stays on the CPU** (`NEURON_DEVICE=auto` → CPU): measured on an RTX 3090 against a 12-core desktop CPU, the first audio byte of the same utterance arrived after **708 s on the GPU versus 112 s on the CPU**. VoxCPM2's autoregressive decode advances one latent patch (4 frames) per step, so the work is latency-bound rather than throughput-bound and the GPU's per-op launch overhead dominates. The GPU path also hit `CUDA_ERROR_ILLEGAL_ADDRESS` in a CubeCL kernel on the full 2B model (the tiny model runs clean), so it is opt-in, not a default.
+
+The GPU path runs the model in **f16** (`burn::backend::cuda::Cuda<f16, i32>`): the f32 weights need ~9.2 GB of VRAM, which does not fit next to a desktop compositor's allocation on a 24 GB card, while f16 needs ~4.6 GB and roughly doubles the matmul throughput. The upstream checkpoint ships bf16, so f16 is not a precision regression for the weights.
+
+Notes for the CUDA path:
+
+- **No build-time CUDA toolkit** — `cubecl-cuda` uses cudarc with `driver` + `nvrtc` + `fallback-dynamic-loading`, so the driver is enough to build. At runtime the CUDA toolkit's `bin` directory must be on `PATH` so NVRTC can be loaded (same rule as the candle CUDA path).
+- **The device's float dtype is set once, before anything touches the device** — burn's `set_default_dtypes` only accepts the first call per device (see `configure_cuda_device`).
+- **f16 exposed dtype assumptions the f32 path never had.** Five fixes were needed, all of them latent bugs that the f32 CPU path hid:
+  1. A reduction may accumulate in a wider dtype than the weights (the CubeCL backend sums f16 in f32), so the weight normalization in `WNCausalConv1d` / `WNCausalTransposeConv1d` casts the norm back to the weight dtype — otherwise the product is rejected as a dtype mismatch.
+  2. Integer scalars mixed with float tensors (`self.scale as u32` in the FSQ layer, the RoPE position scale) are int/float ops; they must be float scalars.
+  3. `Tensor::from_floats` always produces f32 data — the RoPE cache (`inv_freq`, the LongRoPE factors) has to be cast to the device's float dtype or the rotary multiply mismatches.
+  4. `apply_rotary_pos_emb` forced the queries to f32 while the cache stayed f16; the rotary math now runs in the tensors' own dtype (identical behaviour on the f32 path).
+  5. The Int dtype is backend-dependent (i64 on ndarray, i32 on CUDA) and burn's data reader does **not** convert, so the stop head's `argmax` result is cast to i64 before it is read back.
+- **One CUDA session per process** — the CubeCL runtime does not survive a second session on the same device in one process, so the GPU test lives in a single test (`voxcpm2_model::cuda_f16_tests`).
+- The `cuda` feature (candle's) and `voxcpm-cuda` (burn's) are independent: combine them as `--features cuda,voxcpm-cuda` to put both the LLM and the TTS on the GPU.
+
 **Test strategy (no 4.58 GB weights in CI)**: `weights.rs` builds a PyTorch-style fixture from a random-init burn module (invert each adaptation, serialize via the `safetensors` dev-dep) and asserts `load_checkpoint_into` restores every tensor bit-exact; `voxcpm2_model.rs` runs **end-to-end tiny generate** (structural config, ~30 s of ndarray CPU) through zero-shot and reference-prompt paths down to the V2 VAE decode.
+
+### Llama.cpp (loadable, 2026-10-15)
+
+`NEURON_LLM_RUNTIME=llamacpp` registers a [ggerganov/llama.cpp](https://github.com/ggerganov/llama.cpp) backend via the safe Rust binding [`llama-cpp-2`](https://github.com/utilityai/llama-cpp-rs) (v0.1.159, MIT/Apache-2.0). One GGUF file is the whole story — 40+ model families load directly (Qwen 2/3, Llama 2/3, Mistral, DeepSeek, GLM, Phi 4, Gemma 2/3, Yi, Mixtral, DBRX, Command-R, ...) with no safetensors→GGUF conversion. Auto-applies the GGUF's embedded chat template when present (so Qwen2.5-Instruct gets `<|im_start|>` framing, Llama-3-Instruct gets `<|start_header_id|>`, Mistral-Instruct gets `[INST]`, etc.); falls back to ChatML for the pre-2024 GGUFs that omitted `tokenizer.chat_template` metadata.
+
+**Build prereq** (gated behind the `llamacpp` Cargo feature — default builds are unaffected):
+
+| Tool | Windows | Linux | macOS |
+|---|---|---|---|
+| `cmake` | Visual Studio 2022 Build Tools + cmake on PATH | `apt install cmake` / `dnf install cmake` | `brew install cmake` |
+| C++ compiler | MSVC `cl.exe` (from VS Build Tools) | `gcc` / `clang` | Xcode CLT |
+| `libclang` | `winget install LLVM` (for bindgen) | `apt install libclang-dev` | Xcode CLT (ships `libclang.dylib`) |
+
+`cargo build --features llamacpp` on a host missing any of these fails inside `llama-cpp-sys-2`'s build script with a clear "cmake not found" / "no C++ compiler" / "couldn't find libclang" error pointing at the missing tool. **Default `cargo build` is unaffected** — the dep is `optional = true` and the entire `src/llm/llamacpp_runtime.rs` module is `#[cfg(feature = "llamacpp")]`-gated.
+
+**Activation**:
+
+```bash
+# 1. Build (one-time, needs the toolchain above):
+cargo build --release --features llamacpp
+
+# 2. Pre-stage a GGUF (the runtime does NOT download weights):
+mkdir -p ~/.neuron/models/llamacpp/qwen2.5-7b-instruct
+# download Qwen2.5-7B-Instruct-Q4_K_M.gguf into that directory as model.gguf
+
+# 3. Run with the env-var:
+NEURON_LLM_RUNTIME=llamacpp \
+  NEURON_LLM_DEFAULT_MODEL=qwen2.5-7b-instruct \
+  NEURON_MODEL_DIRS=~/.neuron/models \
+  ./target/release/your-host-binary
+```
+
+**Model id resolution** (in `LlamaCppLlmRuntime::resolve_gguf_path`):
+
+1. Absolute path that exists on disk → use it.
+2. Relative path that exists on disk → use it (canonicalized).
+3. Bare id → search `$NEURON_MODEL_DIRS/llamacpp/<id>/model.gguf`, then `$NEURON_MODEL_DIRS/candle/<id>/model.gguf` (legacy conv for the candle-era path layout). The first hit wins.
+
+**Sampling**: greedy by default; non-greedy requests (`temperature > 0`) get a chain of `penalties → top-K → top-P → temperature → dist` mirroring `examples/simple.cpp` in upstream llama.cpp. The same request with the same `stop` list always lands on the same seed (deterministic per request shape).
+
+**GPU offload**:
+
+| `DeviceSelection` | `n_gpu_layers` |
+|---|---|
+| `Auto` | 0 (CPU; matches candle's `Auto` default) |
+| `Cpu` | 0 |
+| `Cuda` / `Apple` / `Vulkan` | `u32::MAX` (full offload) |
+| any | overridden by `NEURON_LLAMA_CPP_GPU_LAYERS=<n>` for partial offload |
+
+**Context size**: `NEURON_LLAMA_CPP_N_CTX` (default `2048`). Each `chat()` / `chat_stream()` call creates a fresh `LlamaContext` (the llama-cpp-2 design is one context per stream of inference; the model + backend are shared via `Arc`); KV-cache memory per in-flight request = `n_ctx × n_layers × 2 × head_dim × sizeof(half)`. For a 7B f16 model at 2048 ctx that's ~1 GiB — drop the count on small-VRAM hosts.
+
+**Wired endpoints**: `/v1/chat/completions` (chat + stream), `/v1/messages` via `adapter_dispatch` (Anthropic compat), `/v1/models` (one `ModelInfo` per registered id, `owned_by = "llamacpp"`). `/v1/embeddings`, `/v1/rerank`, vision endpoints are not served by this backend (use the candle / sherpa / vision runtimes for those).
+
+**Catalog registration**: each id in `SUPPORTED_CATALOG` can ship a `llamacpp` source via the `CatalogEntry.sources` vector; the catalog itself doesn't add LlamaCpp entries by default — `NEURON_LLM_RUNTIME=llamacpp + NEURON_LLM_DEFAULT_MODEL=<id>` is the documented registration path (mirrors how `mistralrs` is wired).
+
+**Not yet wired**: tool use (capabilities() reports `supports_tools = false`; ChatML fallback coerces unknown roles to user), prompt caching (capabilities() reports `supports_prompt_caching = false`; every chat call pays prompt prefill), extended thinking, audio input. Adding these is the obvious follow-up — the llama.cpp side has the `mtmd` audio path and the `llguidance` grammar (tool / JSON) feature available behind optional `llama-cpp-2` features. **Multimodal image input is wired** — see "MiniCPM-V 4.7 via llamacpp mtmd (loadable, 2026-10-15)" below.
+
+### MiniCPM-V 4.7 via llamacpp mtmd (loadable, 2026-10-15)
+
+The llama.cpp backend now serves multimodal image input through llama-cpp-2's `mtmd` feature — `NEURON_LLAMA_CPP_MMPROJ` (or auto-discovery) loads a vision-projector GGUF, and `POST /v1/chat/completions` with OpenAI's `image_url` content blocks flows through `MtmdBitmap::from_buffer` → `MtmdContext::tokenize` → `MtmdInputChunks::eval_chunks` → the existing generation loop. `MiniCPM-V 4.7` (OpenBMB, 2026-10-12, 35B-A3B + 1B variants) is the first upstream model that works end-to-end through this path (llama.cpp's `PROJECTOR_TYPE_MINICPMV4_7` was merged before the model release).
+
+**Build**: the `llamacpp` feature now always pulls `llama-cpp-2` with the `mtmd` feature flag enabled, so the same toolchain prereq as the base llama.cpp backend (cmake + C++ compiler + libclang on PATH) gets you multimodal too — no extra flag to remember.
+
+**Activation**:
+
+```bash
+# 1. Build (one-time):
+cargo build --release --features llamacpp
+
+# 2. Stage the GGUF + mmproj side by side:
+mkdir -p ~/.neuron/models/llamacpp/minicpm-v-4.7-1b
+#   text GGUF     -> ~/.neuron/models/llamacpp/minicpm-v-4.7-1b/model.gguf
+#   mmproj GGUF   -> ~/.neuron/models/llamacpp/minicpm-v-4.7-1b/mmproj-MiniCPM-V-4.7-f16.gguf
+
+# 3. Run (server detects the mmproj at load; capabilities() reports ImageInput):
+NEURON_LLM_RUNTIME=llamacpp \
+  NEURON_LLM_DEFAULT_MODEL=minicpm-v-4.7-1b \
+  NEURON_MODEL_DIRS=~/.neuron/models \
+  ./target/release/your-host-binary
+
+# 4. Send a multimodal request (OpenAI shape):
+#   POST /v1/chat/completions
+#   {
+#     "model": "minicpm-v-4.7-1b",
+#     "messages": [{
+#       "role": "user",
+#       "content": [
+#         {"type": "text", "text": "What's in this image?"},
+#         {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBOR..."}}
+#       ]
+#     }]
+#   }
+```
+
+**mmproj auto-discovery** (in `LlamaCppLlmRuntime::load`): in priority order,
+
+1. `$NEURON_LLAMA_CPP_MMPROJ` (absolute or relative; relative resolved against CWD, not the text-GGUF dir).
+2. `<text-gguf-dir>/mmproj-*.gguf` (HF llama.cpp convention — most converted VLM GGUFs ship under this prefix).
+3. `<text-gguf-dir>/model.mmproj.gguf` (alternative).
+4. `<text-gguf-dir>/mmproj.gguf` (bare convention).
+
+If none of these resolve, the runtime loads as a text-only LLM (capabilities() reports `ImageInput = false`) and `chat_with_media` returns a clear "no mmproj found" error. A second `model.gguf` (text + a quantized variant) is not mistaken for an mmproj — the `mmproj-` prefix is the marker.
+
+**Trait shape** (load-bearing extension; see `docs/superpowers/specs/2026-10-15-minicpm-v-47-via-llamacpp-mtmd.md`):
+
+```rust
+// src/llm/mod.rs — default impl returns not_implemented; only
+// LlamaCppLlmRuntime overrides.
+async fn chat_with_media(
+    &self,
+    req: ChatRequest,
+    media: Vec<MediaAttachment>,
+) -> ChatResult<ChatResponse>;
+
+// src/engine/mod.rs — same default-fallback pattern.
+async fn execute_with_media(
+    &self,
+    req: CanonicalLlmRequest,
+    media: Vec<MediaAttachment>,
+) -> ChatResult<CanonicalLlmResponse>;
+```
+
+**Wire format on the request side** (the adapter already has this for Anthropic compat; the multimodal path reuses the same `ContentBlock::Image(ImageBlock)` shape):
+
+```jsonc
+{
+  "role": "user",
+  "content": [
+    {"type": "text",      "text": "..."},
+    {"type": "image_url", "image_url": {"url": "data:image/png;base64,...", "detail": "high"}}
+  ]
+}
+```
+
+`dispatch.rs::extract_media` walks every user message, base64-decodes `ImageSource::Base64` to bytes, and routes through `execute_with_media` / `execute_with_media_stream`. v1 supports `ImageSource::Base64` only; `ImageSource::Url` and `ImageSource::FileId` are rejected at the translator with a clear "set `NEURON_MEDIA_FETCH_HOST_ALLOWLIST` for http(s) fetch" or "pre-resolve to Base64" error rather than silently dropping the image.
+
+**Not yet wired (v1 multimodal scope)**:
+
+- `ImageSource::Url` (http(s) fetch) — needs an http client + Mimosa-style host allowlist. The env-var knob is named (`NEURON_MEDIA_FETCH_HOST_ALLOWLIST`) but the fetch path is not implemented in this commit; pre-decode to a `data:` URI in the caller.
+- `ImageSource::FileId` — host-private file abstraction; pre-resolve in the adapter.
+- Audio input (`MtmdBitmap::from_audio_data` is plumbed through mtmd; capabilities() reports `AudioInput = false` so the adapter short-circuits).
+- KV-cache prefix reuse across `eval_chunks` — every multimodal call pays full prefill; no `supports_prompt_caching` flag flip yet.
+- Tool calls — `llama-cpp-2`'s `llguidance` feature is the path; not enabled.
+
+**Multi-image / multi-turn**: OpenAI allows multiple `image_url` blocks per user message; `extract_media` preserves order and the mtmd marker substitution places one `<__media__>` per image in the text stream. KV cache is fresh per request (no prefix reuse), so multi-turn conversations still pay the full image+text prefill on every chat call.
 
 ## Architectural rules (DO NOT BREAK)
 
@@ -216,6 +390,7 @@ The OpenBMB 2026-04 release of VoxCPM (2B params, 48 kHz AudioVAE V2, 30 languag
    - `GET /v1/models/pull/{job_id}`, `DELETE /v1/models/pull/{job_id}` — query / cancel
    - `GET /v1/models/{engine}/{id}`, `DELETE /v1/models/{engine}/{id}` — local model file introspection / deletion
    - `POST /v1/chat/completions`, `POST /v1/audio/speech`, `POST /v1/audio/transcriptions`, `POST /v1/rerank`, `POST /v1/embeddings` — OpenAI-compat inference
+   - `POST /v1/audio/speech/stream` — model-level streaming TTS (VoxCPM2): audio bytes arrive as the model produces them, not after the whole utterance
    - `POST /v1/vision/detect`, `/classify`, `/segment`, `/pose` — Vision tasks
    - `POST /v1/vision/lora/register`, `GET /v1/vision/lora/list` — LoRA management
    - `POST /v1/ocr/recognize` — PP-OCR text detection + recognition (lines + boxes + reading order)
@@ -228,7 +403,7 @@ The OpenBMB 2026-04 release of VoxCPM (2B params, 48 kHz AudioVAE V2, 30 languag
 
 8. **Each capability uses a `*RuntimeRegistry`** (e.g. `LlmRuntimeRegistry`) that holds registered model entries, a loaded-instance cache, and a `ResourceTracker`. Handlers route via `runtime_for(model_id)` which lazy-loads on first request. `ServerState` keeps both the registry (primary) and shortcut fields (backward compat).
 
-9. **TTS trait has a default `synthesize_stream` impl** that yields 16 KiB chunks of the synthesized audio. Runtimes only need to override it if they can stream from the model itself. The `/v1/audio/speech` handler respects the request's `stream: bool` field; `false` (default) returns the full audio as a single response body, `true` returns axum `Body::from_stream` with chunked transfer encoding.
+9. **TTS trait has a default `synthesize_stream` impl** that yields 16 KiB chunks of the synthesized audio. Runtimes only need to override it if they can stream from the model itself. The `/v1/audio/speech` handler respects the request's `stream: bool` field; `false` (default) returns the full audio as a single response body, `true` returns axum `Body::from_stream` with chunked transfer encoding. **Model-level streaming is a separate trait method** — `TtsRuntime::synthesize_stream_incremental(text, TtsStreamOptions)` — because it needs a container choice (`TtsStreamFormat::Wav` | `Pcm`) and an optional voice-clone reference; the default impl falls back to the full-synthesis path so runtimes without model-level streaming keep working. It is served by `POST /v1/audio/speech/stream`.
 
 10. **ASR audio decoding is feature-gated** behind `asr-audio` (opt-in). Without it, only the manual WAV decoder is compiled in. The `detect_format` function in `src/asr/audio.rs` sniffs magic bytes; `decode_to_pcm16k_mono` is the single entry point for all formats.
 
@@ -329,15 +504,20 @@ points if you touch it:
 
 ```bash
 cargo test --lib                                  # 679 unit tests (src/**/mod.rs) — 0 failures (2026-10-09; +15 OCR capability/DTO/registry/handler tests on the 2026-10-08 baseline of 664)
-cargo test --lib --features voxcpm                # 709 unit tests — 0 failures (VoxCPM2 adds the weights/model/runtime/clone-audio/streaming suites; two pre-existing V1 audiovae roundtrip tests are slow, ~5 min, on ndarray)
+cargo test --lib --features voxcpm                # 734 unit tests — 0 failures (VoxCPM2 adds the weights/model/runtime/clone-audio/streaming suites; two pre-existing V1 audiovae roundtrip tests are slow, ~5 min, on ndarray)
+cargo test --lib --features voxcpm-cuda           # 735 unit tests — 0 failures (adds the f16 GPU stack test; needs an NVIDIA GPU + the CUDA toolkit's bin on PATH)
 cargo test --lib --features tract                 # 739 unit tests — 0 failures (tract adds the decision + vision-ONNX + sensevoice paths + the full PP-OCR pipeline suites: DB++ postprocess, CTC decode, preprocess, paddle runtime)
 cargo test --lib --features ort                   # 715 unit tests — 0 failures (the PP-OCR pipeline suites on the ort executor + the layout suites; needs ORT_DYLIB_PATH only for the runtime, not the tests)
 cargo test --lib --features tract,sherpa          # 695 unit tests — 0 failures (sherpa adds SherpaAsrRuntime + from_dir + the wav/onnx_meta/fbank/sensevoice coverage)
 cargo build --bench asr_speed --features tract,sherpa  # in-process tract-vs-sherpa benchmark compiles
 cargo bench  --bench asr_speed --features tract,sherpa  # writes target/asr-speed-compare.md
+cargo build --bench llamacpp_speed --features llamacpp  # in-process llama.cpp backend benchmark compiles (needs cmake + C++ toolchain + libclang on PATH)
+cargo bench  --bench llamacpp_speed --features llamacpp  # writes target/llamacpp-speed.md (set NEURON_LLAMACPP_MODEL_PATH=/path/to/model.gguf)
 cargo build --bench model_matrix --features "candle,tract,sherpa,voxcpm"  # per-cap × per-engine matrix harness compiles
 cargo bench  --bench model_matrix --features "candle,tract,sherpa,voxcpm"  # writes target/model-matrix.md (requires neuron_server on :18083)
 cargo run --release --example scheduler_smoke --features candle  # optional real-weights scheduler verification: coexistence + drain-then-swap + admin evict + RSS observation (needs 2 downloaded LLM models)
+cargo run --release --example voxcpm2_stream_smoke --features voxcpm  # real-weights streaming-vs-full decode comparison (needs the openbmb/VoxCPM2 download; --with-lm adds the 2B LM stage)
+cargo run --release --example voxcpm2_stream_http_smoke --features voxcpm  # end-to-end HTTP check of POST /v1/audio/speech/stream: first-byte latency vs the legacy endpoint
 cargo build --lib                                 # library-only build (no standalone binary)
 cargo bench --no-run --bench perf                 # 14 Criterion benchmarks compile
 cargo bench --bench perf -- --quick               # fast CI smoke
@@ -411,13 +591,19 @@ neuron has **no direct dependency** on any particular host — the integration c
 | `NEURON_MODELSCOPE_CLI` | (auto, on PATH) | Path to `modelscope-cli` binary for `ModelScopeSource` |
 | `HF_TOKEN` | (unset) | Bearer token sent on every HuggingFace / hf-mirror HTTP download. Empty / unset is fine — `reqwest` simply omits the header. Used to un-gate private repos. |
 | `MODELSCOPE_TOKEN` | (unset) | Bearer token sent on every ModelScope HTTP download. Same semantics as `HF_TOKEN`. |
-| `NEURON_LLM_RUNTIME` | (unset) | `candle` \| `litert` \| `mistralrs` — which LLM engine to load |
+| `NEURON_LLM_RUNTIME` | (unset) | `candle` \| `litert` \| `mistralrs` \| `llamacpp` — which LLM engine to load. `llamacpp` requires the `llamacpp` Cargo feature (`cmake` + C++ toolchain + `libclang` on PATH) and a local GGUF file at the resolved path; see the "Llama.cpp (loadable)" section. |
 | `NEURON_LLM_DTYPE` | `f32` | `f32` \| `f16` \| `bf16` — storage dtype the candle runtime materialises weights (and the Llama KV cache) in. `f16`/`bf16` halve resident weight memory. candle's CPU backend has **no BF16 matmul** (loads but fails forward), so `f16` is the memory-lean choice on CPU; F32 for a 2B model is ~10 GB resident and pages on a 16 GB host. |
 | `NEURON_MISTRALRS_ISQ` | `q4_0` | `q4_0` \| `q8_0` \| `none` — in-situ quantization applied by mistral.rs at load time |
+| `NEURON_LLAMA_CPP_N_CTX` | `2048` | Llama.cpp context length (tokens) for KV-cache sizing. Each `chat()` / `chat_stream()` call allocates a fresh context sized by this. Set lower on small-VRAM hosts (a 7B f16 model needs ~1 GiB at 2048). |
+| `NEURON_LLAMA_CPP_GPU_LAYERS` | (auto from `DeviceSelection`) | Override GPU layer offload count for the llama.cpp backend. `0` = full CPU; `u32::MAX` = full GPU offload; integer in between = partial offload. Ignored unless `NEURON_LLM_RUNTIME=llamacpp`. |
+| `NEURON_LLAMA_CPP_FORCE_CHATML` | (unset) | When `1` / `true` / `TRUE`, skip the GGUF's embedded chat template and render every request through the ChatML fallback (`<|im_start|>` framing). Useful for testing model behaviour under a known prompt format. |
+| `NEURON_LLAMA_CPP_MMPROJ` | (unset) | Override path to a vision-projector GGUF (mmproj) for multimodal requests. Default auto-discovery searches `<text-gguf-dir>/mmproj-*.gguf` then `<dir>/model.mmproj.gguf` then `<dir>/mmproj.gguf`. When unset and no co-located mmproj is found, the runtime loads as text-only. |
+| `NEURON_MEDIA_FETCH_HOST_ALLOWLIST` | (unset) | Comma-separated host allowlist for `ImageSource::Url` http(s) fetches in the multimodal path. **Not yet implemented in v1** — declared for future use; v1 only accepts `data:` URIs via `ImageSource::Base64`. |
 | `NEURON_EMBEDDING_RUNTIME` | (unset) | `candle` — which Embedding engine to load |
 | `NEURON_EMBEDDING_MODEL_PATH` | (unset) | Path to the Embedding model directory (must contain `config.json` + `tokenizer.json` + `model.safetensors`) |
 | `NEURON_LLM_MODEL_PATH` | (unset) | Path to the LLM model directory (must contain `config.json` + `tokenizer.json` + `*.safetensors`) |
 | `NEURON_TTS_RUNTIME` | (unset) | `voxcpm` / `burn` (0.5B, requires `--features voxcpm`) \| `voxcpm2` (2B/48 kHz, same feature; loads upstream checkpoints directly, ~10 GB RAM) |
+| `NEURON_DEVICE` | `auto` | Device for the LLM and TTS engines: `auto` \| `cpu` \| `nvidia` (alias `cuda`) \| `apple` \| `vulkan`. `auto` picks the GPU for the candle LLM path; the **burn** TTS backend stays on the CPU because VoxCPM2's per-patch decode is latency-bound and measured ~6× slower on an RTX 3090 (see the "GPU backend" note in the VoxCPM2 section). `nvidia` puts VoxCPM2 on the GPU when built with `--features voxcpm-cuda`. |
 | `NEURON_TTS_MODEL_PATH` | (unset) | Path to the TTS model directory. 0.5B: pre-converted burn `.mpk` weights (`config.json` + `tokenizer.json` + `model.mpk` + `audiovae.mpk`). VoxCPM2: the upstream `openbmb/VoxCPM2` download (`config.json` + `tokenizer.json` + `model.safetensors` + `audiovae.pth`) |
 | `NEURON_ASR_RUNTIME` | (unset) | `candle` (Whisper) \| `tract` (SenseVoiceSmall via neuron's own tract ONNX stack) \| `sherpa` (SenseVoiceSmall via the official sherpa-onnx Rust binding) |
 | `NEURON_ASR_MODEL_PATH` | (unset) | Path to the ASR model directory (SenseVoiceSmall needs `model.onnx` + `tokens.txt`; tract path also wants the `model.prepped.onnx` produced by `scripts/prep-sensevoice-onnx.py`) |

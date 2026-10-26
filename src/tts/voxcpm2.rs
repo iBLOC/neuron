@@ -15,15 +15,29 @@
 //! Enable with `NEURON_TTS_RUNTIME=voxcpm2` and `NEURON_TTS_MODEL_PATH`
 //! pointing at a directory containing `config.json` + `tokenizer.json` +
 //! `model.safetensors` + `audiovae.pth` (e.g. the `openbmb/VoxCPM2` download).
-//! Materialized weights are f32: budget **~10 GB RAM** for the 2B model.
+//! Materialized weights are f32: budget **~10 GB RAM** (or VRAM) for the 2B
+//! model.
+//!
+//! The backend follows `NEURON_DEVICE`: the CPU (ndarray) backend by
+//! default, or the GPU (burn's CubeCL CUDA backend) with
+//! `--features voxcpm-cuda` and `NEURON_DEVICE=nvidia`. `auto` prefers the
+//! GPU when the CUDA runtime is usable and falls back to the CPU otherwise.
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 #[cfg(feature = "voxcpm")]
 use burn::backend::ndarray::{NdArray, NdArrayDevice};
+#[cfg(feature = "voxcpm-cuda")]
+use burn::backend::{cuda::CudaDevice, cuda::Cuda as CudaBackend};
+#[cfg(feature = "voxcpm-cuda")]
+use burn::tensor::f16;
+#[cfg(feature = "voxcpm")]
+use burn::prelude::Backend;
 
 use async_trait::async_trait;
+use bytes::Bytes;
+use futures_util::stream::BoxStream;
 
 use crate::config::{ensure_dir, DeviceSelection};
 use crate::llm::{ChatResult, NeuronError};
@@ -31,23 +45,66 @@ use crate::llm::{ChatResult, NeuronError};
 #[cfg(feature = "voxcpm")]
 use super::voxcpm_burn::{
     audiovae_v2::AudioVaeV2,
+    audiovae_v2_stream::StreamingVaeDecoder,
     voxcpm2_model::{ClonePrompt, GenerationOptions, VoxCpm2Tokenizer, VoxCPM2, VoxCPM2Config},
     weights::load_checkpoint_into,
+    weights::load_checkpoint_into_with_dtype,
 };
 
 use super::{TtsAudio, TtsRuntime, VoiceInfo};
+
+/// The GPU backend: burn's CubeCL CUDA backend in **f16**.
+///
+/// f16 rather than f32 because the 2B model materialized as f32 needs
+/// ~9.2 GB of VRAM, which does not fit next to a desktop compositor's
+/// allocation on a 24 GB card; f16 halves it to ~4.6 GB and roughly
+/// doubles the matmul throughput. The upstream checkpoint ships bf16, so
+/// f16 is not a precision regression for the weights.
+#[cfg(feature = "voxcpm-cuda")]
+type CudaF16 = CudaBackend<f16, i32>;
 
 pub struct VoxCpm2TtsRuntime {
     inner: Mutex<Option<LoadedVoxCpm2>>,
 }
 
+/// The loaded model, on whichever burn backend the device selection picked.
+///
+/// burn's backend is a compile-time type, so a runtime-selectable device
+/// needs one enum arm per backend; the actual inference code lives in
+/// generic helpers ([`synthesize_generic`], [`stream_generic`]) that both
+/// arms call.
 #[cfg(feature = "voxcpm")]
-struct LoadedVoxCpm2 {
-    model: Arc<Mutex<VoxCPM2<NdArray>>>,
-    audio_vae: Arc<AudioVaeV2<NdArray>>,
-    tokenizer: Arc<VoxCpm2Tokenizer>,
-    /// Output sample rate — 48 kHz for the shipped VoxCPM2 codec.
-    sample_rate: u32,
+#[derive(Clone)]
+enum LoadedVoxCpm2 {
+    NdArray {
+        model: Arc<Mutex<VoxCPM2<NdArray>>>,
+        audio_vae: Arc<AudioVaeV2<NdArray>>,
+        tokenizer: Arc<VoxCpm2Tokenizer>,
+        device: NdArrayDevice,
+        /// Output sample rate — 48 kHz for the shipped VoxCPM2 codec.
+        sample_rate: u32,
+    },
+    /// CUDA backend (CubeCL kernels, f16) — enabled by the `voxcpm-cuda`
+    /// feature.
+    #[cfg(feature = "voxcpm-cuda")]
+    Cuda {
+        model: Arc<Mutex<VoxCPM2<CudaF16>>>,
+        audio_vae: Arc<AudioVaeV2<CudaF16>>,
+        tokenizer: Arc<VoxCpm2Tokenizer>,
+        device: CudaDevice,
+        sample_rate: u32,
+    },
+}
+
+#[cfg(feature = "voxcpm")]
+impl LoadedVoxCpm2 {
+    fn sample_rate(&self) -> u32 {
+        match self {
+            Self::NdArray { sample_rate, .. } => *sample_rate,
+            #[cfg(feature = "voxcpm-cuda")]
+            Self::Cuda { sample_rate, .. } => *sample_rate,
+        }
+    }
 }
 
 #[cfg(not(feature = "voxcpm"))]
@@ -61,6 +118,19 @@ impl VoxCpm2TtsRuntime {
         Self {
             inner: Mutex::new(None),
         }
+    }
+
+    /// The loaded model, or a clear "not loaded" error.
+    #[cfg(feature = "voxcpm")]
+    fn loaded(&self) -> Result<LoadedVoxCpm2, NeuronError> {
+        let inner = self.inner.lock().unwrap();
+        inner.as_ref().cloned().ok_or_else(|| {
+            NeuronError::not_initialized(
+                "VoxCpm2TtsRuntime not loaded. Call load() first or check that \
+                 NEURON_TTS_RUNTIME=voxcpm2 and NEURON_TTS_MODEL_PATH are valid."
+                    .to_string(),
+            )
+        })
     }
 
     fn resolve_model_path(model: &str) -> Result<PathBuf, String> {
@@ -91,10 +161,80 @@ impl VoxCpm2TtsRuntime {
         Ok(path)
     }
 
+    /// Which burn backend the device selection resolves to.
     #[cfg(feature = "voxcpm")]
-    fn map_device(_device: &DeviceSelection) -> NdArrayDevice {
-        NdArrayDevice::Cpu
+    fn pick_backend(device: &DeviceSelection) -> Result<BackendChoice, String> {
+        match device {
+            DeviceSelection::Cpu => Ok(BackendChoice::NdArray),
+            DeviceSelection::Nvidia => {
+                #[cfg(feature = "voxcpm-cuda")]
+                {
+                    Ok(BackendChoice::Cuda)
+                }
+                #[cfg(not(feature = "voxcpm-cuda"))]
+                {
+                    Err(
+                        "NEURON_DEVICE=nvidia needs the burn CUDA backend: rebuild with \
+                         `--features voxcpm-cuda` (the CUDA toolkit's bin directory must be on \
+                         PATH at runtime so NVRTC can be loaded)"
+                            .to_string(),
+                    )
+                }
+            }
+            DeviceSelection::Auto => {
+                // The CPU stays the default for TTS even when the GPU
+                // backend is compiled in: VoxCPM2's autoregressive decode
+                // advances one latent patch (4 frames) per step, so the
+                // work is latency-bound rather than throughput-bound and
+                // the GPU's per-op launch overhead dominates. Measured on
+                // an RTX 3090 (12-core CPU peer): the first audio byte
+                // arrived after 708 s on the GPU versus 112 s on the CPU
+                // for the same utterance. Set NEURON_DEVICE=nvidia to
+                // opt into the GPU explicitly.
+                Ok(BackendChoice::NdArray)
+            }
+            DeviceSelection::Apple | DeviceSelection::Vulkan => {
+                eprintln!(
+                    "[neuron] voxcpm2: device {:?} has no burn backend here, using the CPU",
+                    device
+                );
+                Ok(BackendChoice::NdArray)
+            }
+        }
     }
+}
+
+/// The burn backend a VoxCPM2 load should use.
+#[cfg(feature = "voxcpm")]
+enum BackendChoice {
+    NdArray,
+    #[cfg(feature = "voxcpm-cuda")]
+    Cuda,
+}
+
+/// Configure the CUDA device for f16 and report whether it is usable.
+///
+/// The device's default float dtype decides how burn creates tensors, and
+/// the settings can only be initialized **once per device** — so this must
+/// run before anything else touches the device. An "already initialized"
+/// error is tolerated (the device was configured with the same settings
+/// earlier in the process).
+#[cfg(feature = "voxcpm-cuda")]
+fn configure_cuda_device() -> Result<CudaDevice, String> {
+    let device = CudaDevice::new(0);
+    match burn::tensor::set_default_dtypes::<CudaF16>(
+        &device,
+        burn::tensor::FloatDType::F16,
+        burn::tensor::IntDType::I32,
+    ) {
+        Ok(()) => {}
+        Err(e) if e.to_string().contains("already been initialized") => {
+            // Someone already initialized this device — verify the dtype is
+            // the one we need.
+        }
+        Err(e) => return Err(format!("failed to configure the CUDA device: {e}")),
+    }
+    Ok(device)
 }
 
 impl Default for VoxCpm2TtsRuntime {
@@ -112,7 +252,7 @@ impl TtsRuntime for VoxCpm2TtsRuntime {
     {
         let path = Self::resolve_model_path(model)
             .map_err(|e| NeuronError::not_implemented(e))?;
-        let dev = Self::map_device(device);
+        let backend = Self::pick_backend(device).map_err(NeuronError::not_implemented)?;
 
         let config = VoxCPM2Config::from_dir(&path)
             .map_err(|e| NeuronError::not_implemented(e))?;
@@ -128,23 +268,64 @@ impl TtsRuntime for VoxCpm2TtsRuntime {
             .clone()
             .unwrap_or_default();
 
-        let mut vae_model: AudioVaeV2<NdArray> = audio_vae_config.init(&dev);
-        load_checkpoint_into(&mut vae_model, &path.join("audiovae.pth"))
-            .map_err(|e| NeuronError::not_implemented(e))?;
-        let sample_rate = vae_model.out_sample_rate as u32;
+        let tokenizer = Arc::new(
+            VoxCpm2Tokenizer::from_file(&path.join("tokenizer.json"))
+                .map_err(|e| NeuronError::not_implemented(e))?,
+        );
 
-        let mut model: VoxCPM2<NdArray> = config.init(&dev);
-        load_checkpoint_into(&mut model, &path.join("model.safetensors"))
-            .map_err(|e| NeuronError::not_implemented(e))?;
+        let loaded = match backend {
+            BackendChoice::NdArray => {
+                let dev = NdArrayDevice::Cpu;
+                let mut vae_model: AudioVaeV2<NdArray> = audio_vae_config.init(&dev);
+                load_checkpoint_into(&mut vae_model, &path.join("audiovae.pth"))
+                    .map_err(|e| NeuronError::not_implemented(e))?;
+                let sample_rate = vae_model.out_sample_rate as u32;
 
-        let tokenizer = VoxCpm2Tokenizer::from_file(&path.join("tokenizer.json"))
-            .map_err(|e| NeuronError::not_implemented(e))?;
+                let mut model: VoxCPM2<NdArray> = config.init(&dev);
+                load_checkpoint_into(&mut model, &path.join("model.safetensors"))
+                    .map_err(|e| NeuronError::not_implemented(e))?;
 
-        let loaded = LoadedVoxCpm2 {
-            model: Arc::new(Mutex::new(model)),
-            audio_vae: Arc::new(vae_model),
-            tokenizer: Arc::new(tokenizer),
-            sample_rate,
+                LoadedVoxCpm2::NdArray {
+                    model: Arc::new(Mutex::new(model)),
+                    audio_vae: Arc::new(vae_model),
+                    tokenizer,
+                    device: dev,
+                    sample_rate,
+                }
+            }
+            #[cfg(feature = "voxcpm-cuda")]
+            BackendChoice::Cuda => {
+                // The device's default float dtype decides how burn creates
+                // the module's tensors, and it can only be set once per
+                // device — so the GPU path is f16 across the board.
+                let dev = configure_cuda_device().map_err(NeuronError::not_implemented)?;
+
+                let mut vae_model: AudioVaeV2<CudaF16> = audio_vae_config.init(&dev);
+                load_checkpoint_into_with_dtype(
+                    &mut vae_model,
+                    &path.join("audiovae.pth"),
+                    burn::tensor::DType::F16,
+                )
+                .map_err(|e| NeuronError::not_implemented(e))?;
+                let sample_rate = vae_model.out_sample_rate as u32;
+
+                let mut model: VoxCPM2<CudaF16> = config.init(&dev);
+                load_checkpoint_into_with_dtype(
+                    &mut model,
+                    &path.join("model.safetensors"),
+                    burn::tensor::DType::F16,
+                )
+                .map_err(|e| NeuronError::not_implemented(e))?;
+
+                eprintln!("[neuron] voxcpm2: loaded on the CUDA backend (f16, device 0)");
+                LoadedVoxCpm2::Cuda {
+                    model: Arc::new(Mutex::new(model)),
+                    audio_vae: Arc::new(vae_model),
+                    tokenizer,
+                    device: dev,
+                    sample_rate,
+                }
+            }
         };
 
         let runtime = VoxCpm2TtsRuntime::new();
@@ -171,40 +352,53 @@ impl TtsRuntime for VoxCpm2TtsRuntime {
             return Err(NeuronError::invalid_input("text cannot be empty"));
         }
 
-        let (model, audio_vae, tokenizer, sample_rate) = {
-            let inner = self.inner.lock().unwrap();
-            let loaded = inner.as_ref().ok_or_else(|| {
-                NeuronError::not_initialized(
-                    "VoxCpm2TtsRuntime not loaded. Call load() first or check that \
-                     NEURON_TTS_RUNTIME=voxcpm2 and NEURON_TTS_MODEL_PATH are valid."
-                        .to_string(),
-                )
-            })?;
-            (
-                loaded.model.clone(),
-                loaded.audio_vae.clone(),
-                loaded.tokenizer.clone(),
-                loaded.sample_rate,
-            )
-        };
-
-        // CPU-bound 2B inference on the ndarray backend — keep off the
-        // async reactor like the rest of neuron's burn runtimes.
+        let loaded = self.loaded()?;
+        let sample_rate = loaded.sample_rate();
         let text = text.to_string();
-        let samples = tokio::task::spawn_blocking(move || -> Result<Vec<f32>, String> {
-            let mut model = model.lock().unwrap();
-            let out = model.generate(
-                &text,
-                ClonePrompt::None,
-                &tokenizer,
-                &GenerationOptions::default(),
-                &audio_vae,
-                &NdArrayDevice::Cpu,
-            )?;
-            let audio = audio_vae.decode(out.latent, None);
-            Ok(audio.to_data().to_vec().unwrap_or_default())
-        })
-        .await
+
+        // 2B inference is CPU/GPU-bound — keep it off the async reactor
+        // like the rest of neuron's burn runtimes.
+        let samples = match loaded {
+            LoadedVoxCpm2::NdArray {
+                model,
+                audio_vae,
+                tokenizer,
+                device,
+                ..
+            } => {
+                tokio::task::spawn_blocking(move || {
+                    synthesize_generic(
+                        &model,
+                        &audio_vae,
+                        &tokenizer,
+                        &device,
+                        &text,
+                        ClonePrompt::None,
+                    )
+                })
+                .await
+            }
+            #[cfg(feature = "voxcpm-cuda")]
+            LoadedVoxCpm2::Cuda {
+                model,
+                audio_vae,
+                tokenizer,
+                device,
+                ..
+            } => {
+                tokio::task::spawn_blocking(move || {
+                    synthesize_generic(
+                        &model,
+                        &audio_vae,
+                        &tokenizer,
+                        &device,
+                        &text,
+                        ClonePrompt::None,
+                    )
+                })
+                .await
+            }
+        }
         .map_err(|e| NeuronError::not_implemented(format!("synthesis task panicked: {e}")))?
         .map_err(|e| NeuronError::not_implemented(e))?;
 
@@ -245,18 +439,8 @@ impl TtsRuntime for VoxCpm2TtsRuntime {
             )
         })?;
 
-        let (model, audio_vae, tokenizer, sample_rate) = {
-            let inner = self.inner.lock().unwrap();
-            let loaded = inner.as_ref().ok_or_else(|| {
-                NeuronError::not_initialized("VoxCpm2TtsRuntime not loaded".to_string())
-            })?;
-            (
-                loaded.model.clone(),
-                loaded.audio_vae.clone(),
-                loaded.tokenizer.clone(),
-                loaded.sample_rate,
-            )
-        };
+        let loaded = self.loaded()?;
+        let sample_rate = loaded.sample_rate();
 
         let reference: Vec<f32> = reference.to_vec();
         // prompt_text is accepted on the wire but the reference-isolation
@@ -264,31 +448,54 @@ impl TtsRuntime for VoxCpm2TtsRuntime {
         let _prompt_text = prompt_text.unwrap_or_default().to_string();
         let text = text.to_string();
 
-        let samples = tokio::task::spawn_blocking(move || -> Result<Vec<f32>, String> {
-            let mut model = model.lock().unwrap();
-            let ref_len = reference.len();
-            let audio_tensor: burn::tensor::Tensor<NdArray, 2> = burn::tensor::Tensor::from_data(
-                burn::tensor::TensorData::new(
-                    reference,
-                    burn::tensor::Shape::from([1usize, ref_len]),
-                ),
-                &NdArrayDevice::Cpu,
-            );
-            let out = model.generate(
-                &text,
-                ClonePrompt::Reference { audio: audio_tensor },
-                &tokenizer,
-                &GenerationOptions::default(),
-                &audio_vae,
-                &NdArrayDevice::Cpu,
-            )?;
-            // Reference-isolation cloning: the model conditions on the
-            // reference prefix, and the decoded audio contains only the
-            // generated continuation (context_len = 0 → no front trim).
-            let audio = audio_vae.decode(out.latent, None);
-            Ok(audio.to_data().to_vec().unwrap_or_default())
-        })
-        .await
+        let samples = match loaded {
+            LoadedVoxCpm2::NdArray {
+                model,
+                audio_vae,
+                tokenizer,
+                device,
+                ..
+            } => {
+                tokio::task::spawn_blocking(move || {
+                    let ref_len = reference.len();
+                    let audio_tensor = reference_tensor::<NdArray>(&reference, &device);
+                    synthesize_generic(
+                        &model,
+                        &audio_vae,
+                        &tokenizer,
+                        &device,
+                        &text,
+                        ClonePrompt::Reference {
+                            audio: audio_tensor,
+                        },
+                    )
+                })
+                .await
+            }
+            #[cfg(feature = "voxcpm-cuda")]
+            LoadedVoxCpm2::Cuda {
+                model,
+                audio_vae,
+                tokenizer,
+                device,
+                ..
+            } => {
+                tokio::task::spawn_blocking(move || {
+                    let audio_tensor = reference_tensor::<CudaF16>(&reference, &device);
+                    synthesize_generic(
+                        &model,
+                        &audio_vae,
+                        &tokenizer,
+                        &device,
+                        &text,
+                        ClonePrompt::Reference {
+                            audio: audio_tensor,
+                        },
+                    )
+                })
+                .await
+            }
+        }
         .map_err(|e| NeuronError::not_implemented(format!("synthesis task panicked: {e}")))?
         .map_err(|e| NeuronError::not_implemented(e))?;
 
@@ -317,13 +524,227 @@ impl TtsRuntime for VoxCpm2TtsRuntime {
     }
 
     // NOTE: model-level streaming (`generate_streaming` +
-    // `StreamingVaeDecoder`, both unit-tested in voxcpm_burn) is intentionally
-    // NOT wired into `synthesize_stream` yet: on the ndarray backend the
-    // streamed waveform still deviates from the full decode far more than the
-    // benign per-chunk boundary taps should allow (burn conv view semantics
-    // under investigation). The trait default — full synthesis chunked into
-    // 16 KiB pieces — preserves output fidelity, which matters more than TTFB
-    // here. Wire the override once the deviation is root-caused.
+    // `StreamingVaeDecoder`) IS wired into `synthesize_stream_incremental`
+    // below. The earlier "deviates from the full decode" blocker was an
+    // artifact of randomly-initialized toy weights amplifying the
+    // per-chunk boundary taps; on the shipped `audiovae.pth` the streamed
+    // decode reproduces the full decode to max_abs_diff 6.3e-6 (pearson
+    // r = 0.999999, identical sample count) — see
+    // `examples/voxcpm2_stream_smoke.rs`.
+    #[cfg(feature = "voxcpm")]
+    async fn synthesize_stream_incremental(
+        &self,
+        text: &str,
+        options: crate::tts::TtsStreamOptions<'_>,
+    ) -> ChatResult<BoxStream<'static, ChatResult<Bytes>>> {
+        if text.is_empty() {
+            return Err(NeuronError::invalid_input("text cannot be empty"));
+        }
+
+        let loaded = self.loaded()?;
+        let text = text.to_string();
+        let format = options.format;
+        // Voice cloning: the reference audio is the 16 kHz mono prompt the
+        // model conditions on; the generated continuation is what gets
+        // decoded, so the streamed chunks carry only the new speech.
+        let reference = options.reference_audio.map(|samples| samples.to_vec());
+
+        Ok(match loaded {
+            LoadedVoxCpm2::NdArray {
+                model,
+                audio_vae,
+                tokenizer,
+                device,
+                sample_rate,
+            } => {
+                let reference = reference.map(|r| reference_tensor::<NdArray>(&r, &device));
+                stream_generic(
+                    model,
+                    audio_vae,
+                    tokenizer,
+                    device,
+                    text,
+                    reference,
+                    format,
+                    sample_rate,
+                )
+            }
+            #[cfg(feature = "voxcpm-cuda")]
+            LoadedVoxCpm2::Cuda {
+                model,
+                audio_vae,
+                tokenizer,
+                device,
+                sample_rate,
+            } => {
+                let reference = reference.map(|r| reference_tensor::<CudaF16>(&r, &device));
+                stream_generic(
+                    model,
+                    audio_vae,
+                    tokenizer,
+                    device,
+                    text,
+                    reference,
+                    format,
+                    sample_rate,
+                )
+            }
+        })
+    }
+
+    #[cfg(not(feature = "voxcpm"))]
+    async fn synthesize_stream_incremental(
+        &self,
+        _text: &str,
+        _options: crate::tts::TtsStreamOptions<'_>,
+    ) -> ChatResult<BoxStream<'static, ChatResult<Bytes>>> {
+        Err(NeuronError::not_implemented(
+            "VoxCPM2 TTS requires the voxcpm feature (cargo build --features voxcpm)".to_string(),
+        ))
+    }
+}
+
+/// The 16 kHz mono reference waveform as a `[1, T]` tensor on the device.
+#[cfg(feature = "voxcpm")]
+fn reference_tensor<B: Backend>(
+    samples: &[f32],
+    device: &B::Device,
+) -> burn::tensor::Tensor<B, 2> {
+    burn::tensor::Tensor::from_data(
+        burn::tensor::TensorData::new(
+            samples.to_vec(),
+            burn::tensor::Shape::from([1usize, samples.len()]),
+        ),
+        device,
+    )
+}
+
+/// Read a float tensor back as f32, whatever the backend's float dtype is.
+///
+/// The CPU backend is f32 and the GPU backend f16, and `TensorData::to_vec`
+/// refuses a cross-dtype conversion, so the element type is dispatched on
+/// the tensor's own dtype.
+#[cfg(feature = "voxcpm")]
+fn read_f32<B: Backend, const D: usize>(
+    tensor: &burn::tensor::Tensor<B, D>,
+) -> Result<Vec<f32>, String> {
+    let data = tensor.to_data();
+    match data.dtype {
+        burn::tensor::DType::F32 => data.to_vec::<f32>().map_err(|e| e.to_string()),
+        #[cfg(feature = "voxcpm-cuda")]
+        burn::tensor::DType::F16 => data
+            .to_vec::<burn::tensor::f16>()
+            .map_err(|e| e.to_string())
+            .map(|values| values.into_iter().map(|v| v.to_f32()).collect()),
+        other => Err(format!("unsupported audio dtype {other:?}")),
+    }
+}
+
+/// Full synthesis: generate the latent, then decode it to a waveform.
+#[cfg(feature = "voxcpm")]
+fn synthesize_generic<B: Backend>(
+    model: &Arc<Mutex<VoxCPM2<B>>>,
+    audio_vae: &Arc<AudioVaeV2<B>>,
+    tokenizer: &VoxCpm2Tokenizer,
+    device: &B::Device,
+    text: &str,
+    prompt: ClonePrompt<B>,
+) -> Result<Vec<f32>, String> {
+    // A poisoned lock means an earlier synthesis panicked inside the model.
+    let mut model = model
+        .lock()
+        .map_err(|_| "VoxCPM2 model lock is poisoned (an earlier synthesis panicked)".to_string())?;
+    let out = model.generate(
+        text,
+        prompt,
+        tokenizer,
+        &GenerationOptions::default(),
+        audio_vae,
+        device,
+    )?;
+    // Reference-isolation cloning decodes only the generated continuation
+    // (context_len = 0 → no front trim).
+    let audio = audio_vae.decode(out.latent, None);
+    read_f32(&audio)
+}
+
+/// Model-level streaming: decode each latent patch as the model emits it.
+///
+/// The decoder carries the causal left-context of every conv between
+/// chunks, so each patch decodes to exactly its own audio. The patch
+/// callback runs on the blocking worker; the decoded PCM crosses to the
+/// async side through an unbounded channel.
+#[cfg(feature = "voxcpm")]
+#[allow(clippy::too_many_arguments)]
+fn stream_generic<B: Backend>(
+    model: Arc<Mutex<VoxCPM2<B>>>,
+    audio_vae: Arc<AudioVaeV2<B>>,
+    tokenizer: Arc<VoxCpm2Tokenizer>,
+    device: B::Device,
+    text: String,
+    reference: Option<burn::tensor::Tensor<B, 2>>,
+    format: crate::tts::TtsStreamFormat,
+    sample_rate: u32,
+) -> BoxStream<'static, ChatResult<Bytes>> {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ChatResult<Bytes>>();
+
+    // WAV container first: the payload length is unknown until the model
+    // stops emitting patches, so the header carries placeholder sizes.
+    if format == crate::tts::TtsStreamFormat::Wav {
+        let _ = tx.send(Ok(Bytes::from(crate::tts::wav_header(
+            sample_rate, 1, None,
+        ))));
+    }
+
+    // A second handle so the generation error can be reported after the
+    // patch callback (which owns the first) is dropped.
+    let tx_error = tx.clone();
+
+    tokio::task::spawn_blocking(move || {
+        let outcome: Result<(), String> = (|| {
+            let mut model = model.lock().map_err(|_| {
+                "VoxCPM2 model lock is poisoned (an earlier synthesis panicked)".to_string()
+            })?;
+            let mut decoder = StreamingVaeDecoder::new(&*audio_vae);
+            let mut on_patch =
+                |patch: burn::tensor::Tensor<B, 3>| -> Result<(), String> {
+                    let audio = decoder.decode_chunk(patch);
+                    let samples = read_f32(&audio)?;
+                    // Both containers carry the same samples: the WAV header
+                    // was already emitted above, PCM needs no header.
+                    let bytes = crate::tts::pcm_i16_bytes(&samples);
+                    // A send failure means the client hung up: abort the
+                    // generation instead of synthesizing into the void.
+                    tx.send(Ok(Bytes::from(bytes)))
+                        .map_err(|_| "stream consumer went away".to_string())
+                };
+
+            let prompt = match reference {
+                Some(audio) => ClonePrompt::Reference { audio },
+                None => ClonePrompt::None,
+            };
+            model.generate_streaming(
+                &text,
+                prompt,
+                &tokenizer,
+                &GenerationOptions::default(),
+                &audio_vae,
+                &device,
+                &mut on_patch,
+            )?;
+            Ok(())
+        })();
+
+        if let Err(e) = outcome {
+            let _ = tx_error.send(Err(NeuronError::not_implemented(e)));
+        }
+    });
+
+    Box::pin(async_stream::stream! {
+        while let Some(item) = rx.recv().await {
+            yield item;
+        }
+    })
 }
 
 #[cfg(feature = "voxcpm")]
@@ -423,6 +844,26 @@ mod tests {
         assert_eq!(runtime.name(), "voxcpm2-tts");
         let voices = runtime.list_voices();
         assert_eq!(voices[0].id, "voxcpm2-default");
+    }
+
+    #[tokio::test]
+    async fn test_voxcpm2_stream_incremental_without_load_returns_not_initialized() {
+        let runtime = VoxCpm2TtsRuntime::new();
+        let options = crate::tts::TtsStreamOptions::default();
+        let result = runtime.synthesize_stream_incremental("hello", options).await;
+        assert!(result.is_err());
+        let err = result.err().unwrap();
+        assert_eq!(err.error_type, "not_initialized");
+    }
+
+    #[tokio::test]
+    async fn test_voxcpm2_stream_incremental_rejects_empty_text() {
+        let runtime = VoxCpm2TtsRuntime::new();
+        let options = crate::tts::TtsStreamOptions::default();
+        let result = runtime.synthesize_stream_incremental("", options).await;
+        assert!(result.is_err());
+        let err = result.err().unwrap();
+        assert_eq!(err.error_type, "invalid_request_error");
     }
 
     #[tokio::test]

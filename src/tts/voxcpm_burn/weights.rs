@@ -72,12 +72,27 @@ impl LoadReport {
 /// Load a PyTorch-family checkpoint (`.safetensors` / `.pth` / `.pt` / `.bin`)
 /// into `module`, applying the dtype/layout/name adaptations listed in the
 /// module docs.
+///
+/// The tensors land as f32. Use [`load_checkpoint_into_with_dtype`] to
+/// materialize them in a narrower float (f16) — the GPU backend keeps its
+/// weights in the backend's own dtype, and a half-precision copy halves the
+/// resident memory of the 2B model.
 pub fn load_checkpoint_into<B: Backend, M: ModuleSnapshot<B>>(
     module: &mut M,
     path: &Path,
 ) -> Result<LoadReport, String> {
+    load_checkpoint_into_with_dtype(module, path, DType::F32)
+}
+
+/// Like [`load_checkpoint_into`], but materializes the checkpoint tensors in
+/// `dtype` (f32 or f16) instead of always f32.
+pub fn load_checkpoint_into_with_dtype<B: Backend, M: ModuleSnapshot<B>>(
+    module: &mut M,
+    path: &Path,
+    dtype: DType,
+) -> Result<LoadReport, String> {
     let snapshots = read_snapshots(path)?;
-    let transformed = transform_snapshots(snapshots)?;
+    let transformed = transform_snapshots(snapshots, dtype)?;
 
     let result = module.apply(transformed, None, None, true);
 
@@ -110,11 +125,33 @@ fn read_snapshots(path: &Path) -> Result<Vec<TensorSnapshot>, String> {
             Ok(snapshots.values().cloned().collect())
         }
         "pth" | "pt" | "bin" => {
-            let mut store = PytorchStore::from_file(path);
-            let snapshots = store
-                .get_all_snapshots()
-                .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
-            Ok(snapshots.values().cloned().collect())
+            // Upstream ships `audiovae.pth` as a Lightning-style wrapper
+            // `{metadata: {...}, state_dict: {...}}`; a plain
+            // `torch.save(state_dict)` file is flat at the top level. Try the
+            // wrapped form first and fall back to flat when the file has no
+            // `state_dict` key (burn-store errors with KeyNotFound instead of
+            // falling back itself). The failed first parse costs one pickle
+            // walk; snapshots are lazy closures, so no tensor data moves.
+            //
+            // `map_indices_contiguous(false)` is required: upstream's VAE
+            // decoder lists carry gaps (the sample-rate conditioning lives at
+            // indices 2..7, and the decoder's `model` list interleaves
+            // blocks with plain convs), and burn-store's default contiguous
+            // renumbering would compact those gaps and silently shift every
+            // sr-condition tensor onto the wrong decoder stage.
+            let mut wrapped = PytorchStore::from_file(path)
+                .with_top_level_key("state_dict")
+                .map_indices_contiguous(false);
+            match wrapped.get_all_snapshots() {
+                Ok(snapshots) => Ok(snapshots.values().cloned().collect()),
+                Err(_) => {
+                    let mut store = PytorchStore::from_file(path).map_indices_contiguous(false);
+                    let snapshots = store
+                        .get_all_snapshots()
+                        .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+                    Ok(snapshots.values().cloned().collect())
+                }
+            }
         }
         other => Err(format!(
             "unsupported checkpoint extension '{other}' for {} (expected .safetensors / .pth)",
@@ -128,6 +165,27 @@ fn read_snapshots(path: &Path) -> Result<Vec<TensorSnapshot>, String> {
 /// already share PyTorch's `[out, in, k]` layout, so they pass through.
 fn is_transposed_linear_weight(name: &str, rank: usize) -> bool {
     rank == 2 && name.ends_with(".weight") && !name.to_ascii_lowercase().contains("embed")
+}
+
+/// Rewrite the upstream PyTorch VAE module tree into neuron's burn tree.
+///
+/// Upstream nests the VAE decoder under `decoder.model.<N>` and the
+/// sample-rate conditioning under `decoder.sr_cond_model.<N>`, because the
+/// PyTorch `CausalDecoder` module owns both as submodules. Neuron's burn port
+/// keeps them as sibling fields of `AudioVaeV2` (`decoder` / `sr_cond_model`),
+/// so the checkpoint paths are rewritten to match. The LM checkpoint
+/// (`model.safetensors`) has no `decoder.*` keys at all, so this rewrite is a
+/// no-op there.
+fn remap_vae_path(name: &str) -> String {
+    for (from, to) in [
+        ("decoder.model.", "decoder."),
+        ("decoder.sr_cond_model.", "sr_cond_model."),
+    ] {
+        if let Some(rest) = name.strip_prefix(from) {
+            return format!("{to}{rest}");
+        }
+    }
+    name.to_string()
 }
 
 /// Rewrite burn-target paths for the RmsNorm wrapper naming.
@@ -168,11 +226,15 @@ fn transpose_2d(data: &TensorData) -> Result<TensorData, String> {
     Ok(TensorData::new(out, Shape::from([cols, rows])))
 }
 
-fn transform_snapshots(snapshots: Vec<TensorSnapshot>) -> Result<Vec<TensorSnapshot>, String> {
+fn transform_snapshots(
+    snapshots: Vec<TensorSnapshot>,
+    dtype: DType,
+) -> Result<Vec<TensorSnapshot>, String> {
     snapshots
         .into_iter()
         .map(|snapshot| {
             let name = snapshot.full_path();
+            let name = remap_vae_path(&name);
             let name = remap_norm_path(&name);
             let path_stack: Vec<String> = name
                 .split('.')
@@ -194,6 +256,8 @@ fn transform_snapshots(snapshots: Vec<TensorSnapshot>) -> Result<Vec<TensorSnaps
                 let mut data = snapshot
                     .to_data()
                     .map_err(|e| burn_store::TensorSnapshotError::DataError(e.to_string()))?;
+                // The transpose math runs in f32; the final narrowing to the
+                // target dtype happens after it.
                 if data.dtype != DType::F32 {
                     data = data.convert::<f32>();
                 }
@@ -201,12 +265,15 @@ fn transform_snapshots(snapshots: Vec<TensorSnapshot>) -> Result<Vec<TensorSnaps
                     data = transpose_2d(&data)
                         .map_err(|e| burn_store::TensorSnapshotError::DataError(e))?;
                 }
+                if dtype != DType::F32 {
+                    data = data.convert_dtype(dtype);
+                }
                 Ok(data)
             });
 
             Ok(TensorSnapshot::from_closure(
                 closure,
-                DType::F32,
+                dtype,
                 Shape::from(out_dims),
                 path_stack,
                 container_stack,
@@ -338,6 +405,33 @@ mod tests {
         assert!(!is_transposed_linear_weight("encoder.block.0.weight_v", 3));
         // Norm tensors are renamed before this check in the real pipeline.
         assert!(!is_transposed_linear_weight("base_lm.norm.weight", 1));
+    }
+
+    #[test]
+    fn test_remap_vae_path_rules() {
+        // Upstream PyTorch nests the decoder under `decoder.model`.
+        assert_eq!(
+            remap_vae_path("decoder.model.0.weight_v"),
+            "decoder.0.weight_v"
+        );
+        assert_eq!(
+            remap_vae_path("decoder.model.2.block.1.weight_v"),
+            "decoder.2.block.1.weight_v"
+        );
+        // …and the sample-rate conditioning under `decoder.sr_cond_model`.
+        assert_eq!(
+            remap_vae_path("decoder.sr_cond_model.2.scale_embed.weight"),
+            "sr_cond_model.2.scale_embed.weight"
+        );
+        // The encoder and the LM checkpoint are untouched.
+        assert_eq!(
+            remap_vae_path("encoder.fc_mu.weight_v"),
+            "encoder.fc_mu.weight_v"
+        );
+        assert_eq!(
+            remap_vae_path("base_lm.layers.0.self_attn.q_proj.weight"),
+            "base_lm.layers.0.self_attn.q_proj.weight"
+        );
     }
 
     #[test]

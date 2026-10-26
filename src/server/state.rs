@@ -384,7 +384,13 @@ impl ServerState {
                 }
             }
         }
-        let tts_shortcut = tts_registry.default_runtime();
+        // The shortcut must not load the weights here: `ServerState::new`
+        // runs inside the host's tokio runtime, where the registry's
+        // blocking load panics with "Cannot start a runtime from within a
+        // runtime". The lazy proxy resolves the default model on the first
+        // request instead.
+        let tts_registry = Arc::new(tts_registry);
+        let tts_shortcut = tts_registry.lazy_default_runtime();
 
         // ---- ASR registry -------------------------------------------------
         let mut asr_registry = crate::asr::AsrRuntimeRegistry::new(config_arc.clone());
@@ -756,7 +762,7 @@ impl ServerState {
         ));
 
         let llm_registry_lock = Arc::new(Mutex::new(llm_registry.clone()));
-        let tts_registry_lock = Arc::new(Mutex::new(tts_registry.clone()));
+        let tts_registry_lock = Arc::new(Mutex::new((*tts_registry).clone()));
         let asr_registry_lock = Arc::new(Mutex::new(asr_registry.clone()));
         let rerank_registry_lock = Arc::new(Mutex::new(rerank_registry.clone()));
         let embedding_registry_lock = Arc::new(Mutex::new(embedding_registry.clone()));
@@ -800,7 +806,7 @@ impl ServerState {
 
         Self {
             llm_registry: llm_registry_arc,
-            tts_registry: Arc::new(tts_registry),
+            tts_registry,
             asr_registry: Arc::new(asr_registry),
             rerank_registry: Arc::new(rerank_registry),
             embedding_registry: Arc::new(embedding_registry),

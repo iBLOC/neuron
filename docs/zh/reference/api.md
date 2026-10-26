@@ -28,6 +28,7 @@ Anthropic Messages v1 API。支持 vision、tool_use、cache_control、extended 
 
 ```
 POST /v1/audio/speech         (TTS — OpenAI)
+POST /v1/audio/speech/stream  (TTS — 模型级流式)
 POST /v1/audio/transcriptions (ASR — OpenAI)
 ```
 
@@ -243,6 +244,39 @@ curl -X POST http://localhost:8085/v1/audio/speech \
 ```
 
 返回 MP3 音频字节流。`voice` 取 `alloy` / `echo` / `fable` / `onyx` / `nova` / `shimmer` 之一(映射到 VoxCpm speaker)。
+
+带 `"stream": true` 时返回同样的音频,只是按 16 KiB 分块(chunked transfer)——合成仍然先完整做完才发第一个字节。若希望音频在模型还在生成时就到达,请用下面的 `/v1/audio/speech/stream`。
+
+### `POST /v1/audio/speech/stream`
+
+模型级流式 TTS。服务端在模型产出每个 latent patch 的瞬间就把它解码成音频,因此首个字节远早于整句话合成完毕就能到达客户端。
+
+```bash
+curl -N -X POST http://localhost:8085/v1/audio/speech/stream \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "voxcpm2",
+    "input": "今天天气真不错。",
+    "response_format": "wav"
+  }' \
+  -o output.wav
+```
+
+| 字段 | 类型 | 默认值 | 含义 |
+|---|---|---|---|
+| `model` | string | `voxcpm2` | 已注册的 TTS 模型 id。 |
+| `input` | string | — | 要合成的文本(必填)。 |
+| `voice` | string | — | 音色 id,供有命名音色的运行时使用。 |
+| `response_format` | string | `wav` | `wav` → WAV 容器;`pcm` → 裸 16-bit LE 单声道采样。 |
+| `reference_audio` | string | — | 声音克隆参考音频(base64 / `data:` URI / 服务器本地路径),解码为 16 kHz 单声道。 |
+| `prompt_text` | string | — | `reference_audio` 的转写文本(continuation 式提示用)。 |
+
+容器说明:
+
+- `wav` 发送 44 字节文件头,长度字段是 `0xFFFFFFFF` 占位——这是流式 WAV 的通行约定。需要精确长度的播放器请改用 `pcm` 并自行封装。
+- `pcm` 发送裸 16-bit 小端单声道采样,采样率为模型原生采样率(VoxCPM2 为 48 kHz),无文件头。
+
+当前由 VoxCPM2 运行时提供(`NEURON_TTS_RUNTIME=voxcpm2`);其他 TTS 运行时回退到"先完整合成再分块"的行为,端点始终可用。
 
 ### `POST /v1/audio/transcriptions`
 

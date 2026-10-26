@@ -739,9 +739,13 @@ impl<B: Backend> VoxCPM2<B> {
                 .clone()
                 .argmax(stop_data.rank() - 1)
                 .slice_dim(0, 0..1)
+                // The Int dtype is backend-dependent (i64 on ndarray, i32
+                // on the CUDA backend) and the data reader does not convert,
+                // so cast to i64 before reading it back.
+                .cast(burn::tensor::IntDType::I64)
                 .to_data()
-                .as_slice()
-                .unwrap()[0];
+                .to_vec::<i64>()
+                .map_err(|e| format!("failed to read the stop head output: {e}"))?[0];
 
             if i > opts.min_len && stop_flag == 1 {
                 break;
@@ -1237,7 +1241,7 @@ mod tests {
 
     use burn::backend::ndarray::{NdArray, NdArrayDevice};
 
-    fn tiny_config() -> VoxCPM2Config {
+    pub(super) fn tiny_config() -> VoxCPM2Config {
         // Structurally faithful, dimensionally toy. rope factor arrays carry
         // the per-dim repeat the LongRoPE expects (head_dim 4 → 2 factors).
         // vocab_size (128) must exceed the audio sentinel ids 101–104.
@@ -1290,7 +1294,7 @@ mod tests {
         .expect("tiny config parses")
     }
 
-    fn mini_tokenizer() -> VoxCpm2Tokenizer {
+    pub(super) fn mini_tokenizer() -> VoxCpm2Tokenizer {
         let dir = std::env::temp_dir()
             .join(format!("neuron-voxcpm2-tok-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -1507,5 +1511,63 @@ mod tests {
 
         let out = cfm.forward(mu, 2, p, cond, None, Some(2.0), None, None);
         assert_eq!(out.dims(), [b, cfg.feat_dim, p]);
+    }
+}
+
+/// The f16 GPU path: the whole model (LM, FSQ, DiT, VAE) must run with the
+/// narrower float dtype. This is the fast reproduction of the dtype
+/// mismatches the full-checkpoint run hits — a toy model on the GPU fails
+/// in seconds, the 2B model in minutes.
+#[cfg(all(test, feature = "voxcpm-cuda"))]
+mod cuda_f16_tests {
+    use super::tests::{mini_tokenizer, tiny_config};
+    use super::*;
+    use burn::backend::cuda::{Cuda, CudaDevice};
+    use burn::tensor::f16;
+
+    type CudaF16 = Cuda<f16, i32>;
+
+    #[test]
+    #[serial_test::serial]
+    fn test_voxcpm2_end_to_end_tiny_generate_on_cuda_f16() {
+        let device = CudaDevice::new(0);
+        // The device's float dtype can only be initialized once per device.
+        let _ = burn::tensor::set_default_dtypes::<CudaF16>(
+            &device,
+            burn::tensor::FloatDType::F16,
+            burn::tensor::IntDType::I32,
+        );
+
+        let cfg = tiny_config();
+        let mut model: VoxCPM2<CudaF16> = cfg.init(&device);
+        let vae: AudioVaeV2<CudaF16> = cfg
+            .audio_vae_config
+            .as_ref()
+            .unwrap()
+            .clone()
+            .init(&device);
+        let tok = mini_tokenizer();
+
+        let opts = GenerationOptions {
+            min_len: 1,
+            max_len: 3,
+            inference_timesteps: 2,
+            cfg_value: 2.0,
+        };
+
+        let out = model
+            .generate("hello", ClonePrompt::None, &tok, &opts, &vae, &device)
+            .expect("generate on the CUDA f16 backend");
+        assert_eq!(out.latent.dims()[1], cfg.feat_dim);
+
+        let audio = vae.decode(out.latent.clone(), None);
+        assert_eq!(audio.dims()[0], 1);
+
+        // The streaming decoder must run on the GPU too — it is what the
+        // HTTP streaming endpoint uses.
+        let mut stream = crate::tts::voxcpm_burn::audiovae_v2_stream::StreamingVaeDecoder::new(&vae);
+        let chunk = stream.decode_chunk(out.latent);
+        assert_eq!(chunk.dims()[0], 1);
+        println!("[cuda-f16] full decode {:?}, stream chunk {:?}", audio.dims(), chunk.dims());
     }
 }

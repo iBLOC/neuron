@@ -150,6 +150,21 @@ harness = false
 name = "ocr_smoke"
 required-features = ["ocr"]
 
+# Real-weights verification that StreamingVaeDecoder reproduces the full
+# AudioVaeV2::decode on the shipped audiovae.pth — the gate for wiring
+# model-level streaming into TtsRuntime::synthesize_stream. Needs the
+# openbmb/VoxCPM2 download (see the example header for the run command).
+[[example]]
+name = "voxcpm2_stream_smoke"
+required-features = ["voxcpm"]
+
+# End-to-end HTTP smoke for POST /v1/audio/speech/stream — boots an embedded
+# server with the real VoxCPM2 checkpoint and measures first-byte latency
+# against the legacy /v1/audio/speech path.
+[[example]]
+name = "voxcpm2_stream_http_smoke"
+required-features = ["voxcpm"]
+
 [features]
 default = ["candle"]
 candle = ["dep:candle", "dep:candle-nn", "dep:candle-transformers", "dep:tokenizers", "dep:image", "dep:base64", "dep:safetensors", "dep:wide"]
@@ -158,6 +173,14 @@ metal = ["candle/metal", "candle-nn/metal", "candle-transformers/metal"]
 cuda = ["candle/cuda", "candle-nn/cuda", "candle-transformers/cuda"]
 chronos2 = ["candle"]
 voxcpm = ["dep:burn", "dep:burn-store", "dep:hound", "dep:base64", "dep:tokenizers"]
+# Burn-side CUDA backend for the VoxCPM2 TTS runtime (CubeCL kernels).
+# Separate from the `cuda` feature above, which is candle's: pulling
+# burn/cuda in compiles the CubeCL stack, which is a heavy build. Combine
+# them (`--features cuda,voxcpm-cuda`) to put both the LLM and the TTS on
+# the GPU. No build-time CUDA toolkit is required (cudarc uses the driver
+# API + NVRTC with dynamic-loading fallback), but at runtime the CUDA
+# toolkit's `bin` directory must be on PATH so NVRTC can be loaded.
+voxcpm-cuda = ["voxcpm", "burn/cuda"]
 litert = ["dep:litert-lm"]
 asr-audio = ["dep:symphonia", "dep:rubato"]
 mistralrs = ["dep:mistralrs", "candle"]

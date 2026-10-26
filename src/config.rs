@@ -69,6 +69,9 @@ pub enum DeviceSelection {
     #[default]
     Auto,
     Cpu,
+    /// NVIDIA GPU. `NEURON_DEVICE` accepts both `nvidia` and the `cuda`
+    /// alias (the scheduler's platform key for this device is `cuda`).
+    #[serde(alias = "cuda")]
     Nvidia,
     Apple,
     Vulkan,
@@ -464,11 +467,11 @@ fn apply_host_env(cfg: &mut NeuronConfig, env: &HashMap<String, String>) {
 }
 
 fn apply_device_env(cfg: &mut NeuronConfig, env: &HashMap<String, String>) {
-    // NEURON_DEVICE: accepts cpu | cuda | apple | vulkan. Unknown
-    // values fall through to the default (`Auto`) — an env-var typo
-    // shouldn't crash startup; a startup-time warning is logged in
-    // ServerState when the resolved value isn't recognised by the
-    // candle backend.
+    // NEURON_DEVICE: accepts auto | cpu | nvidia (alias: cuda) | apple |
+    // vulkan. Unknown values fall through to the default (`Auto`) — an
+    // env-var typo shouldn't crash startup; a startup-time warning is
+    // logged in ServerState when the resolved value isn't recognised by
+    // the candle backend.
     if let Some(v) = env_map_get(env, "DEVICE")
         && let Ok(d) = serde_json::from_str::<DeviceSelection>(&format!("\"{v}\""))
     {
@@ -720,6 +723,29 @@ mod tests {
     fn test_neuron_config_default_device_auto() {
         let config = NeuronConfig::default();
         assert_eq!(config.device, DeviceSelection::Auto);
+    }
+
+    #[test]
+    fn test_device_selection_accepts_nvidia_and_cuda_alias() {
+        for value in ["nvidia", "cuda"] {
+            let parsed: DeviceSelection =
+                serde_json::from_str(&format!("\"{value}\"")).expect("parse device");
+            assert_eq!(parsed, DeviceSelection::Nvidia, "value: {value}");
+        }
+        for value in ["auto", "cpu", "apple", "vulkan"] {
+            let parsed: DeviceSelection =
+                serde_json::from_str(&format!("\"{value}\"")).expect("parse device");
+            assert_eq!(
+                parsed,
+                match value {
+                    "auto" => DeviceSelection::Auto,
+                    "cpu" => DeviceSelection::Cpu,
+                    "apple" => DeviceSelection::Apple,
+                    _ => DeviceSelection::Vulkan,
+                },
+                "value: {value}"
+            );
+        }
     }
 
     #[test]

@@ -236,6 +236,93 @@ fn default_format() -> String {
     "mp3".to_string()
 }
 
+/// Request body of the model-level streaming endpoint
+/// (`POST /v1/audio/speech/stream`).
+#[derive(Debug, Deserialize)]
+pub struct SpeechStreamRequest {
+    pub model: Option<String>,
+    pub input: String,
+    pub voice: Option<String>,
+    #[serde(default = "default_speed")]
+    pub speed: f32,
+    /// `wav` (default) emits a WAV container with placeholder sizes;
+    /// `pcm` emits raw 16-bit LE mono samples.
+    #[serde(default = "default_stream_format")]
+    pub response_format: String,
+    /// Voice-clone reference audio (base64 / `data:` URI / server-local
+    /// path), decoded to mono 16 kHz.
+    #[serde(default)]
+    pub reference_audio: Option<String>,
+    /// Transcript of `reference_audio` (continuation-style prompts).
+    #[serde(default)]
+    pub prompt_text: Option<String>,
+}
+
+fn default_stream_format() -> String {
+    "wav".to_string()
+}
+
+/// True model-level streaming TTS.
+///
+/// Unlike `/v1/audio/speech?stream=true` — which synthesizes the whole
+/// utterance and then sends it in 16 KiB chunks — this endpoint returns
+/// audio as the model produces it: the first bytes arrive after the first
+/// latent patch is decoded, not after the entire utterance is finished.
+///
+/// The container follows `response_format`: `wav` sends a 44-byte header
+/// with placeholder sizes (`0xFFFFFFFF`, the usual convention for a
+/// streamed WAV), `pcm` sends raw 16-bit little-endian mono samples.
+pub async fn audio_speech_stream(
+    State(state): State<ServerState>,
+    Json(payload): Json<SpeechStreamRequest>,
+) -> Result<Response, ServerError> {
+    if payload.input.is_empty() {
+        return Err(ServerError::BadRequest(
+            "input cannot be empty".to_string(),
+        ));
+    }
+
+    let model = payload.model.as_deref().unwrap_or("voxcpm2");
+    let rt = match state.tts_registry.runtime_for(model).await {
+        Ok(rt) => rt,
+        Err(e) if e.error_type == "model_not_registered" => {
+            return Err(ServerError::BadRequest(e.message));
+        }
+        Err(_) => state.tts.clone(),
+    };
+
+    let format = crate::tts::TtsStreamFormat::parse(&payload.response_format);
+
+    // Voice-clone reference audio (optional).
+    let reference = match payload.reference_audio.as_deref() {
+        Some(reference) => Some(
+            crate::tts::clone_audio::decode_reference_payload(reference)
+                .map_err(ServerError::BadRequest)?,
+        ),
+        None => None,
+    };
+
+    let options = crate::tts::TtsStreamOptions {
+        voice: payload.voice.as_deref(),
+        format,
+        reference_audio: reference.as_deref(),
+        prompt_text: payload.prompt_text.as_deref(),
+    };
+
+    let stream = rt
+        .synthesize_stream_incremental(&payload.input, options)
+        .await
+        .map_err(|e| ServerError::Internal(e.to_string()))?;
+
+    let body = Body::from_stream(stream);
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, format.content_type())
+        .header(header::CACHE_CONTROL, "no-store")
+        .body(body)
+        .map_err(|e| ServerError::Internal(format!("response build: {e}")))?)
+}
+
 pub async fn audio_speech(
     State(state): State<ServerState>,
     Json(payload): Json<SpeechRequest>,
