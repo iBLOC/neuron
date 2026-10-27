@@ -653,15 +653,6 @@ impl super::LlmRuntime for CandleLlmRuntime {
             (m.tokenizer.clone(), m.eos_token_id)
         };
 
-        // Reset the Llama KV cache at the start of every generation.
-        {
-            let mut inner = self.inner.lock().unwrap();
-            let m = inner.as_mut().ok_or_else(|| {
-                NeuronError::not_initialized("CandleLlmRuntime not loaded. Call load() first.")
-            })?;
-            Self::reset_llama_cache(m)?;
-        }
-
         let prompt = Self::render_chatml_prompt(&req.messages);
         let encoding = tokenizer
             .encode(prompt.as_str(), true)
@@ -675,6 +666,15 @@ impl super::LlmRuntime for CandleLlmRuntime {
         let m = inner.as_mut().ok_or_else(|| {
             NeuronError::not_initialized("CandleLlmRuntime not loaded. Call load() first.")
         })?;
+        // Reset the KV cache INSIDE the generation critical section.
+        // Resetting in a separate lock scope (the previous shape of
+        // this code) left a window where another request's generation
+        // could append entries after our reset and before our forward:
+        // the next prompt then attended over stale positions and the
+        // attention mask (built for prompt_len) failed broadcast_add —
+        // observed live as `lhs: [1, 14, 77, 135], rhs: [1, 1, 77, 77]`
+        // where 135 = 77 fresh + 58 leaked from a concurrent request.
+        Self::reset_llama_cache(m)?;
 
         let input_tensor = candle::Tensor::from_vec(
             prompt_token_ids.clone(),
