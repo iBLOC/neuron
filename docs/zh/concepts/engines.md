@@ -24,7 +24,7 @@ neuron 支持 **3 个 ML 框架**以及**每个框架的多个实现**，覆盖�
 | Vision | candle (YOLOv8 / RT-DETR / DETR) | `candle` | ✅ | CSPDarknet + PANet + 解耦头 |
 | Vision | ort (YOLOv8 / RT-DETR / DETR / RF-DETR / Florence-2) | `ort` | — | 可插拔 ONNX 执行器：`ort` / `tract` / `onnxruntime` |
 | Chronos2 | candle | `chronos2` | — | ✅ 2026-07-19 落地：vendored T5 编码器 + 解码器 + 线性输出头，`CandleChronos2Runtime`（844 行，19 个测试） |
-| Decision | tract (Laya int8 ONNX) | `tract` | — | ✅ 2026-09-24 落地：纯 Rust ONNX 执行器（无 C++ 工具链 / 系统 ONNX Runtime）。纯编码器 int8，每问题一次前向，无解码。图必须先用 `scripts/prep-laya-onnx.py` 预处理。该引擎**无法**与 onnxruntime 做到逐位一致——见[规格说明](../superpowers/specs/2026-09-24-laya-decision.md)；当需要逐位一致时，`src/vision/ort_runtime.rs` 中的 `ort` 执行器槽位是现成的替代方案。 |
+| Decision | tract (Laya int8 ONNX) | `tract` | — | ✅ 2026-09-24 落地：纯 Rust ONNX 执行器（无 C++ 工具链 / 系统 ONNX Runtime）。纯编码器 int8，每问题一次前向，无解码。图必须先用 `scripts/prep-laya-onnx.py` 预处理。该引擎**无法**与 onnxruntime 做到逐位一致——见[规格说明](../../superpowers/specs/2026-09-24-laya-decision.md)；当需要逐位一致时，`src/vision/ort_runtime.rs` 中的 `ort` 执行器槽位是现成的替代方案。 |
 | OCR | paddle-ocr | `tract`（默认）/ `ort`（快速执行器） | — | tract-onnx / ort（ONNX）—— PP-OCRv5/v6 文本检测 + 识别，可选版面分析（PP-DocLayoutV3）与表格结构（SLANeXt） |
 
 ## 选择方式
@@ -110,7 +110,7 @@ curl -X POST http://localhost:8083/v1/chat/completions \
 - **candle（默认）**：最适合开发 + CPU/Mac 上的小模型。覆盖 Qwen 2/2.5/3/3.5 + Llama 2/3 + Phi-3 + Mistral + ChatGLM + MiniCPM5-1B / MiniCPM5-2B。迭代快，无额外依赖。`minicpm5-1b` 是平台默认（1B，可放进 2 核 4 GB 的边缘设备）；`minicpm5-2b` 是服务器级备选（2.52B，约 6–7 GB 显存）。
 - **litert_lm**：需要端上 LLM（Android、iOS、嵌入式 Linux）时。要求 `PATH` 上有 `lit` 二进制和 Gemma 3 权重。适合无 GPU 的边缘部署。
 - **mistralrs**：需要生产级多家族支持（PagedAttention / prefix caching / KV cache）时。覆盖 40+ 家族。适合高吞吐并发服务多个模型。
-- **mage_vl**：需要 VLM（图像 + 多帧视频理解）、且由带 codec 原生 75% token 缩减的 Microsoft Mage-VL 支撑时使用。要求 `NEURON_MAGE_VL_SHARD_DIR` 指向来自 `microsoft/Mage-VL` 的两个 `model-0000X-of-00002.safetensors` 分片。经同一个 `MageVlRuntime` 同时覆盖 OpenAI 与 Anthropic 线上格式。2026-10-13 首次在 POPE / MME / MMStar 上跑了精度评估 — 分数与 0-token 诊断见 [VLM 评测 spec](/zh/superpowers/specs/2026-10-13-mage-vl-vlm-bench)，复现脚本在 `scripts/vlm-bench/`。
+- **mage_vl**：需要 VLM（图像 + 多帧视频理解）、且由带 codec 原生 75% token 缩减的 Microsoft Mage-VL 支撑时使用。要求 `NEURON_MAGE_VL_SHARD_DIR` 指向来自 `microsoft/Mage-VL` 的两个 `model-0000X-of-00002.safetensors` 分片。经同一个 `MageVlRuntime` 同时覆盖 OpenAI 与 Anthropic 线上格式。2026-10-13 首次在 POPE / MME / MMStar 上跑了精度评估 — 分数与 0-token 诊断见 [VLM 评测 spec](/superpowers/specs/2026-10-13-mage-vl-vlm-bench)，复现脚本在 `scripts/vlm-bench/`。
 
 ### TTS
 

@@ -202,6 +202,7 @@ pub struct ServerState {
 
 - **OpenAI 兼容**：每个 `/v1/*` 端点都与 OpenAI 的线上格式逐字节兼容（chat completions、audio speech、audio transcriptions、embeddings、rerank、vision detect/classify/segment/pose、vision LoRA register/list、models、models/pull、catalog/sources、info）。
 - **Anthropic Messages v1**：`/v1/messages` 说的是 Anthropic Messages 线上格式（vision、tool_use、cache_control、extended thinking、流式 SSE），经 `ApiAdapter` 分发系统复用与 OpenAI 端点相同的引擎。Mage-VL 也通过该路由抵达同一引擎。
+- **模型级流式 TTS**：`POST /v1/audio/speech/stream` 在模型产出音频的同时就返回它（VoxCPM2 在产出每个 latent patch 的瞬间把它解码成音频），因此首个字节远早于整句合成完毕到达。OpenAI 风格的 `/v1/audio/speech` 上的 `stream: true` 仍返回完整合成的 16 KiB 分块。
 - **neuron 专属的预测与门控**：`POST /v1/forecast`（Chronos2 零样本时间序列预测）与 `POST /v1/vision/gate/score`（Mage-VL StreamMind 事件门控——每个 codec 窗口输出一个 `p_speak`）。
 - **存活探针**：`GET /health` + `GET /v1/info`。
 

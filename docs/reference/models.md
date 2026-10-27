@@ -46,7 +46,7 @@ OCR engine) are noted separately. All entries require their feature flag
 | model | engine | notes |
 |---|---|---|
 | voxcpm-0.5b | burn | pre-converted burn weights, edge tier |
-| voxcpm2 | burn | 2.29B, 48 kHz, 30 languages, voice cloning; ~10 GB RAM (f32) |
+| voxcpm2 | burn | 2.29B, 48 kHz, 30 languages, voice cloning; ~10 GB RAM (f32). Model-level streaming via `POST /v1/audio/speech/stream`; opt-in GPU backend (`--features voxcpm-cuda`, f16 weights, ~4.6 GB VRAM) |
 
 ### ASR (transcription)
 

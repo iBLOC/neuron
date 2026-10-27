@@ -92,7 +92,7 @@ POST /v1/forecast
 POST /v1/decisions
 ```
 
-基于 [Laya](https://github.com/NandhaKishorM/laya) 模型的判别式决策打分(Apache-2.0;int8 纯编码器 ONNX,每个问题一次前向,无解码)。请求:`{model, state, questions: [{type: "choice"|"score"|"noul", instructions, criteria?, labels?, options?, option_order?}], max_len?, head_max_len?}`。响应为每个问题携带一条结果:按渲染顺序排列的各选项概率、选中索引、`act` 与 `escalate` 的划分,以及校准后的置信度。问题字段名与 `laya/onnx_agent.py` 的输入一致,因此为 Python agent 编写的 schema 可原样移植。需要 `--features tract` + `NEURON_DECISION_RUNTIME=tract` + `NEURON_DECISION_MODEL_PATH` 指向经 `scripts/prep-laya-onnx.py` 预处理的模型。见 [`docs/superpowers/specs/2026-09-24-laya-decision.md`](../superpowers/specs/2026-09-24-laya-decision.md)。
+基于 [Laya](https://github.com/NandhaKishorM/laya) 模型的判别式决策打分(Apache-2.0;int8 纯编码器 ONNX,每个问题一次前向,无解码)。请求:`{model, state, questions: [{type: "choice"|"score"|"noul", instructions, criteria?, labels?, options?, option_order?}], max_len?, head_max_len?}`。响应为每个问题携带一条结果:按渲染顺序排列的各选项概率、选中索引、`act` 与 `escalate` 的划分,以及校准后的置信度。问题字段名与 `laya/onnx_agent.py` 的输入一致,因此为 Python agent 编写的 schema 可原样移植。需要 `--features tract` + `NEURON_DECISION_RUNTIME=tract` + `NEURON_DECISION_MODEL_PATH` 指向经 `scripts/prep-laya-onnx.py` 预处理的模型。见 [`docs/superpowers/specs/2026-09-24-laya-decision.md`](../../superpowers/specs/2026-09-24-laya-decision.md)。
 
 ### OCR(文字识别,neuron 专属)
 

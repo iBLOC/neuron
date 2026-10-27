@@ -152,6 +152,8 @@ let rt = state.llm_registry.runtime_for(&req.model).await
 
 If you only have one runtime of each capability, the shortcut field is the same instance. If you have multiple, the shortcut is the first one registered (registration order matters).
 
+**The TTS shortcut resolves lazily.** `TtsRuntimeRegistry::default_runtime` used to load the first registered model eagerly, but `ServerState::new` runs inside the host's tokio runtime, where blocking on that load panics with *"Cannot start a runtime from within a runtime"*. The registry now hands out a proxy (`lazy_default_runtime`) that resolves the model on the first async call instead — same effective semantics (the first registered runtime), but the weights are materialized on the first request rather than at startup.
+
 ## Supporting services
 
 ### `NeuronConfig`

@@ -44,7 +44,7 @@ feature flag(见 [/zh/concepts/feature-flags](/zh/concepts/feature-flags))。
 | 模型 | 引擎 | 说明 |
 |---|---|---|
 | voxcpm-0.5b | burn | 预转换 burn 权重,边缘档 |
-| voxcpm2 | burn | 2.29B,48 kHz,30 语种,声音克隆;约 10 GB 内存(f32) |
+| voxcpm2 | burn | 2.29B,48 kHz,30 语种,声音克隆;约 10 GB 内存(f32)。模型级流式见 `POST /v1/audio/speech/stream`;GPU 后端可选(`--features voxcpm-cuda`,f16 权重,约 4.6 GB 显存) |
 
 ### ASR(语音转文字)
 

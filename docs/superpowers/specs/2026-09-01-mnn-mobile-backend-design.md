@@ -5,7 +5,7 @@
 **Predecessors**:
 - [2026-09-01-mobile-phase-1-tensor-pool.md](./2026-09-01-mobile-phase-1-tensor-pool.md) — TensorPool landed
 - [2026-09-01-mobile-phase-2-tract-onnx.md](./2026-09-01-mobile-phase-2-tract-onnx.md) — tract ONNX landed
-- [2026-07-03-vision-onnx-backend-design.md](./2026-07-03-vision-onnx-backend-design.md) — ONNX plug-in contract
+- The ONNX plug-in contract — implemented by [`build_session` in `src/vision/ort_runtime.rs`](../../../src/vision/ort_runtime.rs)
 
 ## Motivation
 

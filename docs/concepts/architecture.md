@@ -202,6 +202,7 @@ Handlers resolve models with `runtime_for(&model).await.unwrap_or_else(|_| state
 
 - **OpenAI-compatible**: every `/v1/*` endpoint is byte-for-byte compatible with OpenAI's wire format (chat completions, audio speech, audio transcriptions, embeddings, rerank, vision detect/classify/segment/pose, vision LoRA register/list, models, models/pull, catalog/sources, info).
 - **Anthropic Messages v1**: `/v1/messages` speaks the Anthropic Messages wire format (vision, tool_use, cache_control, extended thinking, streaming SSE), backed by the same engines as the OpenAI endpoint via the `ApiAdapter` dispatch system. Mage-VL reaches the same engine via this route.
+- **Model-level streaming TTS**: `POST /v1/audio/speech/stream` returns audio as the model produces it (VoxCPM2 decodes each latent patch into audio the moment it is emitted), so the first bytes arrive long before the utterance is finished. The OpenAI-style `stream: true` on `/v1/audio/speech` still returns the full synthesis in 16 KiB chunks.
 - **Neuron-specific forecast + gate**: `POST /v1/forecast` (Chronos2 zero-shot time-series forecasting) and `POST /v1/vision/gate/score` (Mage-VL StreamMind event gate — `p_speak` per codec window).
 - **Liveness**: `GET /health` + `GET /v1/info`.
 

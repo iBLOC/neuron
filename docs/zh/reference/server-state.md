@@ -152,6 +152,8 @@ let rt = state.llm_registry.runtime_for(&req.model).await
 
 如果每个能力只有一个运行时,快捷字段就是同一实例;如果有多个,快捷字段是首个注册的那个(注册顺序很重要)。
 
+**TTS 的快捷字段是懒解析的。** `TtsRuntimeRegistry::default_runtime` 原先会急切加载首个已注册模型,但 `ServerState::new` 跑在宿主的 tokio runtime 里,在那里阻塞等待加载会 panic:"Cannot start a runtime from within a runtime"。注册表现在改为交出一个代理(`lazy_default_runtime`),在第一次异步调用时才解析模型——有效语义不变(仍是首个注册的运行时),区别是权重在首个请求时物化,而不是启动时。
+
 ## 支撑服务
 
 ### `NeuronConfig`

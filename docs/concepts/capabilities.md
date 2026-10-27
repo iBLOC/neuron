@@ -28,7 +28,7 @@ neuron exposes **9 capability surfaces** that mirror the OpenAI wire format wher
 
 ## TTS — Text-to-Speech
 
-**Endpoints**: `POST /v1/audio/speech` (OpenAI), streaming via `stream: true` SSE
+**Endpoints**: `POST /v1/audio/speech` (OpenAI), streaming via `stream: true` SSE, and `POST /v1/audio/speech/stream` (model-level streaming)
 
 **Engine**: **burn** (VoxCpm 0.5B and VoxCPM2, opt-in via `--features voxcpm`)
 
@@ -39,7 +39,12 @@ neuron exposes **9 capability surfaces** that mirror the OpenAI wire format wher
 - `NEURON_TTS_MODEL_PATH=/path/to/voxcpm-mpk-dir` (must contain `config.json` + `tokenizer.json` + `model.mpk` + `audiovae.mpk`)
 - `voice` (OpenAI): `alloy` / `echo` / `fable` / `onyx` / `nova` / `shimmer` (mapped to VoxCpm speakers; pick closest)
 
-**Streaming**: When `stream: true`, response is `Body::from_stream(...)` of 16 KiB audio chunks. When `false`, single MP3 response.
+**Streaming**: two levels, both served by the VoxCPM2 runtime.
+
+- `stream: true` on `/v1/audio/speech` — the whole utterance is synthesized first, then sent as 16 KiB chunks (`Body::from_stream`). `false` (default) returns the full audio in one body.
+- `POST /v1/audio/speech/stream` — **model-level** streaming: VoxCPM2 decodes each latent patch into audio the moment the model emits it, so the first bytes arrive after one patch instead of after the whole utterance. Measured with the real checkpoint on a 12-core CPU: first byte after 51.6 s versus 651.0 s on `/v1/audio/speech` (12.6×), with byte-identical output. `response_format` picks the container — `wav` (default: a 44-byte header with `0xFFFFFFFF` placeholder sizes) or `pcm` (raw 16-bit LE mono). The endpoint takes the same `reference_audio` / `prompt_text` fields for voice cloning.
+
+**GPU (opt-in)**: `--features voxcpm-cuda` + `NEURON_DEVICE=nvidia` runs VoxCPM2 through burn's CubeCL CUDA backend in f16 (~4.6 GB of VRAM instead of ~9.2 GB). The CPU stays the default — VoxCPM2's per-patch decode is latency-bound, and the first audio byte arrived after 708 s on an RTX 3090 versus 112 s on a 12-core CPU for the same utterance.
 
 **License note**: The vendored VoxCpm implementation under `src/tts/voxcpm_burn/` was originally self-published at [github.com/madushan1000/voxcpm_rs](https://github.com/madushan1000/voxcpm_rs) and has been relicensed to Apache-2.0 for inclusion in neuron.
 

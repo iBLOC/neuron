@@ -28,7 +28,7 @@ neuron 暴露 **9 个能力面（capability）**：在存在 OpenAI 对应格式
 
 ## TTS — 文本转语音
 
-**端点**：`POST /v1/audio/speech`（OpenAI），`stream: true` 时经 SSE 流式返回
+**端点**：`POST /v1/audio/speech`（OpenAI），`stream: true` 时经 SSE 流式返回，以及 `POST /v1/audio/speech/stream`（模型级流式）
 
 **引擎**：**burn**（VoxCpm 0.5B 与 VoxCPM2，经 `--features voxcpm` 可选启用）
 
@@ -39,7 +39,12 @@ neuron 暴露 **9 个能力面（capability）**：在存在 OpenAI 对应格式
 - `NEURON_TTS_MODEL_PATH=/path/to/voxcpm-mpk-dir`（必须包含 `config.json` + `tokenizer.json` + `model.mpk` + `audiovae.mpk`）
 - `voice`（OpenAI）：`alloy` / `echo` / `fable` / `onyx` / `nova` / `shimmer`（映射到 VoxCpm 说话人；就近选择）
 
-**流式**：`stream: true` 时，响应是 16 KiB 音频块的 `Body::from_stream(...)`；`false` 时返回单个 MP3 响应。
+**流式**：两个层级，都由 VoxCPM2 运行时提供。
+
+- `/v1/audio/speech` 上的 `stream: true`——先完整合成整句，再按 16 KiB 分块发送（`Body::from_stream`）；`false`（默认）返回单个完整音频响应。
+- `POST /v1/audio/speech/stream`——**模型级**流式：VoxCPM2 在模型产出每个 latent patch 的瞬间就把它解码成音频，首个字节早于整句合成完毕到达。真实检查点在 12 核 CPU 上实测：首包 51.6 s，而 `/v1/audio/speech` 是 651.0 s（12.6×），两者输出字节完全一致。`response_format` 决定容器——`wav`（默认：44 字节头，长度字段是 `0xFFFFFFFF` 占位）或 `pcm`（裸 16-bit LE 单声道）。该端点接受同样的 `reference_audio` / `prompt_text` 字段用于声音克隆。
+
+**GPU（可选）**：`--features voxcpm-cuda` + `NEURON_DEVICE=nvidia` 让 VoxCPM2 跑在 burn 的 CubeCL CUDA 后端上，权重用 f16（显存约 4.6 GB 而非 9.2 GB）。默认仍在 CPU——VoxCPM2 的逐 patch 解码是延迟受限的，同一句话在 RTX 3090 上首个音频字节要 708 s，而 12 核 CPU 只要 112 s。
 
 **许可证说明**：`src/tts/voxcpm_burn/` 下的 vendored VoxCpm 实现最初自行发布于 [github.com/madushan1000/voxcpm_rs](https://github.com/madushan1000/voxcpm_rs)，为纳入 neuron 已改用 Apache-2.0 许可。
 
@@ -226,7 +231,7 @@ Decision 是一种*打分*型能力面，而非生成式能力面：给定一个
 
 **响应结构**：每个问题一个结果，携带每个选项的概率、选中索引、`act` 与 `escalate` 的划分、经校准的置信度，外加一个 `usage` 块。
 
-**数值精度**：Rust 提示词移植在 17 个黄金向量上与上游逐位一致（bit-exact）。前向传播与 onnxruntime 则**不是**逐位一致，也无法做到——tract 的 f32 `Div` 是倒数乘法，int8 量化会把这种 ULP 级差距放大成整数级编码差异。实测最坏情况为 1.65e-1 相对误差；`act` 决策无条件复现，接近的选项决策则可能不同。测量数据与断言契约见 [`docs/superpowers/specs/2026-09-24-laya-decision.md`](../superpowers/specs/2026-09-24-laya-decision.md)。
+**数值精度**：Rust 提示词移植在 17 个黄金向量上与上游逐位一致（bit-exact）。前向传播与 onnxruntime 则**不是**逐位一致，也无法做到——tract 的 f32 `Div` 是倒数乘法，int8 量化会把这种 ULP 级差距放大成整数级编码差异。实测最坏情况为 1.65e-1 相对误差；`act` 决策无条件复现，接近的选项决策则可能不同。测量数据与断言契约见 [`docs/superpowers/specs/2026-09-24-laya-decision.md`](../../superpowers/specs/2026-09-24-laya-decision.md)。
 
 ## 能力矩阵
 
