@@ -11,9 +11,16 @@
 mod integration {
     use std::path::PathBuf;
 
+    /// Home directory without pulling the `dirs` crate in — this is a
+    /// dev-only lookup and `dirs` is not a dependency of the crate.
+    fn home_dir() -> Option<PathBuf> {
+        std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .map(PathBuf::from)
+    }
+
     fn model_dir() -> Option<PathBuf> {
-        let dir = dirs::home_dir()
-            .unwrap_or_default()
+        let dir = home_dir()?
             .join(".neuron/models/chronos2/chronos-bolt-small");
         if dir.exists() {
             Some(dir)

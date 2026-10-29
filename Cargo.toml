@@ -132,6 +132,12 @@ harness = false
 [[bench]]
 name = "asr_speed"
 harness = false
+# The bench's `Engine` enum has both variants behind feature gates
+# (`tract` / `sherpa`). With neither of them on the enum is empty and
+# every `match self` on it stops being exhaustive. Requiring `tract`
+# keeps the default build green; the `sherpa` arm stays `cfg`-gated, so
+# the bench still compares both when `sherpa` is enabled too.
+required-features = ["tract"]
 
 # llama.cpp backend speed: drives neuron's own `LlamaCppLlmRuntime`
 # in-process. Complements `llm_speed.rs` (which drives external HTTP
@@ -149,6 +155,13 @@ required-features = ["llamacpp"]
 [[bench]]
 name = "model_matrix"
 harness = false
+
+# Chronos2 integration tests need the `chronos2` feature — the runtime
+# they drive (`CandleChronos2Runtime`) lives behind it, so without the
+# feature the test target does not compile.
+[[test]]
+name = "chronos2_integration"
+required-features = ["chronos2"]
 
 [[example]]
 name = "ocr_smoke"
