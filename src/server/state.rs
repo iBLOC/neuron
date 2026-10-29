@@ -238,24 +238,42 @@ impl ServerState {
         // NEURON_REMOTE_BASE_URL + NEURON_REMOTE_MODELS="a,b" register
         // each id as a capability engine that proxies to the remote
         // endpoint verbatim — tools included. This is what lets the
-        // brain container serve cloud-quality models for benchmarking
+        // stack container serve cloud-quality models for benchmarking
         // the full production stack without local weights.
         if let Ok(base) = std::env::var("NEURON_REMOTE_BASE_URL") {
             if !base.trim().is_empty() {
                 if let Ok(ids) = std::env::var("NEURON_REMOTE_MODELS") {
                     let key = std::env::var("NEURON_REMOTE_API_KEY").unwrap_or_default();
+                    // Opt-in outbound PII pseudonymization. Only applied to
+                    // genuinely external endpoints — a local remote (LAN
+                    // gateway, loopback) is not an egress.
+                    let redact = std::env::var("NEURON_REMOTE_REDACT_PII")
+                        .map(|v| {
+                            let v = v.trim().to_ascii_lowercase();
+                            v == "1" || v == "true" || v == "yes" || v == "on"
+                        })
+                        .unwrap_or(false)
+                        && synapse_privacy::is_external_url(base.trim());
                     for id in ids.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                        let mut engine = crate::engine::remote::RemoteLlmEngine::new(
+                            base.trim().to_string(),
+                            key.clone(),
+                            id.to_string(),
+                        );
+                        if redact {
+                            engine = engine.with_privacy();
+                        }
                         let engine: std::sync::Arc<dyn crate::engine::AnyCapabilityEngine> =
-                            std::sync::Arc::new(crate::engine::remote::RemoteLlmEngine::new(
-                                base.trim().to_string(),
-                                key.clone(),
-                                id.to_string(),
-                            ));
+                            std::sync::Arc::new(engine);
                         engines.llm.register(id.to_string(), engine.clone());
                         if engines.llm.default().is_none() {
                             engines.llm.set_default(engine);
                         }
-                        eprintln!("[neuron] registered remote model {id} → {}", base.trim());
+                        eprintln!(
+                            "[neuron] registered remote model {id} → {}{}",
+                            base.trim(),
+                            if redact { " (PII redaction on)" } else { "" }
+                        );
                     }
                 } else {
                     eprintln!(

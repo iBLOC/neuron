@@ -21,6 +21,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 thiserror = "2"
 tracing = "0.1"
+# Outbound PII redaction engine — shared with synapse / prefrontal so
+# every external-model path redacts identically. Kept in its own crate
+# so neuron does not inherit synapse's runtime dependencies.
+synapse-privacy = { path = "../synapse/crates/privacy" }
 reqwest = { version = "0.12", features = ["json", "multipart", "rustls-tls", "stream"], default-features = false }
 axum = { version = "0.8", features = ["ws", "multipart"] }
 tower = "0.5"

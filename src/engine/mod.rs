@@ -61,5 +61,6 @@ pub trait AnyCapabilityEngine: LlmRuntime {}
 impl<T: LlmRuntime + ?Sized> AnyCapabilityEngine for T {}
 
 pub mod bridge;
+pub mod privacy;
 pub mod registry;
 pub mod remote;

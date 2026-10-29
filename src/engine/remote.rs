@@ -3,16 +3,19 @@
 //! response back.
 //!
 //! Why: neuron's local runtimes (candle / litert / mistralrs) serve
-//! weights from disk; the brain behind them had no way to expose a
+//! weights from disk; the stack behind them had no way to expose a
 //! cloud model, which made benchmarking the production stack (端脑 +
 //! 丘脑 + 海马体 + neuron) against cloud-quality models impossible.
-//! This engine closes that gap: the brain keeps its OpenAI face and
+//! This engine closes that gap: the stack keeps its OpenAI face and
 //! tool-calling round-trips verbatim (OpenAI wire on both sides).
 //!
 //! Config (read in `server::state::ServerState::new`):
 //! * `NEURON_REMOTE_BASE_URL` — e.g. `https://api.deepseek.com/v1`
 //! * `NEURON_REMOTE_API_KEY`  — bearer token
 //! * `NEURON_REMOTE_MODELS`   — comma-separated model ids to register
+//! * `NEURON_REMOTE_REDACT_PII` — `1`/`true` to pseudonymize outbound
+//!   PII (and restore it on the way back) before the request leaves
+//!   the device. Off by default.
 //!
 //! Streaming: upstream is always called non-streaming; `execute_stream`
 //! re-emits the full response as a single delta chunk. The benchmark
@@ -27,6 +30,7 @@ use crate::adapter::openai_chat::{
     canonical_request_to_openai_wire, openai_wire_response_to_canonical,
 };
 use crate::canonical::{CanonicalLlmRequest, CanonicalLlmResponse, CanonicalLlmStreamEvent};
+use crate::engine::privacy::PrivacyFilter;
 use crate::llm::ChatResult;
 use crate::capabilities::ModelCapabilities;
 
@@ -35,10 +39,12 @@ pub struct RemoteLlmEngine {
     base_url: String,
     api_key: String,
     /// Upstream model id — kept distinct from the locally registered
-    /// alias so the brain can expose `deepseek-chat` while proxying to
+    /// alias so the stack can expose `deepseek-chat` while proxying to
     /// whatever the remote actually names it.
     model: String,
     client: reqwest::Client,
+    /// Outbound PII pseudonymization (None = disabled).
+    privacy: Option<PrivacyFilter>,
 }
 
 impl RemoteLlmEngine {
@@ -51,7 +57,14 @@ impl RemoteLlmEngine {
                 .timeout(Duration::from_secs(600))
                 .build()
                 .unwrap_or_default(),
+            privacy: None,
         }
+    }
+
+    /// Enable outbound PII pseudonymization for this engine.
+    pub fn with_privacy(mut self) -> Self {
+        self.privacy = Some(PrivacyFilter::new());
+        self
     }
 }
 
@@ -61,6 +74,16 @@ impl crate::engine::LlmRuntime for RemoteLlmEngine {
         &self,
         req: CanonicalLlmRequest,
     ) -> ChatResult<CanonicalLlmResponse> {
+        // Redact on the way out, restore on the way back — the caller
+        // never sees a pseudonym.
+        let (req, restore) = match &self.privacy {
+            Some(filter) => {
+                let mut req = req;
+                filter.redact_request(&mut req);
+                (req, Some(filter))
+            }
+            None => (req, None),
+        };
         let wire = canonical_request_to_openai_wire(&req);
         let url = format!("{}/chat/completions", self.base_url);
         let mut r = self.client.post(&url).json(&wire);
@@ -84,8 +107,12 @@ impl crate::engine::LlmRuntime for RemoteLlmEngine {
                 "remote HTTP {status}: {msg}"
             )));
         }
-        openai_wire_response_to_canonical(&body, &req.model)
-            .map_err(crate::llm::NeuronError::new)
+        let mut canonical =
+            openai_wire_response_to_canonical(&body, &req.model).map_err(crate::llm::NeuronError::new)?;
+        if let Some(filter) = restore {
+            filter.restore_response(&mut canonical);
+        }
+        Ok(canonical)
     }
 
     async fn execute_stream(

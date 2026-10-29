@@ -6200,6 +6200,7 @@ dependencies = [
  "serial_test",
  "sherpa-onnx",
  "symphonia",
+ "synapse-privacy",
  "tempfile",
  "thiserror 2.0.21",
  "tokenizers 0.22.2",
@@ -9285,6 +9286,15 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-ident",
+]
+
+[[package]]
+name = "synapse-privacy"
+version = "0.1.0"
+dependencies = [
+ "parking_lot",
+ "regex",
+ "serde",
 ]
 
 [[package]]
