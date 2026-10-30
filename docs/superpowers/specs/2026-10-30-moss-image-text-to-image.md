@@ -160,20 +160,174 @@ wrong numbers or NaNs, not compile errors:
 
 ## What is NOT done
 
-- **No real-weight verification.** The port is validated by 34 unit
-  tests (structural/tiny-config + analytic anchors: the GDN kernel
-  against a hand-derived single-token formula, the scheduler against
-  upstream-computed sigma values, the VAE's 16× upscale factor, the
-  RoPE layout), but **no run against the real 27 GB checkpoint has
-  happened** — image quality is unverified. The upstream repo has no
-  ONNX export and the model needs ~27 GB, so this needs a GPU host.
-- No staged (encode → free → DiT) residency.
-- No scheduler integration for the `imagegen` capability.
+- **The text encoder and the DiT have not been compared on the real
+  weights.** The VAE has (see below); the other two need a host with
+  a CUDA-enabled PyTorch (the reference side) and more RAM than a
+  16 GB box — the text encoder alone is 8.4B parameters, and a fp32
+  reference does not fit. Their *formulas* are verified numerically
+  against the upstream implementation (the parity section above) and
+  their *weight paths and shapes* against the real checkpoint (below),
+  but no run against the real 27 GB checkpoint has happened — image
+  quality is unverified.
 - No `n > 1` batching (the loop is sequential per image).
 - `response_format` accepts only `b64_json` (neuron serves local
   bytes; there is no URL to hand out).
 - The SFT variant is loadable through the same path (it is the same
   architecture), but no LoRA adapter support.
+- The `imagegen` capability is **not wired into the model scheduler**
+  (`/v1/scheduler/*` is LLM-only), so a 27 GB image model cannot be
+  swapped cooperatively with an LLM yet.
+
+## Real-weight verification (the VAE)
+
+`scripts/gen-moss-real-ref.py` runs the upstream implementations on
+the **real checkpoint** and dumps their outputs;
+`src/imagegen/moss_image/real_weights.rs` then runs neuron's port on
+the same weights and compares element-wise:
+
+```
+python scripts/gen-moss-real-ref.py --only vae --device cpu
+cargo test --lib real_weights -- --ignored --nocapture
+```
+
+Measured 2026-10-30 on the real `OpenMOSS-Team/MOSS-Image-Base` VAE
+(251 tensors, fp32): **relative error 1.5e-5** (max abs diff 1.1e-5
+against a reference magnitude of 0.72). The FLUX.2 decoder — the
+batch-norm de-normalization, the 2×2 pixel unshuffle and the decoder
+stack itself — matches diffusers' `AutoencoderKLFlux2` on the real
+weights.
+
+**This caught the last bug: the prompt template was missing the turn
+markers.** The upstream chat template renders
+
+```
+<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n<think>\n
+```
+
+and neuron's hard-coded template had dropped the four
+`<|im_start|>` / `<|im_end|>` markers — the model would have seen a
+malformed conversation on every request. The check compares the
+rendered text **and** the token ids (32 for the reference prompt), so
+a template that renders the same text but tokenizes differently is
+caught too.
+
+The tests **skip** when their reference has not been generated, so
+the suite stays green on a host without the checkpoint; each prints
+the command that would produce the missing reference.
+
+Note on the reference side: the reference runs the upstream code in
+the *installed* packages (`transformers` for the text encoder,
+`diffusers` for the VAE) and the repo's own `pipeline_moss_image.py`
+for the DiT — nothing is re-typed.
+
+## Staged residency (24 GB cards)
+
+The pipeline needs 13.6B parameters — ~27 GB at f16 — which does not
+fit a 24 GB card with the text encoder and the DiT resident at the
+same time. The runtime therefore loads the components **per stage**:
+
+1. the text encoder encodes the prompt (and the negative prompt),
+   then is dropped;
+2. the DiT runs the sampling loop, then is dropped;
+3. the VAE decodes the latent to a PNG.
+
+The peak residency is one component (~17 GB at f16) instead of all
+27 GB. `NEURON_IMAGEGEN_RESIDENCY=cached` keeps everything resident
+instead — faster (no reload) on a host with the memory for it;
+`staged` is the default.
+
+The cost of the staged mode is re-reading the weights from disk for
+every request, which the memory-mapped loader does lazily.
+
+
+## Numerical parity against the upstream implementation
+
+Unit tests that assert *shapes* cannot catch a wrong formula. The
+parity fixtures under `src/imagegen/moss_image/testdata/` close that
+gap: `scripts/gen-moss-parity.py` runs the **upstream code itself** —
+the Gated DeltaNet kernel from the installed `transformers` package
+(`transformers.models.qwen3_5.modeling_qwen3_5`) and the DiT from the
+upstream `pipeline_moss_image.py` in the model repo — and dumps the
+inputs plus the reference outputs. Nothing upstream is re-typed in
+the script, so the fixture is a genuine reference rather than a
+second transcription. The inputs are deterministic (synthesised from
+a fixed trigonometric sequence, not drawn from an RNG), so the
+fixtures regenerate bit for bit.
+
+`src/imagegen/moss_image/parity.rs` then runs neuron's port on the
+same inputs and compares element-wise:
+
+```
+cargo test --lib moss_image::parity -- --nocapture
+```
+
+Measured 2026-10-30 (fp32, CPU):
+
+| Component | relative error vs upstream |
+|---|---|
+| GDN chunk kernel | 1.1e-6 |
+| DiT forward | 2.0e-6 |
+| DiT forward with a skipped block (CFG negative branch) | 1.3e-6 |
+
+The residual is float32 summation order, nothing semantic.
+
+**This is what caught the last two bugs**, both of which were silent:
+
+1. **The modulation chunks were read in the wrong order.** Upstream
+   unpacks `shift_a, scale_a, gate_a, shift_f, scale_f, gate_f`; the
+   port had scale and shift swapped in both the attention and the
+   FFN branch. A shape-level test cannot see this — the tensors all
+   have the right shape.
+2. **The attention gate was applied to the wrong side of the output
+   projection.** Upstream computes `x + proj['o'](attn) * gate_a`;
+   the port computed `proj['o'](x + attn * gate_a)`.
+
+Before the fix the DiT's relative error was **0.38**; after it,
+**2.0e-6**.
+
+
+## Weight-path verification (offline, seconds)
+
+`src/imagegen/moss_image/weight_names.rs` closes the "typo in a
+`pp(...)` segment" risk — the failure mode that would otherwise only
+surface after a 27 GB download, as "cannot find tensor X".
+
+A recording `VarBuilder` backend answers every request with a
+one-element tensor and remembers the **path and the requested shape**.
+Building the three modules with it yields the exact set of paths the
+port asks for (names and shapes are dimension-independent, so the
+probe can run with tiny dims — and with the real config for the shape
+check, since the recorder never materializes the weights).
+
+The test then fetches the upstream index files (the two
+`*.safetensors.index.json` manifests and the JSON headers of the
+shards — a few MB in total) and diffs them:
+
+```
+cargo test --lib verify_weight_paths_against_upstream -- --ignored
+cargo test --lib verify_weight_shapes_against_upstream -- --ignored
+```
+
+Result against `OpenMOSS-Team/MOSS-Image-Base` (2026-10-30):
+
+| Component | upstream tensors | requested | unread (all intentional) |
+|---|---|---|---|
+| transformer | 463 | **462** | `rope.bands` (derived — rebuilt from `rope_base`) |
+| text_encoder | 759 | **426** | 333 × `visual.*` (text-only inference skips the vision tower) |
+| vae | 251 | **142** | `encoder.*` + `quant_conv.*` (decode-only) + `bn.num_batches_tracked` |
+
+- Zero missing paths, zero spurious requests.
+- **All 1,030 requested shapes match the upstream headers** — so the
+  Linear orientations, the conv kernel layouts and the per-head norm
+  dims are right.
+- The "unused" check is the one that catches a **silent** mistake:
+  using `linear_no_bias` where the checkpoint carries a bias would
+  leave that bias tensor unread and the model quietly wrong — the
+  diff would flag it as an unexpected unused tensor.
+
+What this does **not** cover: the forward pass' numerics (does the
+image match the PyTorch reference?). That needs the real weights.
+
 
 ## Files
 

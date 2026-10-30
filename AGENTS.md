@@ -16,7 +16,7 @@ neuron is a **library-only** Rust crate (no standalone binary) that host process
 - **SenseVoiceSmall via neuron's own tract ONNX stack** (`NEURON_ASR_RUNTIME=tract`, feature `tract`) — kaldi-style fbank (`src/asr/fbank.rs`), LFR stacking + CMVN stats parsed from the graph's `metadata_props` (`src/asr/onnx_meta.rs`), tract forward, in-repo greedy CTC (`src/asr/sensevoice.rs::ctc_greedy`). The export's dynamic PE chain must be moved out via `scripts/prep-sensevoice-onnx.py` first; the script asserts the export's constants and verifies against the original onnxruntime forward (max diff < `1e-3`, argmax equal across T = 37..250). See `docs/superpowers/specs/2026-09-26-sherpa-onnx-asr-backend.md`.
 - **Embedding batched forward** (`encode_batch` + `BatchLongest` padding, single BERT forward)
 - **Embedding base64 encoding** (`encoding_format: "base64"` → f32 LE bytes, base64 string)
-- **Multi-reranker families** (BGE / mxbai / jina, gated by `NEURON_RERANK_RUNTIME`) — all 3 have real candle forward passes now
+- **Multi-reranker families** (BGE / mxbai / jina, gated by `NEURON_RERANK_RUNTIME`) — BGE: XLM-RoBERTa cross-encoder, real candle forward. **mxbai: WORKING since 2026-10-30** — mxbai-rerank-base-v2 is a *generative* Qwen2 (~0.5B, tied embeddings, no classifier head despite the model card) that answers `1`/`0`; `MxbaiRerankRuntime` builds the checkpoint's chat-template prompt, runs `ModelForCausalLM::forward`, and scores `sigmoid(logit["1"] − logit["0"])` (verdict ids from `1_LogitScore/config.json`, 16/15). Direction verified on real weights (relevant doc → "1" ≈ 1.00, irrelevant → "0" ≈ 0.00). Two load-bearing details: pass the UNPREFIXED VarBuilder to `ModelForCausalLM::new` (it adds `model.` itself), and use `ModelForCausalLM` not `Qwen2Model` — the bare model returns hidden states, not logits (the first cut scored hidden dims 15/16; found by the generation probe `examples/mxbai_score_check.rs`). **jina: WORKING since 2026-10-30** — jina-reranker-v2-base-multilingual's released checkpoint uses the flash-attention module tree (`roberta.encoder.layers.N.mixer.Wqkv` fused [Q;K;V], `norm1`/`norm2`, `mlp.fc1/fc2`, `emb_ln`), which vanilla candle `xlm_roberta` cannot load by name. `JinaRerankRuntime::load_remapped_safetensors` loads the safetensors into a HashMap and REMAPS the keys to vanilla names — splitting each fused `Wqkv` [3·hidden, hidden] linear into separate query/key/value linears by rows, renaming `out_proj`→`attention.output.dense`, `norm1`→`attention.output.LayerNorm`, `norm2`→`output.LayerNorm`, `mlp.fc1/fc2`→`intermediate.dense`/`output.dense`, `emb_ln`→`embeddings.LayerNorm`, and `encoder.layers.N`→`encoder.layer.N` — then builds the standard `XLMRobertaForSequenceClassification`. No architecture port needed: the math is vanilla, only the names differed. Direction verified on real weights (Paris doc 0.83, irrelevant ≈ 0.03). Gotcha learned: the remap must translate the SUBMODULE names too (`out_proj`→`dense`), not just split the fused tensor — the first cut produced `.dense.out_proj.weight` and the loader named the exact missing tensor. The three families each declare their OWN engine (`candle` / `mxbai` / `jina`).
 - **Cohere rerank adapter** (`NEURON_RERANK_RUNTIME=cohere`) — proxies requests to Cohere's hosted `/v1/rerank` API; no local weights, requires `NEURON_COHERE_API_KEY`
 - **Model scheduler** (2026-09-29; `src/scheduler/`, spec `docs/superpowers/specs/2026-09-29-model-scheduler.md`) — LLM requests on `/v1/chat/completions` + `/v1/messages` (OpenAI & Anthropic, SSE + non-streaming) queue against a memory budget: same-model runs immediately, a different model loads alongside when it fits, otherwise queued resident-model work drains first and idle residents are evicted LRU-first before the swap; idle models recycle after `NEURON_SCHEDULER_IDLE_SECS`. Memory reference values ship in `assets/model_memory_profiles.json` and are corrected at runtime by observed unload RSS (EWMA → `~/.neuron/models/scheduler/observed_profiles.json`). Disable with `NEURON_SCHEDULER_ENABLED=false` for the legacy always-load path. `LlmRuntimeRegistry`'s loaded cache is now a **std** mutex (never held across `await`) with a synchronous `unload()` — the scheduler evicts from lease-drop contexts; `EngineRegistry::unregister` covers the canonical table.
 - **Laya decision scoring** (`POST /v1/decisions`) — non-autoregressive discriminative scorers (int8 ONNX, encoder-only, one forward per question) served natively via `tract`; scores a question's options plus an act-vs-escalate head with calibrated confidence. Convai ships **safetensors only, no ONNX** (`convaiinnovations/laya{,-multilingual,-typed-decisions}`), so the graph is upstream `scripts/export_onnx.py` → this repo's `scripts/prep-laya-onnx.py`; `laya` is deliberately not in `SUPPORTED_CATALOG` since nothing downloadable is loadable as-is. See `docs/superpowers/specs/2026-09-24-laya-decision.md`.
@@ -28,7 +28,7 @@ neuron is a **library-only** Rust crate (no standalone binary) that host process
 - **Multi-source model registry** (`huggingface` + `hf-mirror` + `modelscope`): the puller accepts `<source>:<repo>` references and the platform default source is `modelscope` (set via `NEURON_DEFAULT_SOURCE`). `HF_TOKEN` and `MODELSCOPE_TOKEN` env vars authenticate against gated/private repos on their respective platforms.
 - **Catalog dedup by `(engine, id)`**: a single `CatalogEntry` may carry multiple `SourceRef` entries (one per repo) so the UI can offer "download from HF / mirror / ModelScope" without re-listing the model three times.
 - **Puller management API**: `GET /v1/models/pull` lists active + completed jobs, `DELETE /v1/models/pull/{job_id}` cancels in-progress downloads (writes `JobStatus::Cancelled`). Failed downloads auto-clean the partial on-disk directory.
-- **Platform default model**: `minicpm5-1b` (OpenBMB MiniCPM5 1B, Apache 2.0, standard `LlamaForCausalLM`, 131K context, hybrid `<think>` reasoning). Loaded via the `candle` runtime — auto-detected from `config.json` `architectures = ["LlamaForCausalLM"]`.
+- **Platform default model**: `minicpm5-1b` (OpenBMB MiniCPM5 1B, Apache 2.0, standard `LlamaForCausalLM`, 131K context, hybrid `<think>` reasoning). Loaded via the `candle` runtime — auto-detected from `config.json` `architectures = ["LlamaForCausalLM"]`. **FIXED 2026-10-30 (gap found 2026-10-29 by `benches/model_bench.rs` on real weights)**: candle's `llama::Config` had no `head_dim` field, so `q_proj` was sized `[hidden, hidden]`, but MiniCPM5-1B's attention is 16 heads × head_dim 128 = 2048 ≠ hidden 1536 — the loader panicked with a shape mismatch, and candle's `Block::load` even `unwrap()`s it (process abort). `src/llm/vendor/llama_hd.rs` now vendors llama with explicit `head_dim` (upstream-compatible when the field is absent — every llama dispatch routes through it), fixes the q/kv projection sizing AND the attention-output reshape (`heads × head_dim` width before `o_proj`, not `hidden_size`), and propagates load errors instead of unwrapping. The 1B measured **62.4 tok/s on an RTX 3090** — the fastest LLM row. The config-dispatch unit test never caught this because it never loads weights; the per-model bench did.
 
 ## When to edit what
 
@@ -234,12 +234,79 @@ single-stream joint-sequence transformer (shared time modulation,
    **not implemented yet** (both components load eagerly), and the
    capability is **not wired into the model scheduler** (LLM-only), so
    a 27 GB image model cannot coexist cooperatively with an LLM yet.
-7. **No real-weight verification yet.** The port is covered by 34 unit
-   tests (tiny-config structures + analytic anchors: the GDN kernel
-   against a hand-derived single-token formula, the scheduler against
-   upstream-computed sigmas, the VAE's 16× upscale, the RoPE layout),
-   but no run against the real 27 GB checkpoint has happened — image
-   quality is unverified and needs a GPU host.
+7. **Numerical parity against the upstream implementation**
+   (`src/imagegen/moss_image/parity.rs` + the fixtures in
+   `testdata/`). `scripts/gen-moss-parity.py` runs the **upstream code
+   itself** — the GDN kernel from the installed `transformers`
+   package (`transformers.models.qwen3_5.modeling_qwen3_5`), the DiT
+   from the upstream `pipeline_moss_image.py` — and dumps
+   deterministic inputs plus the reference outputs; nothing upstream
+   is re-typed, so it is a real reference rather than a second
+   transcription. The Rust test compares element-wise:
+   `cargo test --lib moss_image::parity -- --nocapture`. Measured
+   2026-10-30 (fp32, CPU): GDN kernel 1.1e-6, DiT 2.0e-6, DiT with a
+   skipped block 1.3e-6 (float32 summation order, nothing semantic).
+   **This caught the last two silent bugs**, which shape-level tests
+   cannot see: the modulation chunks were read in the wrong order
+   (upstream unpacks `shift_a, scale_a, gate_a, shift_f, scale_f,
+   gate_f` — the port had scale and shift swapped), and the attention
+   gate was applied to the wrong side of the output projection
+   (upstream: `x + proj['o'](attn) * gate_a`; the port:
+   `proj['o'](x + attn * gate_a)`). Before the fix the DiT's relative
+   error was 0.38.
+8. **Real-weight verification** (`src/imagegen/moss_image/real_weights.rs`
+   + `scripts/gen-moss-real-ref.py`): the reference side runs the
+   upstream implementations on the **real checkpoint** (transformers'
+   `Qwen3_5Model`, the repo's own `pipeline_moss_image.py`,
+   diffusers' `AutoencoderKLFlux2`) and dumps their outputs; the
+   Rust test runs neuron's port on the same weights and compares
+   element-wise: `cargo test --lib real_weights -- --ignored --nocapture`.
+   The **VAE matches on the real weights** (relative error 1.5e-5
+   against diffusers, measured 2026-10-30). The text encoder and the
+   DiT need a host with a CUDA-enabled PyTorch and more RAM than a
+   16 GB box (the text encoder is 8.4B parameters — a fp32 reference
+   does not fit), so they are covered by the formula-level parity
+   above instead. The tests **skip** when their reference is missing,
+   so the suite stays green without the checkpoint.
+   **This caught the prompt-template bug**: the upstream chat template
+   renders `<|im_start|>user\n…<|im_end|>\n<|im_start|>assistant\n<think>\n`
+   and neuron's hard-coded template had dropped the four turn
+   markers — the model would have seen a malformed conversation on
+   every request. The check compares the rendered text **and** the
+   token ids (32 for the reference prompt). Note that the turn
+   markers are invisible in most terminal output (they look like
+   `<|…|>` and get filtered), so the comparison is done on the raw
+   bytes, not on what a human reads.
+9. **Staged residency** — the pipeline is ~27 GB at f16, which does
+   not fit a 24 GB card, so the components load **per stage**: the
+   text encoder encodes the prompt and is dropped, the DiT samples
+   and is dropped, the VAE decodes. Peak residency is one component
+   (~17 GB). `NEURON_IMAGEGEN_RESIDENCY=cached` keeps them all
+   resident instead (faster, needs the memory).
+10. **No real-weight run of the full pipeline yet.** The port's weight
+   paths and shapes are verified against the upstream checkpoint
+   (below), and the forward pass matches upstream numerically, but no
+   image has been generated from the real 27 GB checkpoint — image
+   quality is unverified.
+11. **Weight-path + shape verification**
+   (`src/imagegen/moss_image/weight_names.rs`): a recording
+   `VarBuilder` backend answers every request with a one-element
+   tensor and remembers the path **and the requested shape**, so
+   building the three modules yields exactly what the port asks for
+   (without materializing 27 GB). Two `#[ignore]`d tests fetch the
+   upstream index files + shard headers (a few MB) and diff:
+   `cargo test --lib verify_weight_paths_against_upstream -- --ignored`
+   and `cargo test --lib verify_weight_shapes_against_upstream -- --ignored`.
+   Verified 2026-10-30 against `OpenMOSS-Team/MOSS-Image-Base`:
+   transformer 462/463 read (only `rope.bands` — a derived constant
+   neuron rebuilds), text_encoder 426/759 (the 333 unread are all
+   `visual.*` — text-only inference skips the vision tower), VAE
+   142/251 (the rest is the encoder half of a decode-only VAE). Zero
+   missing paths, zero spurious requests, and **all 1,030 requested
+   shapes match** the upstream headers (so the Linear orientations and
+   conv layouts are right). The **unused** direction is the one that
+   catches a silent mistake: `linear_no_bias` where the checkpoint
+   carries a bias leaves that bias unread and the model quietly wrong.
 
 ### VoxCPM2 (loadable, 2026-09-27)
 
@@ -570,7 +637,7 @@ points if you touch it:
 ## Conformance tests
 
 ```bash
-cargo test --lib                                  # 701 unit tests (src/**/mod.rs) — 0 failures (2026-10-27; +15 OCR capability/DTO/registry/handler tests on the 2026-10-08 baseline of 664)
+cargo test --lib                                  # 748 unit tests (src/**/mod.rs) — 0 failures (2026-10-30, after the MOSS-Image parity fixtures landed; +5 parity/weight-name tests on the 2026-10-27 baseline of 743)
 cargo test --lib --features voxcpm                # 734 unit tests — 0 failures (VoxCPM2 adds the weights/model/runtime/clone-audio/streaming suites; two pre-existing V1 audiovae roundtrip tests are slow, ~5 min, on ndarray)
 cargo test --lib --features voxcpm-cuda           # 735 unit tests — 0 failures (adds the f16 GPU stack test; needs an NVIDIA GPU + the CUDA toolkit's bin on PATH)
 cargo test --lib --features tract                 # 761 unit tests — 0 failures (tract adds the decision + vision-ONNX + sensevoice paths + the full PP-OCR pipeline suites: DB++ postprocess, CTC decode, preprocess, paddle runtime)
@@ -583,6 +650,9 @@ cargo bench  --bench llamacpp_speed --features llamacpp  # writes target/llamacp
 cargo build --bench model_matrix --features "candle,tract,sherpa,voxcpm"  # per-cap × per-engine matrix harness compiles
 cargo bench  --bench model_matrix --features "candle,tract,sherpa,voxcpm"  # writes target/model-matrix.md (requires neuron_server on :18083)
 cargo run --release --example scheduler_smoke --features candle  # optional real-weights scheduler verification: coexistence + drain-then-swap + admin evict + RSS observation (needs 2 downloaded LLM models)
+cargo test --lib verify_weight_paths_against_upstream -- --ignored  # MOSS-Image: diff the port's requested tensor paths against the upstream checkpoint index (needs network; ~10 s)
+cargo test --lib verify_weight_shapes_against_upstream -- --ignored  # MOSS-Image: same, for the tensor shapes (needs network; ~40 s)
+cargo test --lib moss_image::parity -- --nocapture  # MOSS-Image: element-wise parity against the upstream PyTorch implementation (GDN kernel + DiT) — prints the measured relative error
 cargo run --release --example voxcpm2_stream_smoke --features voxcpm  # real-weights streaming-vs-full decode comparison (needs the openbmb/VoxCPM2 download; --with-lm adds the 2B LM stage)
 cargo run --release --example voxcpm2_stream_http_smoke --features voxcpm  # end-to-end HTTP check of POST /v1/audio/speech/stream: first-byte latency vs the legacy endpoint
 cargo build --lib                                 # library-only build (no standalone binary)
@@ -707,6 +777,7 @@ neuron has **no direct dependency** on any particular host — the integration c
 | `NEURON_IMAGEGEN_RUNTIME` | (unset) | `moss-image` — which text-to-image engine to register (MOSS-Image on candle, `POST /v1/images/generations`). Requires the `candle` feature (default on) |
 | `NEURON_IMAGEGEN_MODEL_PATH` | (unset) | Path to the MOSS-Image model dir — the upstream HF repo layout (`transformer/` + `text_encoder/` + `vae/` + `tokenizer/` + `scheduler/`). Unset falls back to `$NEURON_MODEL_DIRS/imagegen/<model_id>/` |
 | `NEURON_IMAGEGEN_DTYPE` | `f16` | `f16` \| `f32` \| `bf16` — storage dtype for the DiT + text encoder weights (the VAE always decodes fp32). `f16` ≈ 27 GB resident, `f32` ≈ 54 GB; candle's CPU backend has no BF16 matmul, so `bf16` needs CUDA |
+| `NEURON_IMAGEGEN_RESIDENCY` | `staged` | `staged` \| `cached` — how the three components share device memory. `staged` loads one at a time (the text encoder is dropped before the DiT loads), so the peak residency is ~17 GB at f16 instead of ~27 GB — the only way a 24 GB card can serve the model. `cached` keeps everything resident (faster; needs the memory) |
 
 ## Where the design specs live
 

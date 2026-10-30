@@ -4,7 +4,12 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use candle::{Device, DType, IndexOp};
 use candle_nn::VarBuilder;
-use candle_transformers::models::{chatglm, llama, mistral, phi3, qwen2, qwen3};
+use candle_transformers::models::{chatglm, mistral, phi3, qwen2, qwen3};
+
+// The vendored llama (explicit `head_dim`) is upstream-compatible when
+// the field is absent, so every llama dispatch goes through it — see
+// `vendor/llama_hd.rs` for why the fork exists (MiniCPM5-1B).
+use vendor::llama_hd as llama;
 use futures_util::stream::BoxStream;
 use tokenizers::Tokenizer;
 
@@ -16,7 +21,7 @@ use crate::llm::NeuronError;
 mod candle_arch;
 use candle_arch::{detect_arch, detect_model_type, CausalArch};
 
-#[cfg(feature = "flash-attn")]
+#[path = "vendor/mod.rs"]
 mod vendor;
 
 pub struct CandleLlmRuntime {

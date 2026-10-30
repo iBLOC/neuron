@@ -21,7 +21,11 @@
 //! be added by writing a new `load_X` function and adding one
 //! match arm to [`detect_arch`] — no edits to existing families.
 
-use candle_transformers::models::{chatglm, llama, mistral, phi3, qwen2, qwen3};
+use candle_transformers::models::{chatglm, mistral, phi3, qwen2, qwen3};
+
+// Vendored llama with explicit `head_dim` (upstream-compatible when the
+// field is absent) — see `vendor/llama_hd.rs`.
+use super::vendor::llama_hd as llama;
 
 /// Architecture variant for a loaded causal LM model.
 ///

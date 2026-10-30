@@ -82,6 +82,7 @@ neuron 在启动时从环境变量读取配置。下表完整列出每一个 `NE
 | `NEURON_IMAGEGEN_RUNTIME` | (未设置) | `moss-image` —— 注册哪个文生图引擎。在 candle 上原生服务 OpenMOSS MOSS-Image(5B DiT + Qwen3.5 文本编码器 + FLUX.2 解码 VAE),端点为 `POST /v1/images/generations`。需要 `candle` feature(默认开启) |
 | `NEURON_IMAGEGEN_MODEL_PATH` | (未设置) | MOSS-Image 模型目录路径——上游 HF 仓库布局(`transformer/` + `text_encoder/` + `vae/` + `tokenizer/` + `scheduler/`)。未设置时回退为 `$NEURON_MODEL_DIRS/imagegen/<model_id>/` |
 | `NEURON_IMAGEGEN_DTYPE` | `f16` | `f16` \| `f32` \| `bf16` —— DiT 与文本编码器权重的存储 dtype。VAE 始终以 fp32 解码。`f16` 约占 27 GB 常驻,`f32` 约 54 GB。candle 的 CPU 后端没有 BF16 matmul,`bf16` 需要 CUDA |
+| `NEURON_IMAGEGEN_RESIDENCY` | `staged` | `staged` \| `cached` —— 三个组件如何共享显存。`staged` 逐个加载(文本编码器在 DiT 载入前释放),f16 下峰值常驻约 17 GB 而非约 27 GB——这是 24 GB 显卡能服务该模型的唯一方式。`cached` 让全部组件常驻(更快;需要足够显存) |
 
 ## 模型调度器
 

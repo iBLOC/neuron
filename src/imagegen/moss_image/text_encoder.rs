@@ -117,7 +117,7 @@ fn softplus_f32(x: &Tensor) -> Result<Tensor> {
 /// The chunked Gated DeltaNet kernel — a direct port of
 /// `torch_chunk_gated_delta_rule` (chunk 64, fp32, QK-l2norm inside).
 ///
-/// Inputs (already reshaped to `[B, H_v, S, d]` fp32 semantics but
+/// Inputs (already reshaped to `[B, S, H_v, d]` fp32 semantics but
 /// carried in any dtype — everything is cast to fp32 internally like
 /// the reference):
 /// * `q`, `k` — `[B, S, H_v, d_k]` (already repeat-expanded to value
@@ -125,7 +125,7 @@ fn softplus_f32(x: &Tensor) -> Result<Tensor> {
 /// * `g` — `[B, S, H_v]` log-decay (≤ 0), `beta` — `[B, S, H_v]`
 ///
 /// Returns `[B, S, H_v, d_v]` in the input dtype.
-fn chunk_gated_delta_rule(
+pub(super) fn chunk_gated_delta_rule(
     q: &Tensor,
     k: &Tensor,
     v: &Tensor,

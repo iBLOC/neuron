@@ -27,46 +27,58 @@ neuron 各推理路径的实测速度、延迟、内存与精度数据 —— �
 (用 `scripts\cuda-build.bat cargo bench --bench model_bench
 --features "candle,cuda,tract,ocr,sherpa,voxcpm,chronos2,litert"` 重新生成)。
 
-实测:**41 个用例 —— 14 个测出数据,27 个跳过(缺权重),0 个失败。**
+实测:**41 个用例 —— 17 个测出数据,24 个跳过(缺权重),0 个失败。**
+每个用例跑在独立的 tokio task 里,引擎 panic 会变成一行 `failed` 并附上
+panic 内容,不会杀掉整个扫描。
 
-### LLM(candle,CUDA,贪婪解码,生成 64 个新 token)
+### LLM(candle,CUDA,贪婪解码,生成 64 个新 token,f32 权重)
 
-| 模型 | 参数量 | decode tok/s | p50 (ms) | TTFT p50 (ms) | 备注 |
-|---|---:|---:|---:|---:|---|
-| qwen2.5-0.5b | 0.5B | 52.3 | 563 | — | f32 权重 |
-| qwen3-0.6b | 0.6B | 54.7 | 1 260 | — | f32 权重 |
+| 模型 | 参数量 | decode tok/s | p50 (ms) | 备注 |
+|---|---:|---:|---:|---|
+| minicpm5-1b | 1B | **62.4** | 1 099 | 平台默认;本组最快 |
+| qwen3-0.6b | 0.6B | 60.7 | 1 131 | |
+| qwen2.5-0.5b | 0.5B | 54.5 | 538 | |
+| minicpm5-2b | 2.5B | 35.2 | 1 881 | |
 
 ### Embedding(candle,CUDA,8 条短文本)
 
 | 模型 | texts/s | p50 (ms) |
 |---|---:|---:|
-| all-minilm-l6-v2 | 507.6 | 16.0 |
-| bge-base-en-v1.5 | 322.1 | 24.1 |
-| e5-base-v2 | 331.8 | 25.3 |
-| gte-base | 397.8 | 19.1 |
+| all-minilm-l6-v2 | 664.9 | 12.8 |
+| bge-base-en-v1.5 | 213.3 | 38.3 |
+| e5-base-v2 | 719.2 | 11.0 |
+| gte-base | 825.3 | 9.5 |
 
 ### ASR(RTF = 音频秒数 / 墙钟秒数,越大越好)
 
 | 模型 | 引擎 | RTF | p50 (ms) | 备注 |
 |---|---|---:|---:|---|
-| sensevoice-small | sherpa | 17.2 | 117 | int8 sherpa-onnx 图 |
-| whisper-small | candle | 9.2 | 205 | CUDA |
-| whisper-tiny | candle | 14.1 | 141 | CUDA |
+| sensevoice-small | sherpa | 19.1 | 106 | int8 sherpa-onnx 图 |
+| whisper-small | candle | 9.6 | 199 | CUDA |
+| whisper-tiny | candle | 15.8 | 126 | CUDA |
 
 ### Vision / OCR(ONNX 会话路径,tract 执行器,640×640)
 
 | 模型 | 引擎 | images/s | p50 (ms) | 备注 |
 |---|---|---:|---:|---|
-| yolov11n | ort | 2.18 | 466 | |
-| yolov8n | ort | 2.03 | 491 | |
-| yolov8s | ort | 0.95 | 1 049 | |
-| ppocrv5-mobile | paddle-ocr | 1.50 | 681 | det+rec |
+| yolov11n | ort | 2.50 | 399 | |
+| yolov8n | ort | 2.44 | 412 | |
+| yolov8s | ort | 1.17 | 844 | |
+| ppocrv5-mobile | paddle-ocr | 1.82 | 533 | det+rec |
 
-### TTS(burn)
+### Rerank(1 query × 8 documents)
+
+| 模型 | 引擎 | docs/s | p50 (ms) | 备注 |
+|---|---|---:|---:|---|
+| mxbai-rerank-base-v2 | mxbai | **37.0** | 215 | 生成式 yes/no 打分器;4 篇文档方向性验证通过(相关 → "1" ≈ 1.00,不相关 → "0" ≈ 0.00) |
+| jina-reranker-base-v2 | jina | 15.7 | 509 | flash checkpoint 经键重映射加载;方向已验证(相关 0.83,不相关 ≈ 0.03) |
+| bge-reranker-base | candle | 16.2 | 495 | XLM-RoBERTa 交叉编码器 |
+
+### TTS(burn,CPU)
 
 | 模型 | 引擎 | p50 (ms) | 备注 |
 |---|---|---:|---|
-| voxcpm2 | burn | 316 222 | **CPU** —— burn 的 CUDA 后端要链 `nccl.lib`,而 CUDA toolkit 不带;而且实测在这张卡上比 CPU 还慢约 6 倍(逐 patch 解码是延迟瓶颈) |
+| voxcpm2 | burn | 251 191 | **CPU** —— burn 的 CUDA 后端要链 `nccl.lib`,而 CUDA toolkit 不带;而且实测在这张卡上比 CPU 还慢约 6 倍(逐 patch 解码是延迟瓶颈) |
 
 ::: warning 这轮扫描查出三个真 bug,均已修复
 1. **CUDA context 绑定在加载线程上。** `chat_stream` 把生成放在新起的
@@ -83,6 +95,14 @@ neuron 各推理路径的实测速度、延迟、内存与精度数据 —— �
 扫描同时确认:**candle 的 YOLOv8 后端无法消费 Ultralytics 导出文件**
 (架构是近似实现、没有 PAN-FPN neck),所以视觉行走 ONNX 路径
 (导出脚本 `scripts/export-yolo-onnx.py`)。
+
+最大的一条:**平台默认模型 minicpm5-1b 在 candle llama 路径上无法加载**
+—— candle 的 `llama::Config` 没有 `head_dim` 字段,q_proj 永远按方阵建,
+而 MiniCPM5-1B 的注意力比 hidden 宽(16 头 × 128 = 2048 vs hidden 1536)。
+**已于 2026-10-30 修复**:`src/llm/vendor/llama_hd.rs` vendor 了带显式
+`head_dim` 的 llama(字段缺省时与上游行为一致),并补上宽注意力需要的
+注意力输出 reshape;平台默认模型现在在本卡跑出 **62.4 tok/s** —— 全组
+最快。
 :::
 
 ## LLM 解码吞吐(candle 引擎)

@@ -1050,56 +1050,89 @@ async fn main() {
         sync_device_env(device);
         let vram_before = vram_used_mb();
 
-        let (status, timing, note) = match capability.as_str() {
-            "llm" => {
-                match run_llm(&model_id, &engine, dir.clone(), device, warmup, repeats).await {
-                    Ok(t) => (Status::Ok, Some(t), String::new()),
-                    Err(e) => (Status::Skipped, None, e),
+        // Run the case inside a spawned tokio task: a native panic deep in
+        // an engine (candle's llama loader `unwrap()`s shape mismatches —
+        // MiniCPM5-1B's q_proj is [2048,1536] vs the expected [1536,1536])
+        // then surfaces as a JoinError for THIS case instead of killing
+        // the whole sweep. Cases run sequentially, so the process-global
+        // env-var setup inside the runners stays safe.
+        let case_model = model_id.clone();
+        let case_engine = engine.clone();
+        let case_capability = capability.clone();
+        let joined = tokio::spawn(async move {
+            match case_capability.as_str() {
+                "llm" => run_llm(&case_model, &case_engine, dir.clone(), device, warmup, repeats)
+                    .await
+                    .map(|t| (Status::Ok, Some(t), String::new()))
+                    .map_err(|e| (Status::Skipped, None, e)),
+                "asr" => run_asr(&case_model, &case_engine, dir.clone(), device, warmup, repeats)
+                    .await
+                    .map(|t| (Status::Ok, Some(t), String::new()))
+                    .map_err(|e| (Status::Skipped, None, e)),
+                "rerank" => {
+                    run_rerank(&case_model, &case_engine, dir.clone(), device, warmup, repeats)
+                        .await
+                        .map(|t| (Status::Ok, Some(t), String::new()))
+                        .map_err(|e| (Status::Skipped, None, e))
                 }
-            }
-            "asr" => {
-                match run_asr(&model_id, &engine, dir.clone(), device, warmup, repeats).await {
-                    Ok(t) => (Status::Ok, Some(t), String::new()),
-                    Err(e) => (Status::Skipped, None, e),
+                "embedding" => {
+                    run_embedding(&case_model, &case_engine, dir.clone(), device, warmup, repeats)
+                        .await
+                        .map(|t| (Status::Ok, Some(t), String::new()))
+                        .map_err(|e| (Status::Skipped, None, e))
                 }
-            }
-            "rerank" => {
-                match run_rerank(&model_id, &engine, dir.clone(), device, warmup, repeats).await {
-                    Ok(t) => (Status::Ok, Some(t), String::new()),
-                    Err(e) => (Status::Skipped, None, e),
+                "tts" => run_tts(&case_model, &case_engine, dir.clone(), device, warmup, repeats)
+                    .await
+                    .map(|t| (Status::Ok, Some(t), String::new()))
+                    .map_err(|e| (Status::Skipped, None, e)),
+                "vision" => {
+                    run_vision(&case_model, &case_engine, dir.clone(), device, warmup, repeats)
+                        .await
+                        .map(|t| (Status::Ok, Some(t), String::new()))
+                        .map_err(|e| (Status::Skipped, None, e))
                 }
-            }
-            "embedding" => {
-                match run_embedding(&model_id, &engine, dir.clone(), device, warmup, repeats).await {
-                    Ok(t) => (Status::Ok, Some(t), String::new()),
-                    Err(e) => (Status::Skipped, None, e),
+                "ocr" => run_ocr(&case_model, &case_engine, dir.clone(), device, warmup, repeats)
+                    .await
+                    .map(|t| (Status::Ok, Some(t), String::new()))
+                    .map_err(|e| (Status::Skipped, None, e)),
+                "decision" => {
+                    run_decision(&case_model, &case_engine, dir.clone(), device, warmup, repeats)
+                        .await
+                        .map(|t| (Status::Ok, Some(t), String::new()))
+                        .map_err(|e| (Status::Skipped, None, e))
                 }
-            }
-            "tts" => {
-                match run_tts(&model_id, &engine, dir.clone(), device, warmup, repeats).await {
-                    Ok(t) => (Status::Ok, Some(t), String::new()),
-                    Err(e) => (Status::Skipped, None, e),
+                #[cfg(feature = "chronos2")]
+                "chronos2" => {
+                    run_chronos2(&case_model, &case_engine, dir.clone(), device, warmup, repeats)
+                        .await
+                        .map(|t| (Status::Ok, Some(t), String::new()))
+                        .map_err(|e| (Status::Skipped, None, e))
                 }
+                _ => Err((
+                    Status::Skipped,
+                    None,
+                    "no in-process runner for this capability".to_string(),
+                )),
             }
-            "vision" => {
-                match run_vision(&model_id, &engine, dir.clone(), device, warmup, repeats).await {
-                    Ok(t) => (Status::Ok, Some(t), String::new()),
-                    Err(e) => (Status::Skipped, None, e),
-                }
-            }
-            "ocr" => {
-                match run_ocr(&model_id, &engine, dir.clone(), device, warmup, repeats).await {
-                    Ok(t) => (Status::Ok, Some(t), String::new()),
-                    Err(e) => (Status::Skipped, None, e),
-                }
-            }
-            "decision" => {
-                match run_decision(&model_id, &engine, dir.clone(), device, warmup, repeats).await {
-                    Ok(t) => (Status::Ok, Some(t), String::new()),
-                    Err(e) => (Status::Skipped, None, e),
-                }
-            }
-            _ => (Status::Skipped, None, "no in-process runner for this engine".to_string()),
+        });
+        let (status, timing, note) = match joined.await {
+            Ok(Ok(triple)) => triple,
+            Ok(Err(triple)) => triple,
+            Err(join_err) => (
+                Status::Failed,
+                None,
+                match join_err.try_into_panic() {
+                    Ok(panic) => {
+                        let msg = panic
+                            .downcast_ref::<&str>()
+                            .map(|s| s.to_string())
+                            .or_else(|| panic.downcast_ref::<String>().cloned())
+                            .unwrap_or_else(|| "engine panicked".to_string());
+                        format!("engine panicked (process survived): {msg}")
+                    }
+                    Err(_) => "case task cancelled".to_string(),
+                },
+            ),
         };
 
         let vram_after = vram_used_mb();
@@ -1154,6 +1187,63 @@ async fn main() {
         }
     }
 
+    // Chronos2 has no catalog entry by design (nothing downloadable loads
+    // as-is — the checkpoint comes from the upstream Chronos2 release), so
+    // the catalog loop never produces a case for it. Run one manually when
+    // the feature is compiled in AND a checkpoint is reachable.
+    #[cfg(feature = "chronos2")]
+    {
+        const CHRONOS2_ID: &str = "chronos-t5-small";
+        let dir = resolve_dir("chronos2", "candle", CHRONOS2_ID);
+        let chrono_device = device_for("chronos2", device);
+        sync_device_env(chrono_device);
+        let vram_before = vram_used_mb();
+        let (status, timing, note) =
+            match run_chronos2(CHRONOS2_ID, "candle", dir, chrono_device, warmup, repeats).await {
+                Ok(t) => (Status::Ok, Some(t), String::new()),
+                Err(e) => (Status::Skipped, None, e),
+            };
+        let vram_after = vram_used_mb();
+        let vram_mb = match (vram_before, vram_after) {
+            (Some(a), Some(b)) => Some(b - a),
+            _ => None,
+        };
+        let row = Row {
+            model: CHRONOS2_ID.to_string(),
+            engine: "candle".to_string(),
+            capability: "chronos2".to_string(),
+            status,
+            metric: timing.as_ref().map(|t| t.metric.clone()).unwrap_or_default(),
+            value: timing.as_ref().map(|t| t.value),
+            warmup_ms: None,
+            p50_ms: timing.as_ref().map(|t| t.p50_ms),
+            p95_ms: timing.as_ref().map(|t| t.p95_ms),
+            ttft_ms: None,
+            device: match chrono_device {
+                DeviceSelection::Nvidia => "cuda".to_string(),
+                DeviceSelection::Cpu => "cpu".to_string(),
+                _ => format!("{chrono_device:?}"),
+            },
+            vram_mb,
+            note,
+        };
+        println!(
+            "[model-bench] {:<28} {:<12} {:<8} {}",
+            CHRONOS2_ID,
+            "candle",
+            status.as_str(),
+            if let Some(t) = &timing {
+                format!("{} = {:.2} | p50 {:.1} ms", t.metric, t.value, t.p50_ms)
+            } else {
+                row.note.clone()
+            }
+        );
+        rows.push(row);
+        if let Err(e) = write_report(&rows, &device_name, &out_path) {
+            eprintln!("[model-bench] failed to write {}: {e}", out_path.display());
+        }
+    }
+
     if let Err(e) = write_report(&rows, &device_name, &out_path) {
         eprintln!("[model-bench] failed to write {}: {e}", out_path.display());
         std::process::exit(1);
@@ -1174,7 +1264,10 @@ fn capability_of(cap: &neuron_lib::capabilities::model_caps::ModelCapabilities) 
             "vision".to_string()
         }
     } else if cap.output_modalities.contains(&Modality::EmbeddingOutput) {
-        if has(Modality::TextInput) && cap.engine_impl == "candle" && cap.api_styles.iter().any(|s| s.as_str() == "openai-rerank") {
+        // The rerank/embedding split is by the API style the entry
+        // declares, NOT by engine_impl — the three reranker families
+        // run on three different engines (candle / mxbai / jina).
+        if has(Modality::TextInput) && cap.api_styles.iter().any(|s| s.as_str() == "openai-rerank") {
             "rerank".to_string()
         } else {
             "embedding".to_string()

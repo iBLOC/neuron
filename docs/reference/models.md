@@ -78,9 +78,9 @@ with an explicit error. Serve Qwen 3.5 with the `mistralrs` backend
 
 | model | engine | notes |
 |---|---|---|
-| bge-reranker-base | candle | ~1.08 GB |
-| mxbai-rerank-base-v2 | candle | |
-| jina-reranker-base-v2 | candle | |
+| bge-reranker-base | candle | ~1.08 GB, XLM-RoBERTa cross-encoder |
+| mxbai-rerank-base-v2 | mxbai | Qwen2 generative yes/no scorer (~0.5B) — `sigmoid(logit["1"] − logit["0"])`; direction verified on real weights |
+| jina-reranker-base-v2 | jina | XLM-RoBERTa cross-encoder (~278 MB) — the released flash-attention checkpoint loads through a key remap (fused `Wqkv` split into q/k/v, renamed norms/submodules); direction verified |
 | rerank-english-v3.0 / rerank-multilingual-v3.0 | cohere (hosted API) | no local weights; `NEURON_COHERE_API_KEY` |
 
 ### Embedding

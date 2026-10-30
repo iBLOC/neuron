@@ -81,6 +81,7 @@ neuron reads its configuration from environment variables on startup. The full m
 | `NEURON_IMAGEGEN_RUNTIME` | (unset) | `moss-image` — which text-to-image engine to register. Serves OpenMOSS MOSS-Image (5B DiT + Qwen3.5 text encoder + FLUX.2 decoder VAE) natively on candle at `POST /v1/images/generations`. Requires the `candle` feature (default on) |
 | `NEURON_IMAGEGEN_MODEL_PATH` | (unset) | Path to the MOSS-Image model directory — the upstream HF repo layout (`transformer/` + `text_encoder/` + `vae/` + `tokenizer/` + `scheduler/`). Unset falls back to `$NEURON_MODEL_DIRS/imagegen/<model_id>/` |
 | `NEURON_IMAGEGEN_DTYPE` | `f16` | `f16` \| `f32` \| `bf16` — storage dtype the DiT and text encoder materialize their weights in. The VAE always decodes in fp32. `f16` ≈ 27 GB resident, `f32` ≈ 54 GB. candle's CPU backend has no BF16 matmul, so `bf16` needs CUDA |
+| `NEURON_IMAGEGEN_RESIDENCY` | `staged` | `staged` \| `cached` — how the three components share device memory. `staged` loads one at a time (the text encoder is dropped before the DiT loads), so the peak residency is ~17 GB at f16 instead of ~27 GB — the only way a 24 GB card can serve the model. `cached` keeps everything resident (faster; needs the memory) |
 | `ORT_DYLIB_PATH` | (unset) | Path to `onnxruntime.dll`/`.so` for the `ort` crate's load-dynamic linking (falls back to `PATH`) |
 
 ## Model scheduler

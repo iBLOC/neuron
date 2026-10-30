@@ -74,9 +74,10 @@ loader)或 `llamacpp` + GGUF。
 
 | 模型 | 引擎 | 说明 |
 |---|---|---|
-| bge-reranker-base | candle | 约 1.08 GB |
-| mxbai-rerank-base-v2 | candle | |
-| jina-reranker-base-v2 | candle | |
+| bge-reranker-base | candle | 约 1.08 GB,XLM-RoBERTa 交叉编码器 |
+| mxbai-rerank-base-v2 | mxbai | Qwen2 生成式 yes/no 打分器(约 0.5B)—— `sigmoid(logit["1"] − logit["0"])`;已用真实权重做方向性验证 |
+| jina-reranker-base-v2 | jina | XLM-RoBERTa 交叉编码器(约 278 MB)—— 官方 flash-attention checkpoint 经键重映射加载(融合 `Wqkv` 拆成 q/k/v、norm/子模块改名);方向已验证 |
+| jina-reranker-base-v2 | jina | **运行时移植未完成**(checkpoint 用了自定义融合 WQKV flash 模块树,candle 原版 `xlm_roberta` 加载不了) |
 | rerank-english-v3.0 / rerank-multilingual-v3.0 | cohere(托管 API) | 无本地权重;需 `NEURON_COHERE_API_KEY` |
 
 ### Embedding(嵌入向量)

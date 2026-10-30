@@ -28,10 +28,16 @@
 
 pub mod config;
 mod dit;
+#[cfg(test)]
+mod parity;
+#[cfg(test)]
+mod real_weights;
 mod scheduler;
 mod text_encoder;
 mod util;
 mod vae;
+#[cfg(test)]
+mod weight_names;
 
 pub use dit::MossDit;
 pub use scheduler::{euler_step, set_timesteps, MossSchedule, MossSchedulerConfig};
@@ -56,25 +62,112 @@ use vae::Flux2Vae;
 /// (reference default `uncond_skip_layers=(22,)`).
 const UNCOND_SKIP_LAYER: usize = 22;
 
-struct Loaded {
-    dit: MossDit,
-    vae: Flux2Vae,
-    text: Qwen35TextModel,
+/// How the three components share the device's memory.
+///
+/// The pipeline needs 13.6B parameters — ~27 GB at f16 — which does
+/// **not** fit a 24 GB card with the text encoder and the DiT
+/// resident at the same time. The reference implementation offers
+/// three memory modes for the same reason.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Residency {
+    /// One component resident at a time: the text encoder is dropped
+    /// before the DiT loads, and the DiT before the VAE. Peak
+    /// residency ≈ the largest single component (~17 GB at f16), so
+    /// a 24 GB card works. The cost is re-reading the weights from
+    /// disk for every request.
+    Staged,
+    /// Every component stays resident. Fastest (no reload), but needs
+    /// ~27 GB of device memory at f16.
+    Cached,
+}
+
+impl Residency {
+    fn parse(value: &str) -> Result<Self, String> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "staged" | "sequential" | "" => Ok(Self::Staged),
+            "cached" | "all" | "resident" => Ok(Self::Cached),
+            other => Err(format!(
+                "unknown residency mode '{other}' — expected 'staged' or 'cached'"
+            )),
+        }
+    }
+}
+
+fn parse_residency() -> Residency {
+    crate::config::env_var("IMAGEGEN_RESIDENCY")
+        .as_deref()
+        .and_then(|v| Residency::parse(v).ok())
+        .unwrap_or(Residency::Staged)
+}
+
+/// The immutable context every component is loaded with.
+struct RuntimeContext {
+    dir: PathBuf,
+    device: Device,
+    dtype: DType,
+    configs: MossModelConfigs,
     tokenizer: tokenizers::Tokenizer,
-    scheduler: SchedCfg,
+    residency: Residency,
+}
+
+/// The three pipeline components, each loadable and droppable on its
+/// own so the peak residency can be kept to one of them.
+#[derive(Default)]
+struct Components {
+    text: Option<Arc<Qwen35TextModel>>,
+    dit: Option<Arc<MossDit>>,
+    vae: Option<Arc<Flux2Vae>>,
+}
+
+impl Components {
+    /// Release a component: dropping the `Arc` frees its device
+    /// memory (candle's CUDA allocations go with the tensors).
+    fn release_text(&mut self) {
+        self.text = None;
+    }
+
+    fn release_dit(&mut self) {
+        self.dit = None;
+    }
+
+    fn release_vae(&mut self) {
+        self.vae = None;
+    }
+
+    fn release_all(&mut self) {
+        self.release_text();
+        self.release_dit();
+        self.release_vae();
+    }
+}
+
+/// Render the prompt exactly as the reference does for a single user
+/// message with `enable_thinking=True`: no system block, no tools,
+/// the generation prompt opens the `<think>` block, and the turn
+/// markers are present.
+///
+/// This mirrors the upstream chat template's output byte for byte —
+/// verified against `tokenizer.apply_chat_template` in
+/// `src/imagegen/moss_image/real_weights.rs`. The `<|im_start|>` /
+/// `<|im_end|>` markers are part of the rendered text and must not be
+/// dropped: without them the model sees a malformed conversation.
+fn render_prompt(prompt: &str) -> String {
+    format!(
+        "<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n<think>\n"
+    )
+}
+
+/// The text encoder + tokenizer, used to turn a prompt into the
+/// encoder hidden states the DiT consumes.
+struct TextEncoder {
+    model: Arc<Qwen35TextModel>,
+    tokenizer: tokenizers::Tokenizer,
     device: Device,
 }
 
-impl Loaded {
-    /// Render the prompt exactly as the reference does for a single
-    /// user message with `enable_thinking=True`: no system block, no
-    /// tools, and the generation prompt opens the `<think>` block.
-    fn render_prompt(prompt: &str) -> String {
-        format!("<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n<think>\n")
-    }
-
+impl TextEncoder {
     fn encode_prompt(&self, prompt: &str, max_length: usize) -> CandleResult<Tensor> {
-        let formatted = Self::render_prompt(prompt);
+        let formatted = render_prompt(prompt);
         let encoding = self
             .tokenizer
             .encode(formatted.as_str(), false)
@@ -90,9 +183,10 @@ impl Loaded {
         };
         let seq_len = ids.len();
         let tokens = Tensor::from_vec(ids, (seq_len,), &self.device)?;
-        self.text.forward_hidden(&tokens)
+        self.model.forward_hidden(&tokens)
     }
 }
+
 
 fn candle_err(msg: impl Into<String>) -> candle::Error {
     candle::Error::Msg(msg.into())
@@ -135,10 +229,17 @@ fn parse_dtype() -> DType {
     }
 }
 
-/// The MOSS-Image runtime handle. Cheap to construct; weights load on
-/// [`ImageGenRuntime::load`] and stay resident (≈27 GB at f16).
+/// The MOSS-Image runtime handle.
+///
+/// The weights are **not** loaded eagerly: `load()` validates the
+/// model directory and prepares the configs, and the three components
+/// are materialized when the pipeline reaches their stage. With the
+/// default [`Residency::Staged`] the text encoder is dropped before
+/// the DiT loads (and the DiT before the VAE), so the peak device
+/// residency is one component instead of all 27 GB.
 pub struct MossImageRuntime {
-    loaded: Mutex<Option<Arc<Loaded>>>,
+    ctx: Mutex<Option<Arc<RuntimeContext>>>,
+    components: Mutex<Components>,
     model_id: String,
 }
 
@@ -146,13 +247,14 @@ impl MossImageRuntime {
     #[allow(dead_code)]
     pub fn new() -> Self {
         Self {
-            loaded: Mutex::new(None),
+            ctx: Mutex::new(None),
+            components: Mutex::new(Components::default()),
             model_id: "moss-image".to_string(),
         }
     }
 
-    fn loaded(&self) -> ChatResult<Arc<Loaded>> {
-        let guard = self.loaded.lock().unwrap();
+    fn context(&self) -> ChatResult<Arc<RuntimeContext>> {
+        let guard = self.ctx.lock().unwrap();
         guard.as_ref().cloned().ok_or_else(|| {
             NeuronError::not_initialized(
                 "MossImageRuntime not loaded. Call load() first (set \
@@ -207,66 +309,103 @@ impl MossImageRuntime {
         Ok(())
     }
 
-    /// Load all three components from a validated model dir.
-    fn load_from_dir(&self, dir: &Path, device_sel: &DeviceSelection) -> Result<(), String> {
+    /// Prepare the runtime from a validated model dir — the configs,
+    /// the tokenizer and the device. The **weights** are loaded per
+    /// stage (see [`Self::ensure_text`], [`Self::ensure_dit`],
+    /// [`Self::ensure_vae`]).
+    fn prepare(&self, dir: &Path, device_sel: &DeviceSelection) -> Result<(), String> {
         let configs: MossModelConfigs = config::load_configs(dir)?;
         let device = map_device(device_sel)?;
         let dtype = parse_dtype();
+        let residency = parse_residency();
+        let tokenizer = tokenizers::Tokenizer::from_file(
+            dir.join("tokenizer").join("tokenizer.json"),
+        )
+        .map_err(|e| format!("tokenizer: {e}"))?;
+        let mut guard = self.ctx.lock().unwrap();
+        *guard = Some(Arc::new(RuntimeContext {
+            dir: dir.to_path_buf(),
+            device,
+            dtype,
+            configs,
+            tokenizer,
+            residency,
+        }));
+        Ok(())
+    }
 
-        // Transformer shards.
-        let transformer_dir = dir.join("transformer");
-        let transformer_paths = match config::shard_paths(
+    /// Load the text encoder (the largest component, ~17 GB at f16).
+    fn ensure_text(&self, ctx: &RuntimeContext) -> ChatResult<Arc<TextEncoder>> {
+        let mut components = self.components.lock().unwrap();
+        if let Some(model) = components.text.clone() {
+            return Ok(Arc::new(TextEncoder {
+                model,
+                tokenizer: ctx.tokenizer.clone(),
+                device: ctx.device.clone(),
+            }));
+        }
+        let text_dir = ctx.dir.join("text_encoder");
+        let paths = config::shard_paths(&text_dir, "model.safetensors.index.json")
+            .map_err(|e| NeuronError::new(format!("text_encoder: {e}")))?;
+        let vb = unsafe {
+            crate::candle_compat::from_mmaped_safetensors(&paths, ctx.dtype, &ctx.device)
+        }
+        .map_err(|e| NeuronError::new(format!("text_encoder weights: {e}")))?;
+        let model = Qwen35TextModel::new(vb.pp("language_model"), ctx.configs.text_encoder.clone())
+            .map_err(|e| NeuronError::new(format!("text encoder load: {e}")))?;
+        let model = Arc::new(model);
+        components.text = Some(model.clone());
+        Ok(Arc::new(TextEncoder {
+            model,
+            tokenizer: ctx.tokenizer.clone(),
+            device: ctx.device.clone(),
+        }))
+    }
+
+    /// Load the diffusion transformer (~10 GB at f16).
+    fn ensure_dit(&self, ctx: &RuntimeContext) -> ChatResult<Arc<MossDit>> {
+        let mut components = self.components.lock().unwrap();
+        if let Some(dit) = components.dit.clone() {
+            return Ok(dit);
+        }
+        let transformer_dir = ctx.dir.join("transformer");
+        let paths = match config::shard_paths(
             &transformer_dir,
             "diffusion_pytorch_model.safetensors.index.json",
         ) {
             Ok(p) => p,
             Err(_) => vec![transformer_dir.join("diffusion_pytorch_model.safetensors")],
         };
-        // Text encoder shards (under the `language_model.` prefix).
-        let text_dir = dir.join("text_encoder");
-        let text_paths = config::shard_paths(&text_dir, "model.safetensors.index.json")
-            .map_err(|e| format!("text_encoder: {e}"))?;
-        // VAE (single fp32 file).
-        let vae_path = dir
+        let vb = unsafe {
+            crate::candle_compat::from_mmaped_safetensors(&paths, ctx.dtype, &ctx.device)
+        }
+        .map_err(|e| NeuronError::new(format!("transformer weights: {e}")))?;
+        let dit = MossDit::new(vb, ctx.configs.dit.clone())
+            .map_err(|e| NeuronError::new(format!("DiT load: {e}")))?;
+        let dit = Arc::new(dit);
+        components.dit = Some(dit.clone());
+        Ok(dit)
+    }
+
+    /// Load the FLUX.2 decoder (~250 MB, always fp32).
+    fn ensure_vae(&self, ctx: &RuntimeContext) -> ChatResult<Arc<Flux2Vae>> {
+        let mut components = self.components.lock().unwrap();
+        if let Some(vae) = components.vae.clone() {
+            return Ok(vae);
+        }
+        let vae_path = ctx
+            .dir
             .join("vae")
             .join("diffusion_pytorch_model.safetensors");
-
-        let dit_vb = unsafe {
-            crate::candle_compat::from_mmaped_safetensors(&transformer_paths, dtype, &device)
+        let vb = unsafe {
+            crate::candle_compat::from_mmaped_safetensors(&[vae_path], DType::F32, &ctx.device)
         }
-        .map_err(|e| format!("transformer weights: {e}"))?;
-        let text_vb = unsafe {
-            crate::candle_compat::from_mmaped_safetensors(&text_paths, dtype, &device)
-        }
-        .map_err(|e| format!("text_encoder weights: {e}"))?;
-        let vae_vb = unsafe {
-            crate::candle_compat::from_mmaped_safetensors(&[vae_path], DType::F32, &device)
-        }
-        .map_err(|e| format!("vae weights: {e}"))?;
-
-        let dit = MossDit::new(dit_vb, configs.dit.clone())
-            .map_err(|e| format!("DiT load: {e}"))?;
-        let text =
-            Qwen35TextModel::new(text_vb.pp("language_model"), configs.text_encoder.clone())
-                .map_err(|e| format!("text encoder load: {e}"))?;
-        let vae = Flux2Vae::new(vae_vb, configs.vae.clone())
-            .map_err(|e| format!("VAE load: {e}"))?;
-
-        let tokenizer = tokenizers::Tokenizer::from_file(
-            dir.join("tokenizer").join("tokenizer.json"),
-        )
-        .map_err(|e| format!("tokenizer: {e}"))?;
-
-        let mut guard = self.loaded.lock().unwrap();
-        *guard = Some(Arc::new(Loaded {
-            dit,
-            vae,
-            text,
-            tokenizer,
-            scheduler: configs.scheduler,
-            device,
-        }));
-        Ok(())
+        .map_err(|e| NeuronError::new(format!("vae weights: {e}")))?;
+        let vae = Flux2Vae::new(vb, ctx.configs.vae.clone())
+            .map_err(|e| NeuronError::new(format!("VAE load: {e}")))?;
+        let vae = Arc::new(vae);
+        components.vae = Some(vae.clone());
+        Ok(vae)
     }
 }
 
@@ -304,55 +443,68 @@ impl ImageGenRuntime for MossImageRuntime {
         Self: Sized,
     {
         let runtime = MossImageRuntime {
-            loaded: Mutex::new(None),
+            ctx: Mutex::new(None),
+            components: Mutex::new(Components::default()),
             model_id: model.to_string(),
         };
         let dir = Self::resolve_model_dir(model).map_err(NeuronError::new)?;
         runtime
-            .load_from_dir(&dir, device)
+            .prepare(&dir, device)
             .map_err(NeuronError::new)?;
         eprintln!(
-            "[neuron] moss-image: loaded {} from {} ({:?} device)",
+            "[neuron] moss-image: prepared {} from {} ({:?} device, {:?} residency)",
             model,
             dir.display(),
-            device
+            device,
+            parse_residency()
         );
         Ok(Box::new(runtime))
     }
 
     async fn generate(&self, params: &ImageGenParams) -> ChatResult<GeneratedImage> {
         params.validate()?;
-        let loaded = self.loaded()?;
+        let ctx = self.context()?;
         let seed = params.seed.unwrap_or_else(fresh_seed);
+        let staged = ctx.residency == Residency::Staged;
 
-        // 1. Prompt conditioning (positive always; negative only when
-        //    CFG is active, encoded through the same template).
-        let positive = loaded
-            .encode_prompt(&params.prompt, params.max_sequence_length)
-            .map_err(|e| NeuronError::new(format!("prompt encode: {e}")))?;
-        let negative = if params.guidance_scale != 1.0 {
-            let text = params.negative_prompt.as_deref().unwrap_or("");
-            Some(
-                loaded
-                    .encode_prompt(text, params.max_sequence_length)
-                    .map_err(|e| NeuronError::new(format!("negative encode: {e}")))?,
-            )
-        } else {
-            None
+        // -- Stage 1: the text encoder -------------------------------
+        // The text encoder is the largest component, so in staged mode
+        // it is dropped before the DiT is loaded.
+        let (positive, negative) = {
+            let encoder = self.ensure_text(&ctx)?;
+            let positive = encoder
+                .encode_prompt(&params.prompt, params.max_sequence_length)
+                .map_err(|e| NeuronError::new(format!("prompt encode: {e}")))?;
+            let negative = if params.guidance_scale != 1.0 {
+                let text = params.negative_prompt.as_deref().unwrap_or("");
+                Some(
+                    encoder
+                        .encode_prompt(text, params.max_sequence_length)
+                        .map_err(|e| NeuronError::new(format!("negative encode: {e}")))?,
+                )
+            } else {
+                None
+            };
+            drop(encoder);
+            if staged {
+                self.components.lock().unwrap().release_text();
+            }
+            (positive, negative)
         };
 
-        // 2. Initial fp32 noise on the latent grid.
-        let channels = loaded.dit.config().latent_channels;
+        // -- Stage 2: the diffusion transformer ----------------------
+        let dit = self.ensure_dit(&ctx)?;
+        let channels = dit.config().latent_channels;
         let (lh, lw) = (params.height / 16, params.width / 16);
-        let noise = seeded_randn(channels * lh * lw, seed, DType::F32, &loaded.device)
+        let noise = seeded_randn(channels * lh * lw, seed, DType::F32, &ctx.device)
             .and_then(|t| t.reshape((1, channels, lh, lw)))
             .map_err(|e| NeuronError::new(format!("noise: {e}")))?;
 
-        // 3. Flow-matching Euler loop with CFG (negative branch skips
-        //    block 22 while the skip window is active — the reference
-        //    default keeps it active for the whole run).
-        let schedule = set_timesteps(params.steps, &loaded.scheduler);
-        let num_layers = loaded.dit.config().num_layers;
+        // Flow-matching Euler loop with CFG (negative branch skips
+        // block 22 while the skip window is active — the reference
+        // default keeps it active for the whole run).
+        let schedule = set_timesteps(params.steps, &ctx.configs.scheduler);
+        let num_layers = dit.config().num_layers;
         let skip: Vec<usize> = if UNCOND_SKIP_LAYER < num_layers {
             vec![UNCOND_SKIP_LAYER]
         } else {
@@ -360,14 +512,12 @@ impl ImageGenRuntime for MossImageRuntime {
         };
         let mut latents = noise;
         for (index, &timestep) in schedule.timesteps.iter().enumerate() {
-            let cond = loaded
-                .dit
+            let cond = dit
                 .forward(&latents, timestep, &positive, &[])
                 .map_err(|e| NeuronError::new(format!("dit step {index}: {e}")))?;
             let prediction = match &negative {
                 Some(neg) => {
-                    let uncond = loaded
-                        .dit
+                    let uncond = dit
                         .forward(&latents, timestep, neg, &skip)
                         .map_err(|e| NeuronError::new(format!("dit uncond {index}: {e}")))?;
                     let diff = (cond - &uncond)
@@ -383,10 +533,14 @@ impl ImageGenRuntime for MossImageRuntime {
             latents = euler_step(&schedule, index, &latents, &prediction)
                 .map_err(|e| NeuronError::new(format!("euler step {index}: {e}")))?;
         }
+        drop(dit);
+        if staged {
+            self.components.lock().unwrap().release_dit();
+        }
 
-        // 4. VAE decode → PNG.
-        let image = loaded
-            .vae
+        // -- Stage 3: the VAE ----------------------------------------
+        let vae = self.ensure_vae(&ctx)?;
+        let image = vae
             .decode(&latents)
             .map_err(|e| NeuronError::new(format!("vae decode: {e}")))?;
         let png = image_to_png(&image).map_err(|e| NeuronError::new(format!("{e}")))?;
@@ -416,12 +570,40 @@ mod tests {
 
     #[test]
     fn test_prompt_template_renders_reference_shape() {
-        let rendered = Loaded::render_prompt("a cat");
+        let rendered = render_prompt("a cat");
         assert_eq!(
             rendered,
             "<|im_start|>user\na cat<|im_end|>\n<|im_start|>assistant\n<think>\n"
         );
     }
+
+    /// The residency mode decides whether a component stays resident
+    /// after its stage. `staged` is the default: the three components
+    /// are ~27 GB at f16, which does not fit a 24 GB card.
+    #[test]
+    fn test_residency_parsing() {
+        assert_eq!(Residency::parse("staged").unwrap(), Residency::Staged);
+        assert_eq!(Residency::parse("sequential").unwrap(), Residency::Staged);
+        assert_eq!(Residency::parse("cached").unwrap(), Residency::Cached);
+        assert_eq!(Residency::parse("all").unwrap(), Residency::Cached);
+        assert_eq!(Residency::parse("").unwrap(), Residency::Staged);
+        assert!(Residency::parse("nonsense").is_err());
+    }
+
+    /// Releasing a component must actually drop it — that is what
+    /// keeps the peak residency at one component.
+    #[test]
+    fn test_releasing_components_drops_them() {
+        let mut components = Components::default();
+        assert!(components.text.is_none());
+        assert!(components.dit.is_none());
+        assert!(components.vae.is_none());
+        components.release_text();
+        components.release_dit();
+        components.release_vae();
+        components.release_all();
+    }
+
 
     #[test]
     fn test_unresolved_model_dir_error_mentions_both_paths() {

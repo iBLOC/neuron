@@ -3,6 +3,15 @@
 //! Loads an `XLMRobertaForSequenceClassification` model (e.g. jinaai/jina-reranker-base-v2
 //! or jinaai/jina-reranker-m0) and produces [0, 1]-normalized relevance scores via sigmoid.
 //!
+//! **STATUS (2026-10-29): the released jina-reranker-v2-base-multilingual
+//! checkpoint does not match candle's vanilla `xlm_roberta` module tree.**
+//! The repo ships a custom flash-attention port whose keys are
+//! `roberta.encoder.layers.N.mixer.Wqkv` (fused QKV) + `norm1`/`norm2`
+//! and `roberta.emb_ln.*` — candle's `xlm_roberta` expects
+//! `roberta.encoder.layer.N.attention.{self,out}` + `LayerNorm` naming.
+//! Serving the released weights needs a port of that module tree; until
+//! then `load()` fails with the exact missing-tensor name.
+//!
 //! Jina's distinguishing feature is configurable query / document prefixes, read
 //! from `config.json` (fields `query_prefix` and `document_prefix`, both optional).
 //! When the field is absent the prefix is empty (same as BGE's behavior).
@@ -10,6 +19,7 @@
 //! Enable with: `NEURON_RERANK_RUNTIME=jina` and set `NEURON_RERANK_MODEL_PATH`
 //! to a directory containing config.json, tokenizer.json, and model.safetensors.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -64,13 +74,21 @@ impl JinaRerankRuntime {
     fn resolve_model_path(model: &str) -> Result<PathBuf, String> {
         let path = match crate::config::env_var_result("RERANK_MODEL_PATH") {
             Ok(p) => PathBuf::from(p),
+            // Same library-root fallback the mxbai runtime has: a model
+            // pulled into <root>/rerank/<id> serves without extra config.
             Err(_) => {
-                return Err(format!(
-                    "JinaRerankRuntime: set NEURON_RERANK_MODEL_PATH to a directory containing \
-                     config.json + tokenizer.json + *.safetensors for model '{}'. \
-                     Download jinaai/jina-reranker-v2-base-multilingual from HuggingFace and set the path.",
-                    model
-                ));
+                let root = crate::config::NeuronConfig::resolved_model_dir();
+                let dir = root.join("rerank").join(model);
+                if dir.is_dir() {
+                    dir
+                } else {
+                    return Err(format!(
+                        "JinaRerankRuntime: set NEURON_RERANK_MODEL_PATH to a directory containing \
+                         config.json + tokenizer.json + *.safetensors for model '{}'. \
+                         Download jinaai/jina-reranker-v2-base-multilingual from HuggingFace and set the path.",
+                        model
+                    ));
+                }
             }
         };
         ensure_dir(&path, "NEURON_RERANK_MODEL_PATH")?;
@@ -125,6 +143,102 @@ impl JinaRerankRuntime {
             DeviceSelection::Auto | DeviceSelection::Vulkan => Ok(Device::Cpu),
         }
     }
+
+    /// Load `model.safetensors` with the key remap that lets candle's
+    /// vanilla `xlm_roberta` consume the released jina-reranker-v2
+    /// checkpoint.
+    ///
+    /// The upstream checkpoint uses the HF **flash-attention** port's
+    /// module tree, which differs from vanilla XLM-RoBERTa in three ways:
+    ///
+    /// 1. **Fused QKV** — `mixer.Wqkv` is one `[3·hidden, hidden]`
+    ///    linear (rows stacked `[Q; K; V]`), while candle builds separate
+    ///    `attention.self.{query,key,value}` linears. Split by rows.
+    /// 2. **Renamed norms** — `norm1`/`norm2` are vanilla's
+    ///    `attention.output.LayerNorm` / `output.LayerNorm`.
+    /// 3. **Renamed submodules** — `mixer.out_proj` →
+    ///    `attention.output.dense`, `mlp.fc1` → `intermediate.dense`,
+    ///    `mlp.fc2` → `output.dense`, `emb_ln` → `embeddings.LayerNorm`.
+    ///    The `encoder.layers.N` (plural) prefix becomes vanilla's
+    ///    `encoder.layer.N`.
+    ///
+    /// Everything else (`embeddings.*`, `classifier.*`) already matches.
+    /// This avoids porting the whole flash module tree — the math is
+    /// identical to vanilla XLM-RoBERTa, only the names differ.
+    fn load_remapped_safetensors(
+        path: &std::path::Path,
+        dev: &Device,
+    ) -> Result<candle_nn::VarBuilder<'static>, String> {
+        let tensors = candle::safetensors::load(path, dev)
+            .map_err(|e| format!("load {}: {e}", path.display()))?;
+
+        let hidden = 768usize; // jina-reranker-v2-base
+        let mut mapped: HashMap<String, Tensor> = HashMap::new();
+        for (name, tensor) in tensors {
+            // Rename first; the Wqkv split is handled after.
+            let renamed = if let Some(rest) = name.strip_prefix("roberta.encoder.layers.") {
+                // encoder.layers.N.<sub>
+                let (idx, sub) = rest.split_once('.').ok_or_else(|| {
+                    format!("malformed encoder key {name:?}")
+                })?;
+                let layer_key = format!("roberta.encoder.layer.{idx}");
+                let sub = sub.strip_prefix("mixer.").map(|s| s.to_string())
+                    .unwrap_or(sub.to_string());
+                match sub.as_str() {
+                    "Wqkv.weight" | "Wqkv.bias" => {
+                        // Split the fused [3·hidden, hidden] rows into
+                        // Q, K, V ([Q; K; V] concat order).
+                        let is_w = sub.ends_with(".weight");
+                        let part = sub.rsplit_once('.').map(|(_, ext)| ext).unwrap_or("");
+                        for (i, head) in ["query", "key", "value"].iter().enumerate() {
+                            let t = tensor
+                                .narrow(0, i * hidden, hidden)
+                                .map_err(|e| format!("split Wqkv {name}[{i}]: {e}"))?;
+                            let key = if is_w {
+                                format!("{layer_key}.attention.self.{head}.weight")
+                            } else {
+                                format!("{layer_key}.attention.self.{head}.{part}")
+                            };
+                            mapped.insert(key, t);
+                        }
+                        continue;
+                    }
+                    "out_proj.weight" | "out_proj.bias" => {
+                        let ext = sub.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
+                        format!("{layer_key}.attention.output.dense.{ext}")
+                    }
+                    "norm1.weight" | "norm1.bias" => {
+                        let ext = sub.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
+                        format!("{layer_key}.attention.output.LayerNorm.{ext}")
+                    }
+                    "mlp.fc1.weight" | "mlp.fc1.bias" => {
+                        let ext = sub.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
+                        format!("{layer_key}.intermediate.dense.{ext}")
+                    }
+                    "mlp.fc2.weight" | "mlp.fc2.bias" => {
+                        let ext = sub.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
+                        format!("{layer_key}.output.dense.{ext}")
+                    }
+                    "norm2.weight" | "norm2.bias" => {
+                        let ext = sub.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
+                        format!("{layer_key}.output.LayerNorm.{ext}")
+                    }
+                    other => {
+                        // embeddings.* (word/position/token_type) pass through.
+                        format!("{layer_key}.{other}")
+                    }
+                }
+            } else if let Some(rest) = name.strip_prefix("roberta.emb_ln.") {
+                format!("roberta.embeddings.LayerNorm.{rest}")
+            } else {
+                // roberta.embeddings.*, classifier.* already match.
+                name.clone()
+            };
+            mapped.insert(renamed, tensor);
+        }
+
+        Ok(crate::candle_compat::from_tensors(mapped, DType::F32, dev))
+    }
 }
 
 impl Default for JinaRerankRuntime {
@@ -159,10 +273,8 @@ impl RerankRuntime for JinaRerankRuntime {
             .map_err(|e| NeuronError::not_implemented(format!("load tokenizer: {}", e)))?;
 
         let safetensors_path = path.join("model.safetensors");
-        let vb = unsafe {
-            crate::candle_compat::from_mmaped_safetensors(&[&safetensors_path], DType::F32, &dev)
-        }
-        .map_err(|e| NeuronError::not_implemented(format!("load safetensors: {}", e)))?;
+        let vb = Self::load_remapped_safetensors(&safetensors_path, &dev)
+            .map_err(|e| NeuronError::not_implemented(format!("load safetensors: {e}")))?;
 
         // Jina v2 ships with num_labels=1 for the binary rerank head.
         // Fall back to 1 if the overlay doesn't carry it.

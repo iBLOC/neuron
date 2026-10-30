@@ -190,9 +190,11 @@ impl DitBlock {
         let m = |i: usize| modulation.narrow(1, i, 1); // [1, 1, dim]
 
         let y = self.norm1.forward(x)?;
+        // Upstream modulation order (unbind of the 6 chunks):
+        //   0 shift_a, 1 scale_a, 2 gate_a, 3 shift_f, 4 scale_f, 5 gate_f
         let y = y
-            .broadcast_mul(&m(0)?.affine(1.0, 1.0)?)?
-            .broadcast_add(&m(1)?)?;
+            .broadcast_mul(&m(1)?.affine(1.0, 1.0)?)?
+            .broadcast_add(&m(0)?)?;
         #[cfg(test)]
         let _ = &y;
 
@@ -221,17 +223,23 @@ impl DitBlock {
         let attn = sdpa(&q, &k, &v)?
             .transpose(1, 2)?
             .reshape((b, t, dim))?;
-        let x = (x + attn.broadcast_mul(&m(2)?)?)?.apply(&self.proj_o)?;
+        // The upstream applies the output projection FIRST and gates
+        // the projected residual: `x + proj['o'](attn) * gate_a`.
+        let attn = attn.apply(&self.proj_o)?;
+        let x = (x + attn.broadcast_mul(&m(2)?)?)?;
 
         let y = self.norm2.forward(&x)?;
         let y = y
-            .broadcast_mul(&m(3)?.affine(1.0, 1.0)?)?
-            .broadcast_add(&m(4)?)?;
+            .broadcast_mul(&m(4)?.affine(1.0, 1.0)?)?
+            .broadcast_add(&m(3)?)?;
         let up = self.proj_ffn_up_gate.forward(&y)?;
         let halves = up.chunk(2, D::Minus1)?;
         let (hidden, gate) = (&halves[0], &halves[1]);
         let ffn = self.proj_ffn_down.forward(&situ(hidden, gate)?)?;
-        x + ffn.broadcast_mul(&m(5)?)
+        // `x` is an owned Tensor here, so `Tensor + Tensor` yields a
+        // Tensor directly (the `&Tensor + Tensor` form returns a
+        // Result in candle).
+        x + ffn.broadcast_mul(&m(5)?)?
     }
 }
 

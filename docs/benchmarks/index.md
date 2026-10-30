@@ -32,46 +32,58 @@ Full report: [`target/model-bench-cuda.md`](https://github.com/iBLOC/neuron/blob
 (regenerate with `scripts\cuda-build.bat cargo bench --bench model_bench
 --features "candle,cuda,tract,ocr,sherpa,voxcpm,chronos2,litert"`).
 
-Measured: **41 cases — 14 measured, 27 skipped (weights absent), 0 failed.**
+Measured: **41 cases — 17 measured, 24 skipped (weights absent), 0 failed.**
+Each case runs inside its own tokio task, so an engine panic becomes a
+`failed` row naming the panic instead of killing the sweep.
 
-### LLM (candle, CUDA, greedy, 64 new tokens)
+### LLM (candle, CUDA, greedy, 64 new tokens, f32 weights)
 
-| model | params | decode tok/s | p50 (ms) | TTFT p50 (ms) | notes |
-|---|---:|---:|---:|---:|---|
-| qwen2.5-0.5b | 0.5B | 52.3 | 563 | — | f32 weights |
-| qwen3-0.6b | 0.6B | 54.7 | 1 260 | — | f32 weights |
+| model | params | decode tok/s | p50 (ms) | notes |
+|---|---:|---:|---:|---|
+| minicpm5-1b | 1B | **62.4** | 1 099 | platform default; fastest of the set |
+| qwen3-0.6b | 0.6B | 60.7 | 1 131 | |
+| qwen2.5-0.5b | 0.5B | 54.5 | 538 | |
+| minicpm5-2b | 2.5B | 35.2 | 1 881 | |
 
 ### Embedding (candle, CUDA, 8 short texts)
 
 | model | texts/s | p50 (ms) |
 |---|---:|---:|
-| all-minilm-l6-v2 | 507.6 | 16.0 |
-| bge-base-en-v1.5 | 322.1 | 24.1 |
-| e5-base-v2 | 331.8 | 25.3 |
-| gte-base | 397.8 | 19.1 |
+| all-minilm-l6-v2 | 664.9 | 12.8 |
+| bge-base-en-v1.5 | 213.3 | 38.3 |
+| e5-base-v2 | 719.2 | 11.0 |
+| gte-base | 825.3 | 9.5 |
 
 ### ASR (RTF = audio seconds per wall second; higher is better)
 
 | model | engine | RTF | p50 (ms) | notes |
 |---|---|---:|---:|---|
-| sensevoice-small | sherpa | 17.2 | 117 | int8 sherpa-onnx graph |
-| whisper-small | candle | 9.2 | 205 | CUDA |
-| whisper-tiny | candle | 14.1 | 141 | CUDA |
+| sensevoice-small | sherpa | 19.1 | 106 | int8 sherpa-onnx graph |
+| whisper-small | candle | 9.6 | 199 | CUDA |
+| whisper-tiny | candle | 15.8 | 126 | CUDA |
 
 ### Vision / OCR (ONNX session path, tract executor, 640×640)
 
 | model | engine | images/s | p50 (ms) | notes |
 |---|---|---:|---:|---|
-| yolov11n | ort | 2.18 | 466 | |
-| yolov8n | ort | 2.03 | 491 | |
-| yolov8s | ort | 0.95 | 1 049 | |
-| ppocrv5-mobile | paddle-ocr | 1.50 | 681 | det+rec |
+| yolov11n | ort | 2.50 | 399 | |
+| yolov8n | ort | 2.44 | 412 | |
+| yolov8s | ort | 1.17 | 844 | |
+| ppocrv5-mobile | paddle-ocr | 1.82 | 533 | det+rec |
 
-### TTS (burn)
+### Rerank (1 query × 8 documents)
+
+| model | engine | docs/s | p50 (ms) | notes |
+|---|---|---:|---:|---|
+| mxbai-rerank-base-v2 | mxbai | **37.0** | 215 | generative yes/no scorer; verified directionally against 4 docs (relevant → "1" ≈ 1.00, irrelevant → "0" ≈ 0.00) |
+| jina-reranker-base-v2 | jina | 15.7 | 509 | flash-checkpoint loads via key remap; direction verified (relevant 0.83, irrelevant ≈ 0.03) |
+| bge-reranker-base | candle | 16.2 | 495 | XLM-RoBERTa cross-encoder |
+
+### TTS (burn, CPU)
 
 | model | engine | p50 (ms) | notes |
 |---|---|---:|---|
-| voxcpm2 | burn | 316 222 | **CPU** — the burn CUDA backend links `nccl.lib`, which the CUDA toolkit does not ship; also measured ~6× slower than the CPU on this GPU (per-patch decode is latency-bound) |
+| voxcpm2 | burn | 251 191 | **CPU** — the burn CUDA backend links `nccl.lib`, which the CUDA toolkit does not ship; also measured ~6× slower than the CPU on this GPU (per-patch decode is latency-bound) |
 
 ::: warning What this sweep found
 Building the harness surfaced **three real bugs**, all fixed:
@@ -95,6 +107,16 @@ The sweep also exposed that the **candle YOLOv8 backend cannot consume
 Ultralytics exports** (it approximates the architecture and has no
 PAN-FPN neck), so the vision rows use the ONNX path
 (`scripts/export-yolo-onnx.py` does the export).
+
+And the biggest one: **the platform default model (minicpm5-1b) could
+not load on the candle llama path** — candle's `llama::Config` has no
+`head_dim` field, so `q_proj` is always sized `[hidden, hidden]`, while
+MiniCPM5-1B's attention is wider than its hidden size (16 heads × 128 =
+2048 vs hidden 1536). **Fixed 2026-10-30**: `src/llm/vendor/llama_hd.rs`
+vendors llama with explicit `head_dim` (upstream-compatible when the
+field is absent) plus the attention-output reshape the wide layout needs;
+the platform default now runs at **62.4 tok/s** on this GPU — the fastest
+row in the set.
 :::
 
 ## LLM decode throughput (candle engine)
