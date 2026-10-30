@@ -17,6 +17,65 @@ neuron exposes 4 vision task endpoints under `/v1/vision/*`, dispatched to the a
 
 All 4 endpoints accept the same `multipart/form-data` request format with an image upload.
 
+::: warning Only detection is implemented today
+The runtime serves **detection** (and classification on the ONNX path). The
+segment and pose decoders are not wired — `POST /v1/vision/segment` and
+`/pose` answer `not_implemented` rather than returning empty masks or
+placeholder keypoints.
+:::
+
+## Preparing a model
+
+The vision runtime loads a **prepared model directory**, not a raw
+checkpoint. Point `NEURON_VISION_MODEL_PATH` at a directory holding:
+
+```
+model.onnx        # the exported graph (static 1x3x640x640 input)
+config.json       # the graph's I/O contract
+```
+
+`config.json` fields (all optional — the defaults match a stock YOLOv8
+COCO export):
+
+| Field | Default | Meaning |
+|---|---|---|
+| `input_name` | `"images"` | ONNX graph input name |
+| `output_names` | `["output0"]` | ONNX graph output names |
+| `input_shape` | `[1, 3, 640, 640]` | input shape (used for preprocessing) |
+| `num_classes` | `80` | class count for the decoder |
+| `output_layout` | `"yolov8"` | `yolov8` (anchor rows) or `detr` (query rows) |
+| `num_queries` | `300` | query count for the `detr` layout |
+
+Exporting from the upstream repos (Ultralytics publishes PyTorch `.pt`
+weights, the DETR repos publish `model.safetensors` — neither is directly
+loadable):
+
+```bash
+# YOLOv8 / YOLO11 → YOLOv8-layout ONNX
+yolo export model=yolov8n.pt format=onnx imgsz=640 opset=17
+
+# DETR / RF-DETR → DETR-layout ONNX
+python -m onnxruntime.tools.convert_onnx --model model.onnx ...
+```
+
+Then place the result in the model directory and register the engine:
+
+```bash
+export NEURON_VISION_RUNTIME=ort        # or candle for the candle backend
+export NEURON_VISION_MODEL_PATH=/path/to/model-dir
+export NEURON_VISION_MODEL_ID=yolov8n   # the id requests use (default: "vision")
+```
+
+The ONNX session executor is **tract** (pure Rust) — enable it with
+`--features tract`. The `ort` Cargo feature does not change this path.
+
+::: warning The candle YOLOv8 backend does not serve detections
+`candle-yolo` approximates the YOLOv8 architecture (no PAN-FPN neck, a
+different head layout) and cannot consume Ultralytics exports. It also
+refuses to run on untrained weights instead of emitting fabricated boxes.
+Use the ONNX path above.
+:::
+
 ## Request format
 
 ```bash

@@ -450,6 +450,10 @@ impl OrtVisionRuntime {
     ///
     /// This is the unified entry point — pass the model config and the
     /// raw output tensor; the right decoder is invoked automatically.
+    ///
+    /// Returns an error for output layouts whose decoder is not
+    /// implemented (Florence-2): an empty detection list would be
+    /// indistinguishable from "the model found nothing".
     pub fn decode_detection_output(
         &self,
         output: &[f32],
@@ -460,24 +464,24 @@ impl OrtVisionRuntime {
         max_dets: usize,
         image_size: (u32, u32),
         input_size: u32,
-    ) -> Vec<Detection> {
+    ) -> Result<Vec<Detection>, NeuronError> {
         match config.output_layout {
-            OrtOutputLayout::Yolov8 => {
-                self.decode_yolov8_output(
-                    output, shape, conf_thresh, iou_thresh, max_dets, config.num_classes,
-                )
-            }
+            OrtOutputLayout::Yolov8 => Ok(self.decode_yolov8_output(
+                output, shape, conf_thresh, iou_thresh, max_dets, config.num_classes,
+            )),
             OrtOutputLayout::Detr => {
                 // DETR/RF-DETR/RT-DETR: no NMS needed, just confidence threshold.
                 let _ = iou_thresh; // unused for query-based outputs
-                self.decode_rfdetr_output(
+                Ok(self.decode_rfdetr_output(
                     output, shape, conf_thresh, max_dets, config.num_classes, image_size, input_size,
-                )
+                ))
             }
-OrtOutputLayout::Florence2 => {
-                // Florence-2 outputs token sequences; not implemented in v1.0.
-                Vec::new()
-            }
+            OrtOutputLayout::Florence2 => Err(NeuronError::not_implemented(
+                "Florence-2 detection decoding is not implemented: the model emits token \
+                 sequences rather than a detection tensor, and the token decoder is missing. \
+                 Use a YOLOv8-layout or DETR-layout model instead."
+                    .to_string(),
+            )),
         }
     }
 }
@@ -523,15 +527,11 @@ impl VisionRuntime for OrtVisionRuntime {
     }
 
     fn supported_tasks(&self) -> &'static [VisionTask] {
-        // The runtime supports all 4 tasks via dispatch + per-task
-        // postprocessing. Each task's forward pass is wired if the
-        // model was exported for that task.
-        &[
-            VisionTask::Detect,
-            VisionTask::Classify,
-            VisionTask::Segment,
-            VisionTask::Pose,
-        ]
+        // Detection and classification are decoded from the ONNX output.
+        // Segmentation (proto + mask coefficients) and pose (keypoint
+        // regression) are not decoded yet — they return
+        // `not_implemented` rather than partial/fabricated results.
+        &[VisionTask::Detect, VisionTask::Classify]
     }
 
     async fn run(&self, req: VisionRequest) -> ChatResult<VisionResponse> {
@@ -605,7 +605,7 @@ impl VisionRuntime for OrtVisionRuntime {
                     Some(cfg) => self.decode_detection_output(
                         &output, &shape, cfg, conf_thresh, iou_thresh, max_dets,
                         (src_w, src_h), INPUT_SIZE,
-                    ),
+                    )?,
                     None => self.decode_yolov8_output(
                         &output, &shape, conf_thresh, iou_thresh, max_dets, num_classes,
                     ),
@@ -643,57 +643,26 @@ impl VisionRuntime for OrtVisionRuntime {
             }
             VisionTask::Segment => {
                 // YOLOv8-seg ONNX has 2 outputs: [1, 4+nc, anchors] and [1, 32, 160, 160] (proto).
-                // The proto + per-instance mask coefficient combine at decode time.
-                // v1.0: returns the detection list with empty masks.
-                let detections = match config.as_ref() {
-                    Some(cfg) => self.decode_detection_output(
-                        &output, &shape, cfg, conf_thresh, iou_thresh, max_dets,
-                        (src_w, src_h), INPUT_SIZE,
-                    ),
-                    None => self.decode_yolov8_output(
-                        &output, &shape, conf_thresh, iou_thresh, max_dets, num_classes,
-                    ),
-                };
-                let segments: Vec<Segmentation> = detections.into_iter().map(|d| Segmentation {
-                    class_id: d.class_id,
-                    class_name: d.class_name,
-                    confidence: d.confidence,
-                    bbox: d.bbox,
-                    mask_png: Vec::new(),
-                    lora_id: d.lora_id,
-                }).collect();
-                Ok(VisionResponse::Segment {
-                    model: self.model_id.clone(),
-                    image_size: (src_w, src_h),
-                    inference_time_ms: start.elapsed().as_millis() as u32,
-                    segments,
-                })
+                // Combining the proto with the per-instance mask coefficients is not
+                // implemented, so this errors instead of returning a detection list
+                // with empty masks (which would read as "no mask found").
+                Err(NeuronError::not_implemented(
+                    "YOLOv8-seg mask decoding is not implemented: the proto output is not \
+                     combined with the per-instance mask coefficients yet. Use /detect, \
+                     or wire the seg head before serving segment requests."
+                        .to_string(),
+                ))
             }
             VisionTask::Pose => {
                 // YOLOv8-pose ONNX output: [1, 4+nc+51, anchors].
                 // nc=1 (person only), 51 = 17 keypoints × 3 (x, y, conf).
-                let detections = match config.as_ref() {
-                    Some(cfg) => self.decode_detection_output(
-                        &output, &shape, cfg, conf_thresh, iou_thresh, max_dets,
-                        (src_w, src_h), INPUT_SIZE,
-                    ),
-                    None => self.decode_yolov8_output(
-                        &output, &shape, conf_thresh, iou_thresh, max_dets, num_classes,
-                    ),
-                };
-                let poses: Vec<super::Pose> = detections.into_iter().map(|d| {
-                    super::Pose {
-                        confidence: d.confidence,
-                        bbox: d.bbox,
-                        keypoints: vec![(0.0, 0.0, 0.0); 17],
-                    }
-                }).collect();
-                Ok(VisionResponse::Pose {
-                    model: self.model_id.clone(),
-                    image_size: (src_w, src_h),
-                    inference_time_ms: start.elapsed().as_millis() as u32,
-                    poses,
-                })
+                // The keypoint regression is not decoded, so this errors
+                // instead of emitting placeholder (0,0,0) keypoints.
+                Err(NeuronError::not_implemented(
+                    "YOLOv8-pose keypoint decoding is not implemented. Use /detect, or wire \
+                     the pose head before serving pose requests."
+                        .to_string(),
+                ))
             }
         }
     }
@@ -704,8 +673,6 @@ impl VisionRuntime for OrtVisionRuntime {
             "vision".to_string(),
             "detect".to_string(),
             "classify".to_string(),
-            "segment".to_string(),
-            "pose".to_string(),
         ]);
         vec![info]
     }
@@ -736,10 +703,11 @@ mod tests {
     #[test]
     fn test_ort_runtime_supported_tasks() {
         let rt = OrtVisionRuntime::new("yolov8n", &DeviceSelection::Cpu);
+        // Detection + classification are decoded; seg / pose are not.
         assert!(rt.supported_tasks().contains(&VisionTask::Detect));
         assert!(rt.supported_tasks().contains(&VisionTask::Classify));
-        assert!(rt.supported_tasks().contains(&VisionTask::Segment));
-        assert!(rt.supported_tasks().contains(&VisionTask::Pose));
+        assert!(!rt.supported_tasks().contains(&VisionTask::Segment));
+        assert!(!rt.supported_tasks().contains(&VisionTask::Pose));
     }
 
     #[test]
@@ -939,9 +907,9 @@ mod tests {
             output_layout: OrtOutputLayout::Detr,
             ..Default::default()
         };
-        let dets = rt.decode_detection_output(
-            &output, &shape, &cfg, 0.5, 0.45, 10, (640, 640), 640,
-        );
+        let dets = rt
+            .decode_detection_output(&output, &shape, &cfg, 0.5, 0.45, 10, (640, 640), 640)
+            .expect("detr layout decodes");
         assert_eq!(dets.len(), 1);
         assert_eq!(dets[0].class_name, "person");
 
@@ -951,11 +919,35 @@ mod tests {
             ..Default::default()
         };
         let shape_yolo = vec![1i64, row_size as i64, 1i64]; // [1, 84, 1] anchor layout
-        let dets_yolo = rt.decode_detection_output(
-            &output, &shape_yolo, &cfg_yolo, 0.5, 0.45, 10, (640, 640), 640,
-        );
+        let dets_yolo = rt
+            .decode_detection_output(
+                &output,
+                &shape_yolo,
+                &cfg_yolo,
+                0.5,
+                0.45,
+                10,
+                (640, 640),
+                640,
+            )
+            .expect("yolov8 layout decodes");
         assert_eq!(dets_yolo.len(), 1);
         assert_eq!(dets_yolo[0].class_name, "person");
+    }
+
+    /// The Florence-2 layout must fail loudly: an empty detection list
+    /// would be indistinguishable from "the model found nothing".
+    #[test]
+    fn test_ort_decode_florence2_layout_is_not_implemented() {
+        let rt = OrtVisionRuntime::new("florence-2-base", &DeviceSelection::Cpu);
+        let cfg = OrtModelConfig {
+            output_layout: OrtOutputLayout::Florence2,
+            ..Default::default()
+        };
+        let err = rt
+            .decode_detection_output(&[], &[1, 1, 1], &cfg, 0.5, 0.45, 10, (640, 640), 640)
+            .expect_err("florence2 decoding must not silently return an empty list");
+        assert!(err.to_string().contains("Florence-2"), "got: {err}");
     }
 
     #[test]

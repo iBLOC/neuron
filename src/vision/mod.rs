@@ -91,25 +91,26 @@ impl VisionTask {
 
 /// Vision engine backend + model-family selector.
 ///
-/// Multiple implementations per backend are distinguished at the model
-/// level (e.g. `Candle::Yolov8` vs `Candle::RtDetr` vs `Ort::Rtdetr`).
-/// The string form is `<backend>-<family>` (e.g. `candle-yolov8`,
-/// `ort-rtdetr`) for parseability while keeping the engine/family
-/// distinction clear in code.
+/// The string form is `<backend>-<family>` (e.g. `candle-yolo`, `ort`)
+/// for parseability while keeping the engine/family distinction clear
+/// in code.
+///
+/// Only backends that can actually serve results are listed. The candle
+/// RT-DETR / DETR ports were scaffolded but never implemented (the
+/// registry answered `not_implemented` for every request), so they were
+/// removed from the enum on 2026-10-29 — a registration now fails at
+/// parse time with a clear message instead of registering successfully
+/// and failing on every request. RT-DETR / DETR models are served by the
+/// ONNX path (`ort`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum VisionImpl {
-    /// Pure-Rust candle backend for the YOLO family (v8 / v11) — all
-    /// 4 tasks supported (detect / classify / segment / pose).
+    /// Pure-Rust candle backend for the YOLO family (v8 / v11).
+    /// Detection only — the classify / segment / pose heads are not
+    /// implemented, and the architecture approximation cannot consume
+    /// Ultralytics exports (see `candle_yolo.rs`).
     #[cfg(feature = "candle")]
     CandleYolo,
-    /// candle backend for RT-DETR (transformer-based detector).
-    /// Lower mAP than YOLOv8 in some settings but no NMS needed.
-    #[cfg(feature = "candle")]
-    CandleRtDetr,
-    /// Pure-Rust candle backend for DETR (original transformer detector).
-    #[cfg(feature = "candle")]
-    CandleDetr,
     /// ONNX backend. Supports any model exported to ONNX
     /// including RT-DETR, DETR, YOLOv8 (ONNX export).
     /// The `OrtVisionRuntime` is always available; it uses a pluggable
@@ -123,24 +124,21 @@ impl VisionImpl {
         match self {
             #[cfg(feature = "candle")]
             Self::CandleYolo => "candle-yolo",
-            #[cfg(feature = "candle")]
-            Self::CandleRtDetr => "candle-rtdetr",
-            #[cfg(feature = "candle")]
-            Self::CandleDetr => "candle-detr",
             Self::Ort => "ort",
         }
     }
 
     pub fn parse(s: &str) -> Result<Self, String> {
-        match s {
+        match s.to_lowercase().as_str() {
+            // "candle" is the shorthand for the YOLO family on candle.
             #[cfg(feature = "candle")]
-            "candle-yolo" => Ok(Self::CandleYolo),
-            #[cfg(feature = "candle")]
-            "candle-rtdetr" => Ok(Self::CandleRtDetr),
-            #[cfg(feature = "candle")]
-            "candle-detr" => Ok(Self::CandleDetr),
+            "candle" | "candle-yolo" => Ok(Self::CandleYolo),
             "ort" => Ok(Self::Ort),
-            other => Err(format!("unknown VisionImpl: {other}")),
+            other => Err(format!(
+                "unknown VisionImpl: {other} (valid: candle | candle-yolo | ort). \
+                 The candle RT-DETR / DETR ports were never implemented and were removed \
+                 on 2026-10-29 — serve those model families through the ONNX path (ort)."
+            )),
         }
     }
 }
@@ -353,11 +351,23 @@ mod tests {
     fn test_vision_impl_parse_all_candle_variants() {
         for (s, expected) in [
             ("candle-yolo", VisionImpl::CandleYolo),
-            ("candle-rtdetr", VisionImpl::CandleRtDetr),
-            ("candle-detr", VisionImpl::CandleDetr),
+            ("candle", VisionImpl::CandleYolo),
         ] {
             let parsed = VisionImpl::parse(s).unwrap();
             assert_eq!(parsed, expected, "round-trip for {s}");
+        }
+    }
+
+    /// The candle RT-DETR / DETR ports were never implemented; they must
+    /// fail at parse time instead of registering and failing per request.
+    #[test]
+    fn test_vision_impl_parse_rejects_removed_candle_detectors() {
+        for s in ["candle-rtdetr", "candle-detr"] {
+            let err = VisionImpl::parse(s).expect_err("{s} must not parse");
+            assert!(
+                err.contains("ONNX path") || err.contains("ort"),
+                "the error must point at the ONNX path, got: {err}"
+            );
         }
     }
 

@@ -398,6 +398,137 @@ pub async fn audio_speech(
 }
 
 // ---------------------------------------------------------------------------
+// Images generations (text-to-image)
+// ---------------------------------------------------------------------------
+
+/// OpenAI Images API request shape, plus neuron extensions for the
+/// diffusion parameters the MOSS-Image pipeline exposes.
+#[derive(Debug, Deserialize)]
+pub struct ImagesGenerationsRequest {
+    pub model: Option<String>,
+    pub prompt: String,
+    #[serde(default = "images_default_n")]
+    pub n: usize,
+    /// `"1024x1024"` (default). Width/height must be multiples of 16.
+    pub size: Option<String>,
+    /// `b64_json` (default and the only implemented format — neuron
+    /// serves local bytes, there is no URL to hand out).
+    pub response_format: Option<String>,
+    /// neuron extension: negative prompt for CFG (reference default:
+    /// empty string).
+    pub negative_prompt: Option<String>,
+    /// neuron extension: sampling steps (reference default 50).
+    #[serde(default = "images_default_steps")]
+    pub steps: usize,
+    /// neuron extension: CFG scale (reference default 3.0; 1.0
+    /// disables the negative branch).
+    #[serde(default = "images_default_guidance")]
+    pub guidance_scale: f32,
+    /// neuron extension: deterministic seed.
+    pub seed: Option<u64>,
+    /// neuron extension: prompt token budget (reference default 4096).
+    #[serde(default = "images_default_max_seq")]
+    pub max_sequence_length: usize,
+}
+
+fn images_default_n() -> usize {
+    1
+}
+
+fn images_default_steps() -> usize {
+    50
+}
+
+fn images_default_guidance() -> f32 {
+    3.0
+}
+
+fn images_default_max_seq() -> usize {
+    4096
+}
+
+#[derive(Debug, Serialize)]
+pub struct ImagesGenerationsResponse {
+    pub created: i64,
+    pub data: Vec<ImageDatum>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ImageDatum {
+    pub b64_json: String,
+    pub size: String,
+    pub seed: u64,
+}
+
+pub async fn images_generations(
+    State(state): State<ServerState>,
+    Json(payload): Json<ImagesGenerationsRequest>,
+) -> Result<Response, ServerError> {
+    if payload.prompt.is_empty() {
+        return Err(ServerError::BadRequest("prompt cannot be empty".to_string()));
+    }
+    if payload.n == 0 || payload.n > 4 {
+        return Err(ServerError::BadRequest("n must be in 1..=4".to_string()));
+    }
+    if let Some(format) = payload.response_format.as_deref() {
+        if !format.eq_ignore_ascii_case("b64_json") {
+            return Err(ServerError::BadRequest(format!(
+                "response_format '{format}' is not supported — neuron serves local bytes, \
+                 use b64_json"
+            )));
+        }
+    }
+    let (width, height) = match payload.size.as_deref() {
+        Some(size) => crate::imagegen::parse_size(size).ok_or_else(|| {
+            ServerError::BadRequest(format!("malformed size '{size}' — expected \"WxH\""))
+        })?,
+        None => (1024, 1024),
+    };
+
+    let model = payload.model.as_deref().unwrap_or("moss-image");
+    let rt = match state.imagegen_registry.runtime_for(model).await {
+        Ok(rt) => rt,
+        Err(e) if e.error_type == "model_not_registered" => {
+            return Err(ServerError::BadRequest(e.message));
+        }
+        Err(_) => state.imagegen.clone(),
+    };
+
+    let params = crate::imagegen::ImageGenParams {
+        prompt: payload.prompt.clone(),
+        negative_prompt: payload.negative_prompt.clone(),
+        width,
+        height,
+        steps: payload.steps,
+        guidance_scale: payload.guidance_scale,
+        seed: payload.seed,
+        max_sequence_length: payload.max_sequence_length,
+    };
+    params
+        .validate()
+        .map_err(|e| ServerError::BadRequest(e.message))?;
+
+    let mut data = Vec::with_capacity(payload.n);
+    for _ in 0..payload.n {
+        let image = rt
+            .generate(&params)
+            .await
+            .map_err(|e| ServerError::Internal(format!("image generation: {e}")))?;
+        data.push(ImageDatum {
+            b64_json: crate::embedding::base64_encode(&image.png),
+            size: format!("{}x{}", image.width, image.height),
+            seed: image.seed,
+        });
+    }
+
+    let response = ImagesGenerationsResponse {
+        created: chrono::Utc::now().timestamp(),
+        data,
+    };
+    Ok((StatusCode::OK, axum::Json(response)).into_response())
+}
+
+// ---------------------------------------------------------------------------
 // Audio transcriptions (ASR)
 // ---------------------------------------------------------------------------
 

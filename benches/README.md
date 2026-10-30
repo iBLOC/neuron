@@ -4,6 +4,50 @@ This directory contains Criterion benchmarks for measuring performance of neuron
 
 ## Real-engine speed comparison harnesses
 
+### `model_bench` — one benchmark per model in the capability catalog
+
+The per-model harness: every entry of `capabilities::catalog::default_capabilities()`
+becomes a case, loaded **in-process** through the public registry API
+(`LlmRuntimeRegistry::register` → `runtime_for`) and timed on the local
+device. No HTTP, no server startup — the numbers are the library's own
+device timings.
+
+| capability | workload | headline metric |
+|---|---|---|
+| LLM | 1 prompt, greedy, 64 new tokens, streamed | TTFT (ms), decode tok/s |
+| TTS | one fixed sentence | audio s / wall s |
+| ASR | one fixed WAV | RTF |
+| Rerank | 1 query × 8 documents | docs/s |
+| Embedding | 8 short texts | texts/s |
+| Vision / OCR | one 640×640 image | images/s |
+| Decision | 1 question | questions/s |
+| Chronos2 | one 64-point series | forecasts/s |
+
+Models whose weights are not on this machine are reported as `skipped`
+with the reason, so the report doubles as a coverage matrix.
+
+```bash
+# CUDA build needs the MSVC environment (nvcc needs cl.exe):
+scripts\cuda-build.bat cargo bench --bench model_bench --features "candle,cuda,tract,ocr,sherpa,voxcpm,chronos2,litert"
+
+# CPU-only:
+cargo bench --bench model_bench --features "candle,tract"
+
+# → target/model-bench-<device>.md
+```
+
+Weights: `scripts/fetch-bench-models.sh [llm|asr|rerank|embedding|ocr|chronos2|decision|all]`
+pulls the checkpoints into `$NEURON_MODEL_DIRS/<capability>/<model_id>/`.
+The vision rows need an ONNX export first:
+`python scripts/export-yolo-onnx.py` (Ultralytics `.pt` → `model.onnx` + `config.json`).
+
+Environment: `NEURON_BENCH_DEVICE` (cuda/cpu), `NEURON_BENCH_MODELS` (subset),
+`NEURON_BENCH_REPEATS`, `NEURON_BENCH_WARMUP`, `NEURON_BENCH_OUT`,
+`NEURON_BENCH_MODEL_DIRS`, `NEURON_BENCH_<CAP>_DIR` (explicit weight dir per
+capability), `NEURON_BENCH_IMAGE` / `NEURON_BENCH_AUDIO` (fixtures).
+The report header records the tuning knobs that were in effect (dtype,
+ISQ, context size, …).
+
 ### `llm_speed` — neuron vs vLLM / ollama / llama.cpp
 
 HTTP round-trip harness, drives whatever endpoints `NEURON_BENCH_ENDPOINTS` names; see top-of-file doc comment for the env contract. Driver script: `scripts/run-llm-speed-compare.sh`.

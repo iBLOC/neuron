@@ -286,8 +286,18 @@ pub struct Yolov8Forward {
 
 #[cfg(feature = "candle")]
 impl Yolov8Forward {
+    /// Build the architecture on a **fresh, empty** variable map.
+    ///
+    /// The resulting model carries untrained (randomly initialized)
+    /// weights — it is only useful for shape/diagnostic checks. Serving
+    /// traffic with it would produce fabricated detections; use
+    /// [`Yolov8Forward::load_safetensors`] for anything real.
     pub fn new(device: &Device, num_classes: u32) -> Result<Self> {
-        let varmap = VarMap::new();
+        Self::new_with_varmap(VarMap::new(), device, num_classes)
+    }
+
+    /// Build the architecture on a caller-populated variable map.
+    pub fn new_with_varmap(varmap: VarMap, device: &Device, num_classes: u32) -> Result<Self> {
         // Build the architecture, which lazily registers variables in
         // the varmap. Then explicitly access every weight tensor so
         // VarMap::load knows the full set of expected keys (otherwise
@@ -312,6 +322,92 @@ impl Yolov8Forward {
         // build — weight_keys() works, load_weights() works.)
 
         Ok(Self { device: device.clone(), num_classes, varmap, backbone, neck, head })
+    }
+
+    /// Build the architecture from a `.safetensors` checkpoint.
+    ///
+    /// Two key styles are accepted:
+    ///
+    /// * the architecture's own canonical names
+    ///   (`backbone.stem.conv.weight`, `head.p3.cv2.conv.weight`, …), and
+    /// * Ultralytics' export names (`model.0.conv.weight`, …), translated
+    ///   through [`Yolov8Forward::map_ultralytics_key`].
+    ///
+    /// A checkpoint must cover **every** variable the architecture
+    /// declares — a partially-loaded model would mix trained and random
+    /// tensors and emit plausible-looking garbage. When coverage is
+    /// incomplete the error names the missing keys instead of running a
+    /// half-initialised network.
+    ///
+    /// Returns the loaded model and the number of matched tensors.
+    pub fn load_safetensors(
+        path: &std::path::Path,
+        device: &Device,
+        num_classes: u32,
+    ) -> std::result::Result<(Self, usize), String> {
+        let tensors = candle::safetensors::load(path, device)
+            .map_err(|e| format!("load safetensors {}: {e}", path.display()))?;
+
+        // Expected key set: build the architecture once on a scratch varmap.
+        let scratch = Self::new(device, num_classes)
+            .map_err(|e| format!("build yolov8 architecture: {e}"))?;
+        let expected: std::collections::HashSet<String> =
+            scratch.weight_keys().into_iter().collect();
+
+        let mut mapped: std::collections::HashMap<String, Tensor> =
+            std::collections::HashMap::new();
+        for (name, tensor) in tensors {
+            let canonical = if expected.contains(name.as_str()) {
+                Some(name.clone())
+            } else {
+                Self::map_ultralytics_key(name.as_str())
+                    .filter(|k| expected.contains(k.as_str()))
+            };
+            let Some(canonical) = canonical else { continue };
+            mapped.insert(canonical, tensor);
+        }
+
+        if mapped.is_empty() {
+            return Err(format!(
+                "no tensor in {} matched the YOLOv8 architecture's key names. \
+                 Expected canonical names like {:?} or Ultralytics names like \
+                 \"model.0.conv.weight\". Note that neuron's candle YOLOv8 port is an \
+                 approximation (no PAN-FPN neck, DFL head layout differs from the \
+                 Ultralytics export), so official Ultralytics checkpoints cannot be \
+                 consumed here — export to ONNX and use the ort backend \
+                 (NEURON_VISION_RUNTIME=ort) instead.",
+                path.display(),
+                expected.iter().take(3).collect::<Vec<_>>()
+            ));
+        }
+
+        let mapped_keys: std::collections::HashSet<String> =
+            mapped.keys().cloned().collect();
+        let missing: Vec<&String> = expected.difference(&mapped_keys).collect();
+        if !missing.is_empty() {
+            let mut sample: Vec<&str> = missing.iter().take(5).map(|s| s.as_str()).collect();
+            sample.sort_unstable();
+            return Err(format!(
+                "{} covers {}/{} of the YOLOv8 architecture's tensors; missing {} (e.g. {}). \
+                 A partially loaded model would mix trained and random weights and emit \
+                 garbage detections, so the load is refused. If this is an Ultralytics \
+                 export, the head keys are not mapped yet — export to ONNX and use the \
+                 ort backend (NEURON_VISION_RUNTIME=ort) instead.",
+                path.display(),
+                mapped.len(),
+                expected.len(),
+                missing.len(),
+                sample.join(", "),
+            ));
+        }
+
+        let mut varmap = VarMap::new();
+        varmap
+            .set(mapped.into_iter())
+            .map_err(|e| format!("set varmap tensor: {e}"))?;
+        let model = Self::new_with_varmap(varmap, device, num_classes)
+            .map_err(|e| format!("build yolov8 architecture from checkpoint: {e}"))?;
+        Ok((model, expected.len()))
     }
 
     /// Load trained YOLOv8 weights from a `.safetensors` file.

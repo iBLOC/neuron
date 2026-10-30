@@ -28,12 +28,13 @@ pub use dispatch::adapter_dispatch_at;
 pub use error::ServerError;
 pub use handlers::{
     audio_speech, audio_speech_stream, audio_transcriptions, chat_completions, decisions,
-    embedding_handler, forecast, gate_score, health_handler, info_handler, list_models, rerank,
-    scheduler_evict,
+    embedding_handler, forecast, gate_score, health_handler, images_generations, info_handler,
+    list_models, rerank, scheduler_evict,
     ocr_recognize, scheduler_status, vision_classify, vision_detect, vision_lora_list,
     vision_lora_register,
     vision_lora_unregister, vision_pose, vision_segment, ChatCompletionsRequest,
-    DecisionHttpRequest, EmbeddingHttpRequest, ModelList, RerankHttpRequest, SpeechRequest,
+    DecisionHttpRequest, EmbeddingHttpRequest, ImagesGenerationsRequest, ImagesGenerationsResponse,
+    ModelList, RerankHttpRequest, SpeechRequest,
     SpeechStreamRequest, TranscriptionResponse,
 };
 pub use state::ServerState;
@@ -78,6 +79,7 @@ pub fn routes() -> Router<ServerState> {
         .route("/v1/audio/transcriptions", post(audio_transcriptions))
         .route("/v1/rerank", post(rerank))
         .route("/v1/embeddings", post(embedding_handler))
+        .route("/v1/images/generations", post(images_generations))
         .route("/v1/decisions", post(decisions))
         .route("/v1/vision/detect", post(vision_detect))
         .route("/v1/vision/classify", post(vision_classify))

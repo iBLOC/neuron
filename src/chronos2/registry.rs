@@ -62,6 +62,18 @@ impl Chronos2Registry {
         Ok(())
     }
 
+    /// Registered chronos2 models, for `/v1/models`.
+    ///
+    /// Sourced from the registry rather than the `state.chronos2`
+    /// shortcut: the shortcut is a lazy-load handle, and listing through
+    /// it would pay for a model load just to answer a directory request.
+    pub fn list_models(&self) -> Vec<crate::llm::ModelInfo> {
+        self.registered
+            .iter()
+            .map(|r| crate::llm::ModelInfo::new(r.model_id.clone(), "chronos2"))
+            .collect()
+    }
+
     /// Resolve a runtime for the given model id. v0 path:
     /// when `NEURON_CHRONOS2_MODEL_PATH/<id>` exists on disk,
     /// the candle runtime loads it. Otherwise we fall back to

@@ -11,7 +11,7 @@ neuron supports **3 ML frameworks** and **multiple impls per framework** to cove
 | Capability | Engine | Feature flag | Default? | Backend |
 |---|---|---|---|---|
 | LLM | candle | `candle` | ✅ | Qwen 2/2.5/3/3.5, Llama 2/3, Phi-3, Mistral, ChatGLM, **MiniCPM5-1B / MiniCPM5-2B** via `candle-transformers` |
-| LLM | litert_lm | `litert` | — | Gemma 3 / 3n / 4 via Google LiteRT-LM subprocess (shells out to `lit` binary) |
+| LLM | litert_lm | `litert` | — | `gemma3-1b` / `phi-4-mini` / `qwen2.5-1.5b` via Google LiteRT-LM subprocess (shells out to the pinned `lit` v0.7.0 binary — its registry holds exactly those three) |
 | LLM | mistralrs | `mistralrs` | — | 40+ model families via mistral.rs engine (PagedAttention, prefix caching, KV cache, ISQ) |
 | LLM | mage_vl | (default `candle`) | — | **neuron-native candle port of Microsoft Mage-VL**: MageViT 24-layer codec-native ViT (3D RoPE, I/P-frame patch sparsity) + Qwen3-4B-Instruct-2507 decoder + StreamMind gate; reaches OpenAI `/v1/chat/completions` + Anthropic `/v1/messages` via the `adapter_dispatch` system |
 | TTS | burn (VoxCpm) | `voxcpm` | — | **VoxCPM 0.5B and VoxCPM2 both loadable** (burn 0.21 + `hound`). 0.5B: pre-converted `.mpk` weights. VoxCPM2 (2B, 48 kHz, 30 languages): loads the upstream `openbmb/VoxCPM2` checkpoints directly (no conversion), ~10 GB RAM |
@@ -21,11 +21,12 @@ neuron supports **3 ML frameworks** and **multiple impls per framework** to cove
 | Rerank | candle (BGE/mxbai/jina) | `candle` | ✅ | XLM-RoBERTa cross-encoders |
 | Rerank | cohere | `candle` (default) | — | Cohere `/v1/rerank` HTTP proxy |
 | Embedding | candle (MiniLM) | `candle` | ✅ | MiniLM BERT (batched via `BatchLongest` padding, base64 output) |
-| Vision | candle (YOLOv8 / RT-DETR / DETR) | `candle` | ✅ | CSPDarknet + PANet + decoupled head |
-| Vision | ort (YOLOv8 / RT-DETR / DETR / RF-DETR / Florence-2) | `ort` | — | Pluggable ONNX executors: `ort` / `tract` / `onnxruntime` |
+| Vision | ort (YOLOv8 / YOLO11 / RT-DETR / DETR / RF-DETR) | `ort` | — | ONNX session path; the executor is **tract** (pure Rust, `--features tract`). The `ort` Cargo feature does not change this path |
+| Vision | candle (YOLOv8 approximation) | `candle` | — | CSPDarknet approximation without the PAN-FPN neck; cannot consume Ultralytics exports and refuses to run on untrained weights — detection via the ONNX path above |
 | Chronos2 | candle | `chronos2` | — | ✅ landed 2026-07-19: vendored T5 encoder + decoder + linear output head, `CandleChronos2Runtime` (844 LOC, 19 tests) |
 | Decision | tract (Laya int8 ONNX) | `tract` | — | ✅ landed 2026-09-24: pure-Rust ONNX executor (no C++ toolchain / system ONNX Runtime). Encoder-only int8, one forward per question, no decoding. Graph must be prepped with `scripts/prep-laya-onnx.py` first. Bit-exact parity with onnxruntime is **not** achievable on this engine — see [the spec](../superpowers/specs/2026-09-24-laya-decision.md); the `ort` executor slot in `src/vision/ort_runtime.rs` is the drop-in alternative when it is. |
 | OCR | paddle-ocr | `tract` (default) / `ort` (fast executor) | — | tract-onnx / ort (ONNX) — PP-OCRv5/v6 text detection + recognition, optional layout (PP-DocLayoutV3) and table structure (SLANeXt) |
+| ImageGen | candle (MOSS-Image) | `candle` (default) | — | ✅ landed 2026-10-30: OpenMOSS MOSS-Image (Apache-2.0) served natively — 5B single-stream DiT + Qwen3.5 hybrid-GDN text encoder + FLUX.2 decoder VAE, all vendored into `src/imagegen/moss_image/`. Upstream HF repo layout loads directly (~27 GB BF16). `POST /v1/images/generations` (b64_json). **CUDA-only in practice** — CPU is a multi-PFLOP-per-image workload. See [the spec](../superpowers/specs/2026-10-30-moss-image-text-to-image.md) |
 
 ## Selection
 
@@ -105,7 +106,7 @@ curl -X POST http://localhost:8083/v1/chat/completions \
 ### LLM
 
 - **candle (default)**: best for development + small models on CPU/Mac. Covers Qwen 2/2.5/3/3.5 + Llama 2/3 + Phi-3 + Mistral + ChatGLM + MiniCPM5-1B / MiniCPM5-2B. Fast iteration, no extra dependencies. `minicpm5-1b` is the platform default (1B, fits on 2-core 4 GB edge devices); `minicpm5-2b` is the server-grade alternative (2.52B, ~6–7 GB VRAM).
-- **litert_lm**: when you need on-device LLM (Android, iOS, embedded Linux). Requires the `lit` binary on `PATH` and Gemma 3 weights. Good for edge deployment with no GPU.
+- **litert_lm**: when you need on-device LLM (Android, iOS, embedded Linux). Requires the `lit` binary on `PATH` (LiteRT-LM v0.7.0, downloaded on demand) and one of the three registry models: `gemma3-1b`, `phi-4-mini`, `qwen2.5-1.5b`. Good for edge deployment with no GPU.
 - **mistralrs**: when you need production-grade multi-family support with PagedAttention / prefix caching / KV cache. Covers 40+ families. Use for serving multiple models concurrently with high throughput.
 - **mage_vl**: use when you need a VLM (image + multi-frame video understanding) backed by Microsoft Mage-VL with codec-native 75% token reduction. Requires `NEURON_MAGE_VL_SHARD_DIR` pointing at the two `model-0000X-of-00002.safetensors` shards from `microsoft/Mage-VL`. Reaches both OpenAI and Anthropic wire formats via the same `MageVlRuntime`. First accuracy pass on POPE / MME / MMStar landed 2026-10-13 — see the [VLM benchmark spec](/superpowers/specs/2026-10-13-mage-vl-vlm-bench) for scores and the 0-token diagnosis; reproduction harness lives in `scripts/vlm-bench/`.
 
@@ -132,7 +133,7 @@ curl -X POST http://localhost:8083/v1/chat/completions \
 
 ### Vision
 
-- **candle**: best for YOLOv8 / RT-DETR / DETR with native candle inference. Fast, no subprocess overhead.
+- **candle**: native candle inference, no subprocess overhead. Its YOLOv8 port is an approximation that cannot serve real detections today — use the ONNX path.
 - **ort**: use when you have a model exported to ONNX (RF-DETR, Florence-2, custom architectures). Pluggable executors: `ort` (default), `tract` (pure Rust), `onnxruntime` (heaviest, fastest).
 
 ## Performance considerations
@@ -142,7 +143,7 @@ curl -X POST http://localhost:8083/v1/chat/completions \
 | candle (CPU) | Low (model size only; F32 default doubles it — see `NEURON_LLM_DTYPE`) | Fast | Fast | Good for ≤3B models |
 | candle (CUDA) | High (VRAM) | Slow (~5-10min first build) | Fast | Best for 7B+ models |
 | candle (Metal) | High (unified memory) | Medium | Fast | Best for Apple Silicon |
-| litert_lm | Low (subprocess) | Fast | Subprocess overhead | Limited model set (Gemma 3 / 3n / 4) |
+| litert_lm | Low (subprocess) | Fast | Subprocess overhead | Fixed model set — the pinned `lit` registry ships `gemma3-1b` / `phi-4-mini` / `qwen2.5-1.5b` |
 | mistralrs | High (VRAM) | Slow | Fast | Best for serving many concurrent requests |
 | burn (VoxCpm) | Low | Medium (burn + hound) | Fast | Single-model throughput |
 

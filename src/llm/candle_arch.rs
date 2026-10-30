@@ -27,9 +27,17 @@ use candle_transformers::models::{chatglm, llama, mistral, phi3, qwen2, qwen3};
 ///
 /// Each variant carries the candle-side Config type so that
 /// `detect_arch` can hold an un-built config alongside the
-/// model_type string. Qwen 2.5 and Qwen 3.5 are arch-compatible
-/// with their .0 versions (same candle module), so we only keep
-/// one variant per major version.
+/// model_type string. Qwen 2.5 is arch-compatible with Qwen 2.0
+/// (same candle module), so we only keep one variant per major
+/// version.
+///
+/// Qwen 3.5 is NOT compatible with Qwen 3.0: its `config.json`
+/// nests the text tower under `text_config`, and that tower mixes
+/// linear-attention and full-attention layers (gated-delta-net
+/// style) which upstream candle-transformers has no module for.
+/// The `qwen3_5` / `qwen3.5` model_type strings are still routed
+/// here so the failure is explicit rather than a silent fall-through
+/// to the dense loader — see [`load_qwen3`].
 #[derive(Debug)]
 pub enum CausalArch {
     Qwen2(qwen2::Config),
@@ -54,8 +62,24 @@ fn load_qwen2(config_data: &str, model_type: String) -> Result<CausalArch, Strin
 }
 
 fn load_qwen3(config_data: &str, model_type: String) -> Result<CausalArch, String> {
-    let cfg: qwen3::Config =
-        serde_json::from_str(config_data).map_err(|e| format!("parse as qwen3 config: {e}"))?;
+    let cfg: qwen3::Config = serde_json::from_str(config_data).map_err(|e| {
+        // Qwen 3.5 ships a `config.json` whose text tower lives under
+        // `text_config` and mixes linear- / full-attention layers, so the
+        // flat `qwen3::Config` below cannot describe it. Name the real
+        // remedy instead of surfacing serde's "missing field" noise.
+        if model_type.starts_with("qwen3_5") || model_type.starts_with("qwen3.5") {
+            format!(
+                "Qwen 3.5 ({model_type}) is not supported by the candle backend: its config \
+                 nests the text tower under `text_config` and uses a hybrid linear/full \
+                 attention stack that upstream candle-transformers has no module for. \
+                 Serve Qwen 3.5 with the mistralrs backend \
+                 (NEURON_LLM_RUNTIME=mistralrs) or with llama.cpp via a GGUF \
+                 (NEURON_LLM_RUNTIME=llamacpp). Underlying parse error: {e}"
+            )
+        } else {
+            format!("parse as qwen3 config: {e}")
+        }
+    })?;
     Ok(CausalArch::Qwen3(cfg).with_model_type(model_type))
 }
 
@@ -217,8 +241,10 @@ pub fn detect_arch(model_dir: &std::path::Path) -> Result<(CausalArch, String), 
         // — accept all three spellings.
         "qwen2" | "qwen2_5" | "qwen2.5" => load_qwen2(&config_data, model_type.clone()),
 
-        // Qwen 3 family (Qwen 3.0 / 3.5). qwen3moe is rejected
-        // below — see the MoE block.
+        // Qwen 3 family. `qwen3_5` / `qwen3.5` (Qwen 3.5) are routed
+        // here so the loader can report the real reason it cannot
+        // serve them — the config shape changed, not the string.
+        // qwen3moe / qwen3_5_moe are rejected below — see the MoE block.
         "qwen3" | "qwen3_5" | "qwen3.5" => load_qwen3(&config_data, model_type.clone()),
 
         // Llama 2 / 3 / 3.1 / 3.2 — all share the same
@@ -246,8 +272,13 @@ pub fn detect_arch(model_dir: &std::path::Path) -> Result<(CausalArch, String), 
         // (qwen2::Config ignores unknown fields by default)
         // but produce garbage output at forward time. Better to
         // error out at load time with a clear message.
-        "qwen2moe" | "qwen3moe" | "qwen2_moe" | "qwen3_moe" | "mixtral" | "deepseek"
-        | "deepseek_v2" | "deepseek_v3" => {
+        //
+        // `qwen3_5_moe` is the Qwen 3.5 MoE line (35B-A3B / 122B-A10B /
+        // 397B-A17B) — it must land here rather than in the generic
+        // "unsupported model_type" arm, so the error says "MoE".
+        "qwen2moe" | "qwen3moe" | "qwen2_moe" | "qwen3_moe" | "qwen3_5moe"
+        | "qwen3_5_moe" | "qwen3.5_moe" | "mixtral" | "deepseek" | "deepseek_v2"
+        | "deepseek_v3" => {
             return Err(format!(
                 "MoE model_type {model_type:?} is not supported. \
                  neuron only loads dense causal LMs. For MoE inference, \
@@ -257,8 +288,8 @@ pub fn detect_arch(model_dir: &std::path::Path) -> Result<(CausalArch, String), 
 
         other => Err(format!(
             "unsupported model_type: {other:?} (supported: \
-             qwen2, qwen2_5, qwen2.5, qwen3, qwen3_5, qwen3.5, \
-             llama, llama2, phi3, mistral, chatglm)"
+             qwen2, qwen2_5, qwen2.5, qwen3, llama, llama2, phi3, \
+             mistral, chatglm)"
         )),
     }?;
     Ok((arch, model_type))

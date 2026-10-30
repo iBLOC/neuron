@@ -156,6 +156,14 @@ required-features = ["llamacpp"]
 name = "model_matrix"
 harness = false
 
+# Per-model benchmark: one case per model in the capability catalog, run
+# in-process on the local device (RTX 3090 by default). `harness = false`
+# because a real forward pass takes seconds — the harness does its own
+# warmup + p50/p95 math and writes a markdown report.
+[[bench]]
+name = "model_bench"
+harness = false
+
 # Chronos2 integration tests need the `chronos2` feature — the runtime
 # they drive (`CandleChronos2Runtime`) lives behind it, so without the
 # feature the test target does not compile.

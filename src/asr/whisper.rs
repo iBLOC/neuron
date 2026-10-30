@@ -29,7 +29,17 @@ const SOT_TOKEN: u32 = 50258;
 const TRANSCRIBE_TOKEN: u32 = 50359;
 const EOT_TOKEN: u32 = 50257;
 const NO_TIMESTAMPS_TOKEN: u32 = 50363;
-const N_MELS: usize = 80;
+/// Number of FFT bins per mel filter: `N_FFT / 2 + 1` = 201 for
+/// Whisper's 400-point FFT.
+///
+/// The name is historical — it is the *filter width*, not the number of
+/// mel bins (that one comes from the model's `num_mel_bins`, 80 for
+/// Whisper). candle's `pcm_to_mel` indexes the filter bank as
+/// `[num_mel_bins][201]`, and the published `mel_filters.safetensors`
+/// holds exactly `80 * 201` floats; the previous value of 80 made the
+/// loader reject the documented download (found 2026-10-29 while
+/// building the per-model benchmark).
+const N_MELS: usize = 201;
 
 pub struct WhisperAsrRuntime {
     inner: Mutex<Option<LoadedWhisper>>,
@@ -144,6 +154,16 @@ impl WhisperAsrRuntime {
         Err("mel_filters file not found".to_string())
     }
 
+    /// Read the mel filter bank from a **standard** `.safetensors` file
+    /// (the `lmz/candle-whisper` layout: an 8-byte little-endian header
+    /// length, a JSON header, then the tensor data).
+    ///
+    /// The previous implementation expected a raw f32 blob behind a
+    /// fictional `ET\0\0` magic, so the documented download
+    /// (`spaces/lmz/candle-whisper` → `mel_filters.safetensors`) was
+    /// rejected with "not a valid safetensors file" and the Whisper
+    /// path could not load at all (found 2026-10-29 while building the
+    /// per-model benchmark).
     fn load_mel_safetensors(path: &Path, num_mel_bins: usize) -> Result<Vec<f32>, String> {
         use std::fs::File;
         use std::io::Read;
@@ -153,22 +173,70 @@ impl WhisperAsrRuntime {
         if bytes.len() < 8 {
             return Err("mel_filters safetensors file too short".to_string());
         }
-        let magic = &bytes[0..8];
-        if magic != b"ET\x00\x00" {
-            return Err("not a valid safetensors file".to_string());
+        // 8-byte little-endian header length.
+        let header_len = u64::from_le_bytes(bytes[0..8].try_into().unwrap()) as usize;
+        let data_start = 8usize
+            .checked_add(header_len)
+            .ok_or_else(|| "mel_filters header length overflow".to_string())?;
+        if data_start > bytes.len() {
+            return Err("mel_filters header length exceeds the file size".to_string());
         }
-        let n = bytes.len();
-        let expected = num_mel_bins * N_MELS * 4;
-        if n - 8 < expected {
+        let header_json = std::str::from_utf8(&bytes[8..data_start])
+            .map_err(|e| format!("mel_filters header is not utf-8: {}", e))?;
+        let header: serde_json::Value = serde_json::from_str(header_json)
+            .map_err(|e| format!("mel_filters header is not json: {}", e))?;
+        let tensor = header
+            .as_object()
+            .and_then(|map| {
+                map.iter()
+                    .find(|(name, _)| name.starts_with("mel_"))
+                    .map(|(_, v)| v)
+            })
+            .ok_or_else(|| "mel_filters file contains no mel_* tensor".to_string())?;
+        let dtype = tensor
+            .get("dtype")
+            .and_then(|d| d.as_str())
+            .unwrap_or_default();
+        if dtype != "F32" {
             return Err(format!(
-                "mel_filters size {} doesn't match expected {} (num_mel_bins={})",
-                n - 8, expected, num_mel_bins
+                "mel_filters tensor dtype is {dtype:?}, expected F32"
             ));
         }
-        let mut filters = vec![0f32; num_mel_bins * N_MELS];
+        let offsets = tensor
+            .get("data_offsets")
+            .and_then(|o| o.as_array())
+            .ok_or_else(|| "mel_filters tensor has no data_offsets".to_string())?;
+        let start = offsets
+            .first()
+            .and_then(|v| v.as_u64())
+            .ok_or_else(|| "mel_filters data_offsets is malformed".to_string())?
+            as usize;
+        let end = offsets
+            .get(1)
+            .and_then(|v| v.as_u64())
+            .ok_or_else(|| "mel_filters data_offsets is malformed".to_string())?
+            as usize;
+        let expected = num_mel_bins * N_MELS;
+        if end - start != expected * 4 {
+            return Err(format!(
+                "mel_filters tensor holds {} floats, expected {} (num_mel_bins={})",
+                (end - start) / 4,
+                expected,
+                num_mel_bins
+            ));
+        }
+        let mut filters = vec![0f32; expected];
         for (i, filter) in filters.iter_mut().enumerate() {
-            let offset = 8 + i * 4;
-            *filter = f32::from_le_bytes([bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3]]);
+            let offset = data_start + start + i * 4;
+            if offset + 4 > bytes.len() {
+                return Err("mel_filters tensor data is truncated".to_string());
+            }
+            *filter = f32::from_le_bytes([
+                bytes[offset],
+                bytes[offset + 1],
+                bytes[offset + 2],
+                bytes[offset + 3],
+            ]);
         }
         Ok(filters)
     }

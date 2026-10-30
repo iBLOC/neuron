@@ -16,6 +16,75 @@ neuron 各推理路径的实测速度、延迟、内存与精度数据 —— �
 所有表格的主机:Windows 11,12 核,16 GB 内存,RTX 3090 24 GB
 (CUDA 行需要 `--features cuda`,默认构建不含)。
 
+## 按模型全量扫描 —— 目录里每个模型一行(2026-10-29)
+
+`benches/model_bench.rs` 按能力目录**为每个模型生成一个用例**,并通过
+公开的注册表 API(`register` → `runtime_for`)**进程内**跑在本地设备上。
+不经过 HTTP、不启动服务 —— 这些就是库自己的设备计时。主机上缺权重的
+模型会标成 `skipped` 并给出原因,所以这份报告同时是一张覆盖矩阵。
+
+完整报告:[`target/model-bench-cuda.md`](https://github.com/iBLOC/neuron/blob/main/target/model-bench-cuda.md)
+(用 `scripts\cuda-build.bat cargo bench --bench model_bench
+--features "candle,cuda,tract,ocr,sherpa,voxcpm,chronos2,litert"` 重新生成)。
+
+实测:**41 个用例 —— 14 个测出数据,27 个跳过(缺权重),0 个失败。**
+
+### LLM(candle,CUDA,贪婪解码,生成 64 个新 token)
+
+| 模型 | 参数量 | decode tok/s | p50 (ms) | TTFT p50 (ms) | 备注 |
+|---|---:|---:|---:|---:|---|
+| qwen2.5-0.5b | 0.5B | 52.3 | 563 | — | f32 权重 |
+| qwen3-0.6b | 0.6B | 54.7 | 1 260 | — | f32 权重 |
+
+### Embedding(candle,CUDA,8 条短文本)
+
+| 模型 | texts/s | p50 (ms) |
+|---|---:|---:|
+| all-minilm-l6-v2 | 507.6 | 16.0 |
+| bge-base-en-v1.5 | 322.1 | 24.1 |
+| e5-base-v2 | 331.8 | 25.3 |
+| gte-base | 397.8 | 19.1 |
+
+### ASR(RTF = 音频秒数 / 墙钟秒数,越大越好)
+
+| 模型 | 引擎 | RTF | p50 (ms) | 备注 |
+|---|---|---:|---:|---|
+| sensevoice-small | sherpa | 17.2 | 117 | int8 sherpa-onnx 图 |
+| whisper-small | candle | 9.2 | 205 | CUDA |
+| whisper-tiny | candle | 14.1 | 141 | CUDA |
+
+### Vision / OCR(ONNX 会话路径,tract 执行器,640×640)
+
+| 模型 | 引擎 | images/s | p50 (ms) | 备注 |
+|---|---|---:|---:|---|
+| yolov11n | ort | 2.18 | 466 | |
+| yolov8n | ort | 2.03 | 491 | |
+| yolov8s | ort | 0.95 | 1 049 | |
+| ppocrv5-mobile | paddle-ocr | 1.50 | 681 | det+rec |
+
+### TTS(burn)
+
+| 模型 | 引擎 | p50 (ms) | 备注 |
+|---|---|---:|---|
+| voxcpm2 | burn | 316 222 | **CPU** —— burn 的 CUDA 后端要链 `nccl.lib`,而 CUDA toolkit 不带;而且实测在这张卡上比 CPU 还慢约 6 倍(逐 patch 解码是延迟瓶颈) |
+
+::: warning 这轮扫描查出三个真 bug,均已修复
+1. **CUDA context 绑定在加载线程上。** `chat_stream` 把生成放在新起的
+   线程里,而 cudarc 的 primary context 是按线程绑定的 —— 该线程上每次
+   CUDA 前向都报 `CUDA_ERROR_INVALID_CONTEXT`,SSE 体是空的,而非流式
+   路径正常。qwen3-0.6b 修前实测 **22 tok/s**,修后 **54.7 tok/s**。
+2. **Whisper 的 `mel_filters.safetensors` 读成了虚构格式**(一个
+   `ET\0\0` 魔数后面接裸 f32),而不是标准 safetensors 布局,于是官方
+   下载源(`spaces/lmz/candle-whisper`)的文件直接被拒。
+3. **rerank 目录把 mxbai 和 jina 指到了 BGE 引擎。** 三个 reranker
+   checkpoint 是三种不同架构(XLM-RoBERTa / 带自定义头的 Qwen2 /
+   XLMRoberta),两个非 BGE 行因此加载失败。现在它们各自声明自己的引擎。
+
+扫描同时确认:**candle 的 YOLOv8 后端无法消费 Ultralytics 导出文件**
+(架构是近似实现、没有 PAN-FPN neck),所以视觉行走 ONNX 路径
+(导出脚本 `scripts/export-yolo-onnx.py`)。
+:::
+
 ## LLM 解码吞吐(candle 引擎)
 
 | 模型 | 参数量 | 设备 | 精度 | TTFT p50 (ms) | 解码 tok/s (p50) | 峰值内存 (MB) |
@@ -166,6 +235,12 @@ python eval_vlm.py  --base-url http://127.0.0.1:18093 --bench pope
 # 分配 / 内存池微基准
 cargo bench --bench mobile_bench
 cargo bench --bench perf -- --quick
+
+# 按模型全量扫描(目录里每个模型一个用例,进程内,跑在本地设备)
+# -> target/model-bench-<device>.md
+scripts/fetch-bench-models.sh                 # 权重 -> ~/.neuron/models/<cap>/<id>/
+python scripts/export-yolo-onnx.py             # Ultralytics .pt -> model.onnx + config.json
+scripts\cuda-build.bat cargo bench --bench model_bench --features "candle,cuda,tract,ocr,sherpa,voxcpm,chronos2,litert"
 ```
 
 方法学细节(prompt 防缓存、客户端计时、预热丢弃、贪婪解码)写在

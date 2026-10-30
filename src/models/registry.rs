@@ -16,6 +16,7 @@ pub enum EngineType {
     Vision,
     Decision,
     Ocr,
+    ImageGen,
 }
 
 impl EngineType {
@@ -29,6 +30,7 @@ impl EngineType {
             "vision" => Ok(Self::Vision),
             "decision" => Ok(Self::Decision),
             "ocr" => Ok(Self::Ocr),
+            "imagegen" | "image-gen" | "image_gen" | "t2i" => Ok(Self::ImageGen),
             _ => Err(format!("unknown engine type: {s}")),
         }
     }
@@ -43,6 +45,7 @@ impl EngineType {
             Self::Vision => "vision",
             Self::Decision => "decision",
             Self::Ocr => "ocr",
+            Self::ImageGen => "imagegen",
         }
     }
 }
@@ -106,6 +109,7 @@ impl Registry {
                 EngineType::Embedding,
                 EngineType::Decision,
                 EngineType::Ocr,
+                EngineType::ImageGen,
             ] {
                 let engine_dir = root.join(engine.as_str());
                 if !engine_dir.is_dir() {

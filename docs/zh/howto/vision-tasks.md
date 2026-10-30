@@ -17,6 +17,58 @@ neuron 在 `/v1/vision/*` 下暴露 4 个视觉任务端点，并分发到相应
 
 4 个端点都接受相同的 `multipart/form-data` 请求格式，附带图像上传。
 
+::: warning 目前只实现了检测
+运行时支持**检测**（ONNX 路径另外支持分类）。分割与姿态的解码没有接上——
+`POST /v1/vision/segment` 与 `/pose` 会返回 `not_implemented`，而不是空的
+掩码或占位关键点。
+:::
+
+## 准备模型目录
+
+视觉运行时加载的是**准备好的模型目录**，而不是原始 checkpoint。把
+`NEURON_VISION_MODEL_PATH` 指向包含下列文件的目录：
+
+```
+model.onnx        # 导出的图（静态 1x3x640x640 输入）
+config.json       # 图的 I/O 约定
+```
+
+`config.json` 字段（都可省略，默认值匹配标准 YOLOv8 COCO 导出）：
+
+| 字段 | 默认值 | 含义 |
+|---|---|---|
+| `input_name` | `"images"` | ONNX 输入名 |
+| `output_names` | `["output0"]` | ONNX 输出名 |
+| `input_shape` | `[1, 3, 640, 640]` | 输入形状（预处理用） |
+| `num_classes` | `80` | 解码用的类别数 |
+| `output_layout` | `"yolov8"` | `yolov8`（anchor 行）或 `detr`（query 行） |
+| `num_queries` | `300` | `detr` 版式的 query 数 |
+
+上游仓库（Ultralytics 发的是 PyTorch `.pt`，DETR 系发的是
+`model.safetensors`）都不能直接加载，需要先导出：
+
+```bash
+# YOLOv8 / YOLO11 → YOLOv8 版式 ONNX
+yolo export model=yolov8n.pt format=onnx imgsz=640 opset=17
+```
+
+然后把结果放进模型目录并注册引擎：
+
+```bash
+export NEURON_VISION_RUNTIME=ort        # 或 candle 走 candle 后端
+export NEURON_VISION_MODEL_PATH=/path/to/model-dir
+export NEURON_VISION_MODEL_ID=yolov8n   # 请求里使用的 id（默认 "vision"）
+```
+
+ONNX 会话执行器是 **tract**（纯 Rust），需要 `--features tract`；
+`ort` 这个 Cargo feature 不影响这条路径。
+
+::: warning candle 的 YOLOv8 后端不提供检测结果
+`candle-yolo` 只是 YOLOv8 架构的近似实现（没有 PAN-FPN neck、检测头布局
+不同），无法消费 Ultralytics 导出文件；它也拒绝用未训练权重输出，以免
+给出编造的检测框。请使用上面的 ONNX 路径。
+:::
+
 ## 请求格式
 
 ```bash

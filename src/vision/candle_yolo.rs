@@ -33,6 +33,45 @@ use crate::llm::{ChatResult, ModelInfo, NeuronError};
 
 const INPUT_SIZE: u32 = 640;
 
+/// Find a `.safetensors` checkpoint inside `dir`.
+///
+/// Preference order: `model.safetensors`, then `yolov8*.safetensors`
+/// (the Ultralytics file name), then any other `*.safetensors`. Returns
+/// `None` when the directory holds no checkpoint.
+#[cfg(feature = "candle")]
+fn find_weight_file_in(dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    if !dir.is_dir() {
+        return None;
+    }
+    let mut named: Vec<std::path::PathBuf> = Vec::new();
+    let mut yolov8: Vec<std::path::PathBuf> = Vec::new();
+    let mut other: Vec<std::path::PathBuf> = Vec::new();
+    let entries = std::fs::read_dir(dir).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("safetensors") {
+            continue;
+        }
+        let file = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if file == "model.safetensors" {
+            named.push(path);
+        } else if file.starts_with("yolov8") {
+            yolov8.push(path);
+        } else {
+            other.push(path);
+        }
+    }
+    named
+        .into_iter()
+        .chain(yolov8)
+        .chain(other)
+        .next()
+}
+
 pub struct CandleYoloRuntime {
     model_id: String,
     /// Stored for future architecture impl that picks a candle device variant
@@ -43,6 +82,11 @@ pub struct CandleYoloRuntime {
     /// Inference lock — YOLOv8 forward passes are not safe to run concurrently
     /// on a single loaded model (KV cache / workspace reuse).
     inference_lock: Mutex<()>,
+    /// Trained weights, loaded on the first detection request and reused
+    /// afterwards. `None` until a checkpoint has been loaded successfully —
+    /// the runtime refuses to serve detections from untrained weights.
+    #[cfg(feature = "candle")]
+    weights: std::sync::Mutex<Option<super::yolov8_arch::Yolov8Forward>>,
     /// Tensor pool for forward-pass intermediates. Reduces allocation
     /// overhead on mobile/edge devices. Always present (CPU) under
     /// `--features candle`; absent under feature-off builds.
@@ -68,8 +112,55 @@ impl CandleYoloRuntime {
             model_path,
             inference_lock: Mutex::new(()),
             #[cfg(feature = "candle")]
+            weights: std::sync::Mutex::new(None),
+            #[cfg(feature = "candle")]
             tensor_pool,
         }
+    }
+
+    /// Resolve the `.safetensors` checkpoint this runtime serves.
+    ///
+    /// Lookup order:
+    /// 1. `NEURON_VISION_MODEL_PATH` — a file, or a directory holding
+    ///    `model.safetensors` / `yolov8*.safetensors` / any `*.safetensors`
+    /// 2. the model id resolved under the model roots
+    ///    (`<root>/vision/<id>/`, `<root>/candle-yolo/<id>/`, `<root>/<id>/`)
+    ///
+    /// Returns a `not_initialized` error naming the paths that were
+    /// searched — the runtime never falls back to untrained weights.
+    #[cfg(feature = "candle")]
+    fn resolve_weight_file(&self) -> Result<std::path::PathBuf, NeuronError> {
+        if let Some(dir) = &self.model_path {
+            if dir.is_file() {
+                return Ok(dir.clone());
+            }
+            if let Some(found) = find_weight_file_in(dir) {
+                return Ok(found);
+            }
+            return Err(NeuronError::not_initialized(format!(
+                "no YOLOv8 checkpoint (*.safetensors) found under {} (NEURON_VISION_MODEL_PATH)",
+                dir.display()
+            )));
+        }
+
+        let root = crate::config::NeuronConfig::resolved_model_dir();
+        let mut searched = Vec::new();
+        for dir in [
+            root.join("vision").join(&self.model_id),
+            root.join("candle-yolo").join(&self.model_id),
+            root.join(&self.model_id),
+        ] {
+            searched.push(dir.display().to_string());
+            if let Some(found) = find_weight_file_in(&dir) {
+                return Ok(found);
+            }
+        }
+        Err(NeuronError::not_initialized(format!(
+            "YOLOv8 checkpoint for model '{}' not found. Looked for *.safetensors in: {}. \
+             Set NEURON_VISION_MODEL_PATH to the model directory (or file).",
+            self.model_id,
+            searched.join(", ")
+        )))
     }
 
     /// Return the number of tensors currently held in the memory pool.
@@ -163,11 +254,11 @@ impl CandleYoloRuntime {
 
     /// Run YOLOv8 forward pass and return raw detections.
     ///
-    /// Run the YOLOv8 forward pass on a letterboxed RGB image.
-    ///
-    /// Returns a `Vec<RawDetection>` matching the YOLOv8 output contract.
-    /// v1.0 uses a deterministic pseudo-architecture when no real
-    /// weights are available; the shape and pipeline are correct.
+    /// Trained weights are mandatory. An architecture built on an empty
+    /// variable map yields random class scores and arbitrary boxes — that
+    /// is a fabricated detection, not an inference result — so the
+    /// runtime refuses to run without a checkpoint that covers every
+    /// architecture variable.
     #[cfg(feature = "candle")]
     fn forward_pass(&self, letterboxed: &[u8]) -> Result<Vec<RawDetection>, NeuronError> {
         use candle::{Device, Tensor};
@@ -192,8 +283,26 @@ impl CandleYoloRuntime {
         )
         .map_err(|e| NeuronError::invalid_input(format!("tensor build: {e}")))?;
 
-        let yolo = Yolov8Forward::new(&device, 80)
-            .map_err(|e| NeuronError::invalid_input(format!("YOLOv8 build: {e}")))?;
+        // Load once, then reuse across requests.
+        {
+            let mut cache = self.weights.lock().map_err(|e| {
+                NeuronError::not_initialized(format!("yolov8 weight cache poisoned: {e}"))
+            })?;
+            if cache.is_none() {
+                let path = self.resolve_weight_file()?;
+                let (model, matched) = Yolov8Forward::load_safetensors(&path, &device, 80)
+                    .map_err(NeuronError::not_initialized)?;
+                tracing::info!(path = %path.display(), matched, "loaded YOLOv8 checkpoint");
+                *cache = Some(model);
+            }
+        }
+
+        let cache = self.weights.lock().map_err(|e| {
+            NeuronError::not_initialized(format!("yolov8 weight cache poisoned: {e}"))
+        })?;
+        let yolo = cache.as_ref().ok_or_else(|| {
+            NeuronError::not_initialized("YOLOv8 weights were not loaded".to_string())
+        })?;
         yolo.forward(&input)
             .map_err(|e| NeuronError::invalid_input(format!("forward: {e}")))
     }
@@ -296,21 +405,19 @@ pub struct RawDetection {
 #[async_trait]
 impl VisionRuntime for CandleYoloRuntime {
     async fn load(model_id: &str, device: &DeviceSelection) -> ChatResult<Box<dyn VisionRuntime>> {
-        Ok(Box::new(Self::new(model_id, device)))
+        let rt = Self::new(model_id, device);
+        // Fail fast when no checkpoint is reachable: the runtime would
+        // otherwise register happily and then refuse every request.
+        #[cfg(feature = "candle")]
+        rt.resolve_weight_file()?;
+        Ok(Box::new(rt))
     }
 
     fn supported_tasks(&self) -> &'static [VisionTask] {
-        // The YOLOv8 backbone + neck is task-agnostic; only the head
-        // changes. v1.0 only wires the detection head, but the trait
-        // dispatch + LoRA-aware class registry support all 4 tasks.
-        // The classify/segment/pose branches are stubbed to return
-        // not_implemented until those heads are added (see docs spec).
-        &[
-            VisionTask::Detect,
-            VisionTask::Classify,
-            VisionTask::Segment,
-            VisionTask::Pose,
-        ]
+        // Only the detection head is wired. The classify / segment / pose
+        // branches return `not_implemented`, so they must not be advertised
+        // as supported capabilities.
+        &[VisionTask::Detect]
     }
 
     async fn run(&self, req: VisionRequest) -> ChatResult<VisionResponse> {
@@ -325,13 +432,7 @@ impl VisionRuntime for CandleYoloRuntime {
 
     fn list_models(&self) -> Vec<ModelInfo> {
         let mut info = ModelInfo::new(self.model_id.clone(), "neuron");
-        info.capabilities = Some(vec![
-            "vision".to_string(),
-            "detect".to_string(),
-            "classify".to_string(),
-            "segment".to_string(),
-            "pose".to_string(),
-        ]);
+        info.capabilities = Some(vec!["vision".to_string(), "detect".to_string()]);
         vec![info]
     }
 
@@ -574,9 +675,18 @@ mod tests {
 
     #[tokio::test]
     async fn test_candle_yolo_runtime_load() {
-        let rt = CandleYoloRuntime::load("yolov8n", &DeviceSelection::Cpu)
+        // No checkpoint on disk → the runtime refuses to register rather
+        // than serving detections from untrained weights.
+        let err = CandleYoloRuntime::load("yolov8n", &DeviceSelection::Cpu)
             .await
-            .expect("load");
+            .err()
+            .expect("load must fail without a checkpoint");
+        assert!(
+            err.to_string().contains("checkpoint") || err.to_string().contains("safetensors"),
+            "got: {err}"
+        );
+
+        let rt = CandleYoloRuntime::new("yolov8n", &DeviceSelection::Cpu);
         assert_eq!(rt.name(), "candle-yolo");
     }
 
@@ -614,10 +724,13 @@ mod tests {
     #[tokio::test]
     async fn test_supported_tasks_listed_for_yolo() {
         let rt = CandleYoloRuntime::new("yolov8n", &DeviceSelection::Cpu);
+        // Only detection is wired on the candle backend — the classify /
+        // segment / pose heads return `not_implemented`, so they must not
+        // be advertised as supported.
         assert!(rt.supported_tasks().contains(&VisionTask::Detect));
-        assert!(rt.supported_tasks().contains(&VisionTask::Classify));
-        assert!(rt.supported_tasks().contains(&VisionTask::Segment));
-        assert!(rt.supported_tasks().contains(&VisionTask::Pose));
+        assert!(!rt.supported_tasks().contains(&VisionTask::Classify));
+        assert!(!rt.supported_tasks().contains(&VisionTask::Segment));
+        assert!(!rt.supported_tasks().contains(&VisionTask::Pose));
     }
 
     #[test]
@@ -687,7 +800,9 @@ mod tests {
     fn test_vision_impl_parse_unknown_errors() {
         use super::super::VisionImpl;
         assert!(VisionImpl::parse("unknown").is_err());
-        assert!(VisionImpl::parse("candle").is_err());
+        // "candle" is the documented shorthand for the YOLO family.
+        assert!(VisionImpl::parse("candle").is_ok());
+        assert!(VisionImpl::parse("CANDLE-YOLO").is_ok());
     }
 
     #[test]
@@ -722,13 +837,9 @@ mod tests {
     }
 
     #[test]
-    fn test_supported_tasks_includes_all_four() {
+    fn test_supported_tasks_is_detect_only() {
         let rt = CandleYoloRuntime::new("yolov8n", &DeviceSelection::Cpu);
-        let tasks = rt.supported_tasks();
-        assert!(tasks.contains(&VisionTask::Detect));
-        assert!(tasks.contains(&VisionTask::Classify));
-        assert!(tasks.contains(&VisionTask::Segment));
-        assert!(tasks.contains(&VisionTask::Pose));
+        assert_eq!(rt.supported_tasks(), &[VisionTask::Detect]);
     }
 
     #[cfg(feature = "candle")]

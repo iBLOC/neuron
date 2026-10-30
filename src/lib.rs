@@ -12,6 +12,7 @@ pub mod decision;
 pub mod embedded;
 pub mod embedding;
 pub mod engine;
+pub mod imagegen;
 pub mod llm;
 pub mod mage_vl;
 pub mod metrics;
@@ -40,6 +41,11 @@ pub use decision::{
 pub use decision::tract_session::TractDecisionRuntime;
 pub use embedded::{health, run_embedded, NeuronEmbedConfig, NeuronHandle, NeuronHealth};
 pub use models::EngineType;
+pub use imagegen::{
+    GeneratedImage, ImageGenImpl, ImageGenParams, ImageGenRuntime, ImageGenRuntimeRegistry,
+};
+#[cfg(feature = "candle")]
+pub use imagegen::MossImageRuntime;
 pub use embedding::{
     base64_encode, EmbeddingData, EmbeddingImpl, EmbeddingInput,
     EmbeddingRequest, EmbeddingResponse, EmbeddingRuntime, EmbeddingRuntimeRegistry,

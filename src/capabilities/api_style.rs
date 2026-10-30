@@ -12,6 +12,7 @@ impl ApiStyle {
     pub fn openai_embeddings() -> Self { Self("openai-embeddings".into()) }
     pub fn openai_rerank() -> Self { Self("openai-rerank".into()) }
     pub fn openai_vision() -> Self { Self("openai-vision".into()) }
+    pub fn openai_images() -> Self { Self("openai-images".into()) }
     pub fn anthropic_messages() -> Self { Self("anthropic-messages".into()) }
 
     pub fn as_str(&self) -> &str { &self.0 }
@@ -34,6 +35,7 @@ mod tests {
         assert_eq!(ApiStyle::openai_audio().as_str(), "openai-audio");
         assert_eq!(ApiStyle::openai_embeddings().as_str(), "openai-embeddings");
         assert_eq!(ApiStyle::openai_rerank().as_str(), "openai-rerank");
+        assert_eq!(ApiStyle::openai_images().as_str(), "openai-images");
     }
 
     #[test]

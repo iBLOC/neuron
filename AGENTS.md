@@ -1,6 +1,6 @@
 # neuron (神经元) — AGENTS guide
 
-**Status:** READ-ONLY contributor reference. Updated 2026-10-26 (**VoxCPM2 GPU backend landed** — `--features voxcpm-cuda` + `NEURON_DEVICE=nvidia` runs the 2B model on an NVIDIA GPU through burn's CubeCL CUDA backend in f16; five latent dtype assumptions the f32 path hid were fixed; the CPU stays the default because VoxCPM2's per-patch decode measured ~6× *slower* on an RTX 3090 than on a 12-core CPU; **701 lib tests** default / **734 with `--features voxcpm`** / **735 with `--features voxcpm-cuda`** / **761 with `--features tract`** / **741 with `--features ort`** (all re-measured 2026-10-27 after the RustSec dependency patches); prior 2026-10-25: **TTS model-level streaming landed** — `POST /v1/audio/speech/stream`, VoxCPM2 decodes each latent patch as the model emits it; verified bit-comparable against the full decode on the real `audiovae.pth`; four real-checkpoint load bugs fixed — pth wrapper, VAE module-tree paths, burn-store contiguous index remapping, RoPE head dim — plus the TTS default-shortcut startup panic; prior 2026-10-15: **llama.cpp backend landed** — `NEURON_LLM_RUNTIME=llamacpp`, gated by the `llamacpp` Cargo feature, see the "Llama.cpp (loadable)" section; **681 lib tests** default as of 2026-10-15; prior 2026-10-09 baseline: post-OCR capability (PP-OCR), **679 lib tests** default / **739 with `--features tract`** / **715 with `--features ort`** / **750 with `tract,ort`**; prior 2026-09-27 baseline: post-candle 0.11 upgrade per `huggingface/candle.git#aebc405`; post-`f643c1c` LLM auto-registration + USERPROFILE fallback on Windows GUI processes; **VoxCPM2 (2B/48 kHz) local inference landed** — `NEURON_TTS_RUNTIME=voxcpm2`, direct checkpoint load, see the "VoxCPM2 (loadable)" section; **model scheduler landed** — bounded-memory LLM swap queue behind `/v1/chat/completions` + `/v1/messages`, see the "Model scheduler" bullet and `docs/superpowers/specs/2026-09-29-model-scheduler.md`; GitHub Pages CI now base-URL-configured + adds a `lychee` link-check job; prior 2026-09-25 baseline: post-rename `neure → neuron` per commit `e3d2c41` (2026-09-21); `AppState::register_engine` capability per `bccef7c`; earlier 2026-07-19 baseline: license switch + Shadow decoupling).
+**Status:** READ-ONLY contributor reference. Updated 2026-10-30 (**MOSS-Image text-to-image capability landed** — the first image-generation capability: `imagegen` + `POST /v1/images/generations`, serving OpenMOSS MOSS-Image natively on candle with the DiT, the Qwen3.5 hybrid-GDN text encoder and the FLUX.2 decoder all vendored; **743 lib tests** default (up from 701); prior 2026-10-26: **VoxCPM2 GPU backend landed** — `--features voxcpm-cuda` + `NEURON_DEVICE=nvidia` runs the 2B model on an NVIDIA GPU through burn's CubeCL CUDA backend in f16; five latent dtype assumptions the f32 path hid were fixed; the CPU stays the default because VoxCPM2's per-patch decode measured ~6× *slower* on an RTX 3090 than on a 12-core CPU; **701 lib tests** default / **734 with `--features voxcpm`** / **735 with `--features voxcpm-cuda`** / **761 with `--features tract`** / **741 with `--features ort`** (all re-measured 2026-10-27 after the RustSec dependency patches); prior 2026-10-25: **TTS model-level streaming landed** — `POST /v1/audio/speech/stream`, VoxCPM2 decodes each latent patch as the model emits it; verified bit-comparable against the full decode on the real `audiovae.pth`; four real-checkpoint load bugs fixed — pth wrapper, VAE module-tree paths, burn-store contiguous index remapping, RoPE head dim — plus the TTS default-shortcut startup panic; prior 2026-10-15: **llama.cpp backend landed** — `NEURON_LLM_RUNTIME=llamacpp`, gated by the `llamacpp` Cargo feature, see the "Llama.cpp (loadable)" section; **681 lib tests** default as of 2026-10-15; prior 2026-10-09 baseline: post-OCR capability (PP-OCR), **679 lib tests** default / **739 with `--features tract`** / **715 with `--features ort`** / **750 with `tract,ort`**; prior 2026-09-27 baseline: post-candle 0.11 upgrade per `huggingface/candle.git#aebc405`; post-`f643c1c` LLM auto-registration + USERPROFILE fallback on Windows GUI processes; **VoxCPM2 (2B/48 kHz) local inference landed** — `NEURON_TTS_RUNTIME=voxcpm2`, direct checkpoint load, see the "VoxCPM2 (loadable)" section; **model scheduler landed** — bounded-memory LLM swap queue behind `/v1/chat/completions` + `/v1/messages`, see the "Model scheduler" bullet and `docs/superpowers/specs/2026-09-29-model-scheduler.md`; GitHub Pages CI now base-URL-configured + adds a `lychee` link-check job; prior 2026-09-25 baseline: post-rename `neure → neuron` per commit `e3d2c41` (2026-09-21); `AppState::register_engine` capability per `bccef7c`; earlier 2026-07-19 baseline: license switch + Shadow decoupling).
 
 ## What neuron is
 
@@ -20,8 +20,10 @@ neuron is a **library-only** Rust crate (no standalone binary) that host process
 - **Cohere rerank adapter** (`NEURON_RERANK_RUNTIME=cohere`) — proxies requests to Cohere's hosted `/v1/rerank` API; no local weights, requires `NEURON_COHERE_API_KEY`
 - **Model scheduler** (2026-09-29; `src/scheduler/`, spec `docs/superpowers/specs/2026-09-29-model-scheduler.md`) — LLM requests on `/v1/chat/completions` + `/v1/messages` (OpenAI & Anthropic, SSE + non-streaming) queue against a memory budget: same-model runs immediately, a different model loads alongside when it fits, otherwise queued resident-model work drains first and idle residents are evicted LRU-first before the swap; idle models recycle after `NEURON_SCHEDULER_IDLE_SECS`. Memory reference values ship in `assets/model_memory_profiles.json` and are corrected at runtime by observed unload RSS (EWMA → `~/.neuron/models/scheduler/observed_profiles.json`). Disable with `NEURON_SCHEDULER_ENABLED=false` for the legacy always-load path. `LlmRuntimeRegistry`'s loaded cache is now a **std** mutex (never held across `await`) with a synchronous `unload()` — the scheduler evicts from lease-drop contexts; `EngineRegistry::unregister` covers the canonical table.
 - **Laya decision scoring** (`POST /v1/decisions`) — non-autoregressive discriminative scorers (int8 ONNX, encoder-only, one forward per question) served natively via `tract`; scores a question's options plus an act-vs-escalate head with calibrated confidence. Convai ships **safetensors only, no ONNX** (`convaiinnovations/laya{,-multilingual,-typed-decisions}`), so the graph is upstream `scripts/export_onnx.py` → this repo's `scripts/prep-laya-onnx.py`; `laya` is deliberately not in `SUPPORTED_CATALOG` since nothing downloadable is loadable as-is. See `docs/superpowers/specs/2026-09-24-laya-decision.md`.
-- **FlashAttention** for Llama 2/3 + Mistral (upstream candle-transformers) + Qwen 2/2.5/3/3.5 (via `src/llm/vendor/` with `use_flash_attn` + `From<upstream::Config>` + flash-attn forward branch); Phi-3/ChatGLM still warn + fall back to SDPA. Requires `--features flash-attn` + CUDA.
+- **FlashAttention** for Llama 2/3 + Mistral (upstream candle-transformers) + Qwen 2/2.5/3 (via `src/llm/vendor/` with `use_flash_attn` + `From<upstream::Config>` + flash-attn forward branch); Phi-3/ChatGLM still warn + fall back to SDPA. Requires `--features flash-attn` + CUDA. **Qwen 3.5 is NOT covered** — its architecture is not the Qwen3 dense one (see "Qwen 3.5" below).
+- **Qwen 3.5 is NOT served by the candle backend** (verified 2026-10-29 against the upstream `Qwen/Qwen3.5-*` configs). The real Qwen 3.5 `config.json` uses `model_type: "qwen3_5"` and nests the text tower under `text_config`, whose layers mix `linear_attention` and `full_attention` (`full_attention_interval: 4`, `attn_output_gate: true`, `partial_rotary_factor: 0.25`, mrope, `mtp_num_hidden_layers: 1`) — a gated-delta-net stack that upstream candle-transformers has **no module for**. `detect_arch` therefore rejects the config with an explicit "Qwen 3.5 is not supported by the candle backend" error (it must not fall through to the dense Qwen3 loader). `qwen3_5_moe` is in the MoE rejection list. Qwen 3.5 is servable through the `mistralrs` backend (mistral.rs v0.8.22 ships `MultimodalLoaderType::Qwen3_5` / `Qwen3_5Moe` and the auto-pipeline routes `Qwen3_5ForConditionalGeneration` to it) or through `llamacpp` from a GGUF (llama-cpp-sys-2 0.1.159's bundled llama.cpp implements `LLM_ARCH_QWEN35` / `LLM_ARCH_QWEN35MOE`). Every upstream size (0.8B / 2B / 4B / 9B / 27B dense + 35B-A3B / 122B-A10B / 397B-A17B MoE) is a **vision-language** model.
 - **Criterion benchmark suite** under `benches/perf.rs` (14 `bench_function` calls across all 5 model types; previously reported as 22 — corrected 2026-07-19)
+- **Per-model benchmark harness** under `benches/model_bench.rs` (added 2026-10-29): one case per model in the capability catalog, run **in-process** through the public registry API (`register` → `runtime_for`) on the local device. `harness = false` (real forward passes take seconds, so the harness does its own warmup + p50/p95 and writes `target/model-bench-<device>.md`). Models whose weights are absent are reported as `skipped` with the reason, so the report doubles as a coverage matrix. Weights: `scripts/fetch-bench-models.sh`; the vision rows need `python scripts/export-yolo-onnx.py` (Ultralytics `.pt` → `model.onnx` + `config.json`). **CUDA builds need the MSVC environment** — nvcc cannot find `cl.exe` from a plain shell, so use `scripts\cuda-build.bat cargo bench --bench model_bench --features "candle,cuda,…"`.
 - Runs only as an in-process library — the host binds the port, owns the process lifecycle, and calls `request_shutdown()` + `join().await` for graceful drain
 - **Multi-source model registry** (`huggingface` + `hf-mirror` + `modelscope`): the puller accepts `<source>:<repo>` references and the platform default source is `modelscope` (set via `NEURON_DEFAULT_SOURCE`). `HF_TOKEN` and `MODELSCOPE_TOKEN` env vars authenticate against gated/private repos on their respective platforms.
 - **Catalog dedup by `(engine, id)`**: a single `CatalogEntry` may carry multiple `SourceRef` entries (one per repo) so the UI can offer "download from HF / mirror / ModelScope" without re-listing the model three times.
@@ -174,6 +176,70 @@ Load-bearing points:
    about BGR), `<td`-like tokens carry the loc regression; the SLANeXt
    vocab is `table_structure_dict.txt`-shaped with merged `<td></td>`
    tokens. Not wired yet — next increment.
+
+### MOSS-Image (text-to-image capability, 2026-10-30)
+
+neuron gained its first **text-to-image capability**: `imagegen`, served
+at `POST /v1/images/generations` (OpenAI Images shape, `b64_json`).
+The model is OpenMOSS **MOSS-Image** (Apache-2.0, released 2026-10-16):
+a 5B single-stream DiT + a Qwen3.5 hybrid-GDN text encoder + a FLUX.2
+small decoder VAE, 13.6B params / ~27.2 GB of BF16 safetensors in one
+HF repo. Activation: `NEURON_IMAGEGEN_RUNTIME=moss-image` (+ the
+default `candle` feature); weights load from the upstream repo layout
+**directly** — no conversion. Full rationale + porting notes:
+`docs/superpowers/specs/2026-10-30-moss-image-text-to-image.md`.
+
+Everything is vendored into `src/imagegen/moss_image/` — candle 0.11
+has no module for the gated-delta-net text stack, and the DiT is a
+single-stream joint-sequence transformer (shared time modulation,
+4-axis RoPE), not a Flux double-stream. Load-bearing points:
+
+1. **The text encoder is the expensive part** (~8.4B of the 13.6B).
+   `model_type: qwen3_5` is 32 text layers = 24 Gated DeltaNet + 8 full
+   attention (`head_dim` 256, partial rotary 0.25, interleaved mrope,
+   `attn_output_gate`). `src/llm/candle_arch.rs` maps `qwen3_5` onto
+   the *dense* Qwen3 loader — that path cannot read this checkpoint, so
+   the hybrid stack is ported here (prefill-only; the `visual.*` tower
+   is never touched).
+2. **Three silent-NaN traps in the port** (all now guarded by unit
+   tests): an RMSNorm must *divide* by the RMS (`broadcast_mul` with
+   `var^-0.5`, NOT `broadcast_div` — the inversion grows activations by
+   ~10⁶ and makes attention scores `inf`); the GDN tril mask must be
+   applied **before** the `exp` (the reference does `.tril().exp()`,
+   and `exp(+hundreds)` → `inf` → `inf·0 = NaN`); and the chunk
+   recurrence must keep `g_last` **un-exponentiated** when computing
+   `(g[..., -1] − g[..., :]).exp()`.
+3. **candle's `+`/`-` do not broadcast** and its `matmul` is 4-D only —
+   the GDN chunk kernel folds its NC axis into the batch dim (or
+   squeezes per chunk) before every matmul, and the UT transform's
+   `attn[..., i, :i]` must squeeze the fixed row index like torch does.
+   Note also that the reference **reassigns** `value = attn @ v_beta`
+   before the chunk loop reads it — a port that keeps the raw `v`
+   computes a different recurrence (it drops the `beta` factor). A
+   `beta = 1` unit test cannot catch that; the analytic anchor uses
+   `beta = 0.5` for exactly that reason.
+4. **The FLUX.2 decoder's mid block runs at the largest channel count**
+   (384), while `conv_norm_out`/`conv_out` run at the smallest (96).
+   The latent path is BN de-normalization → 2×2 pixel unshuffle →
+   `post_quant_conv` → decoder, all fp32.
+5. **The scheduler's sigma grid is snapped to the training grid**, not
+   continuous — a 50-step run has exactly 50 distinct sigmas
+   (`1.0, 0.996, 0.992, 0.987, 0.983, …, 0.024`, verified against the
+   upstream Python). The CFG negative branch **skips DiT block 22**
+   (two forwards per step, not three).
+6. **CUDA-only in practice.** f16 weights ≈ 27 GB resident (f32 ≈ 54 GB,
+   registration budget 28 GB); CPU is a multi-PFLOP-per-image workload
+   and candle's CPU backend has no BF16 matmul. A 24 GB card needs the
+   text encoder unloaded before the DiT runs — that staged residency is
+   **not implemented yet** (both components load eagerly), and the
+   capability is **not wired into the model scheduler** (LLM-only), so
+   a 27 GB image model cannot coexist cooperatively with an LLM yet.
+7. **No real-weight verification yet.** The port is covered by 34 unit
+   tests (tiny-config structures + analytic anchors: the GDN kernel
+   against a hand-derived single-token formula, the scheduler against
+   upstream-computed sigmas, the VAE's 16× upscale, the RoPE layout),
+   but no run against the real 27 GB checkpoint has happened — image
+   quality is unverified and needs a GPU host.
 
 ### VoxCPM2 (loadable, 2026-09-27)
 
@@ -397,6 +463,7 @@ async fn execute_with_media(
    - `POST /v1/decisions` — Laya discriminative decision scoring (options + act/escalate)
    - `POST /v1/forecast` — Chronos2 zero-shot time-series forecast
    - `POST /v1/vision/gate/score` — Mage-VL StreamMind gate score
+   - `POST /v1/images/generations` — MOSS-Image text-to-image (OpenAI Images shape, `b64_json`; neuron extensions: `negative_prompt`, `steps`, `guidance_scale`, `seed`)
    - `GET /v1/scheduler/status` — model scheduler snapshot (residents, queue, budget, correction stats)
    - `DELETE /v1/scheduler/models/{id}` — administratively evict a resident model (409 while in use)
    - `POST /v1/messages` — Anthropic Messages v1 (via `adapter_dispatch`)
@@ -542,6 +609,7 @@ Run all three before submitting a PR. **All must pass**.
 | `vision_registry` | `Arc<VisionRuntimeRegistry>` | Primary Vision model registry |
 | `ocr_registry` | `Arc<OcrRuntimeRegistry>` | Primary OCR (PP-OCR) model registry |
 | `decision_registry` | `Arc<DecisionRuntimeRegistry>` | Primary Decision (Laya) model registry |
+| `imagegen_registry` | `Arc<ImageGenRuntimeRegistry>` | Primary image-generation (MOSS-Image) model registry |
 | `chronos2_registry` | `Arc<Chronos2Registry>` | Chronos2 forecasting registry (backing `/v1/forecast`) |
 | `vision_lora_registry` | `Arc<vision::LoraRegistry>` | Dynamically registered Vision LoRA adapters |
 | `llm_scheduler` | `Arc<scheduler::ModelScheduler>` | Bounded-memory LLM scheduler (leases, queue, evictions) |
@@ -556,6 +624,7 @@ Run all three before submitting a PR. **All must pass**.
 | `vision` | `Arc<dyn VisionRuntime>` | Shortcut: first registered Vision (backward compat) |
 | `ocr` | `Arc<dyn OcrRuntime>` | Shortcut: first registered OCR (backward compat) |
 | `decision` | `Arc<dyn DecisionRuntime>` | Shortcut: first registered Decision (backward compat) |
+| `imagegen` | `Arc<dyn ImageGenRuntime>` | Shortcut: first registered image-generation model (backward compat) |
 | `config` | `NeuronConfig` | Effective config |
 | `puller` | `Arc<Puller>` | Download job manager |
 | `catalog` | `Arc<Catalog>` | Model registry (supported + available models) |
@@ -618,8 +687,9 @@ neuron has **no direct dependency** on any particular host — the integration c
 | `NEURON_COHERE_API_KEY` | (unset) | Cohere API key (required when `NEURON_RERANK_RUNTIME=cohere`) |
 | `NEURON_COHERE_ENDPOINT` | `https://api.cohere.com` | Cohere API base URL |
 | `NEURON_COHERE_MODEL` | `rerank-english-v3.0` | Cohere model id (e.g. `rerank-multilingual-v3.0`) |
-| `NEURON_VISION_RUNTIME` | (unset) | `candle-yolo` \| `candle-rtdetr` \| `candle-detr` \| `ort` — which Vision engine + model family to load (`ort` is a pluggable executor — see `src/vision/ort_runtime.rs` `build_session`). The historical `ultralytics` Python-subprocess backend was removed (neuron is pure Rust, no subprocesses); Grounding DINO went with it. |
-| `NEURON_VISION_MODEL_PATH` | (unset) | Path to the Vision model directory (YOLOv8: `config.json` + `yolov8n.safetensors`) |
+| `NEURON_VISION_RUNTIME` | (unset) | `candle` \| `candle-yolo` \| `ort` — which Vision engine to register (read since 2026-10-29; before that it was documented but never read). `candle` is an alias for `candle-yolo`. The candle RT-DETR / DETR ids were **removed** on 2026-10-29 — the architectures were never implemented, and a registration that answers `not_implemented` on every request is a promise the server cannot keep; serve those families through `ort`. `ort` is the **ONNX session path** — its executor is tract (pure Rust, `--features tract`), NOT onnxruntime: the `ort` Cargo feature does not touch the vision path. |
+| `NEURON_VISION_MODEL_PATH` | (unset) | Path to the Vision model directory. `ort` reads `model.onnx` + `config.json` from it; `candle-yolo` reads `*.safetensors` from it (and refuses to run without a checkpoint that covers every architecture variable). |
+| `NEURON_VISION_MODEL_ID` | `vision` | The model id vision requests refer to when the runtime is registered through `NEURON_VISION_RUNTIME` (embedded hosts can instead register through `config.registrations`). |
 | `NEURON_DECISION_RUNTIME` | (unset) | `tract` — which Decision engine to load (requires `--features tract`) |
 | `NEURON_DECISION_MODEL_ID` | `laya` | Model id registered for the Decision capability |
 | `NEURON_DECISION_MODEL_PATH` | (unset) | Path to the prepped Decision model dir — a single `*.onnx` (plus `.onnx.data` if external) + `tokenizer.json`, optional `rl_agent_config.json` for the temperature tables |
@@ -634,6 +704,9 @@ neuron has **no direct dependency** on any particular host — the integration c
 | `NEURON_OCR_EXECUTOR` | `tract` | `tract` \| `ort` — PP-OCR session executor. `ort` is ~10× faster on CPU but loads onnxruntime at runtime |
 | `NEURON_OCR_SESSIONS` | `2` | ort sessions per graph (its `run` takes `&mut`, so concurrent requests need one session each; tract plans are `run(&self)` and ignore this) |
 | `ORT_DYLIB_PATH` | (unset) | Path to `onnxruntime.dll` for the `ort` crate's load-dynamic linking (needed by the OCR `ort` executor; falls back to `PATH` lookup) |
+| `NEURON_IMAGEGEN_RUNTIME` | (unset) | `moss-image` — which text-to-image engine to register (MOSS-Image on candle, `POST /v1/images/generations`). Requires the `candle` feature (default on) |
+| `NEURON_IMAGEGEN_MODEL_PATH` | (unset) | Path to the MOSS-Image model dir — the upstream HF repo layout (`transformer/` + `text_encoder/` + `vae/` + `tokenizer/` + `scheduler/`). Unset falls back to `$NEURON_MODEL_DIRS/imagegen/<model_id>/` |
+| `NEURON_IMAGEGEN_DTYPE` | `f16` | `f16` \| `f32` \| `bf16` — storage dtype for the DiT + text encoder weights (the VAE always decodes fp32). `f16` ≈ 27 GB resident, `f32` ≈ 54 GB; candle's CPU backend has no BF16 matmul, so `bf16` needs CUDA |
 
 ## Where the design specs live
 
@@ -684,13 +757,13 @@ Other catalog families — loadable by capability, by backend. ✓ = the model i
 
 | Capability | candle | burn | litert | mistralrs | mage_vl | sherpa | tract | ort | Cohere |
 |---|---|---|---|---|---|---|---|---|---|---|
-| LLM | ✓ (Qwen2/3, Llama2/3, Phi-3, Mistral, ChatGLM, MiniCPM5) | | ✓ (Gemma 3/4) | ✓ (40+ families) | ✓ (`microsoft/Mage-VL`) | | | | | |
+| LLM | ✓ (Qwen2/3, Llama2/3, Phi-3, Mistral, ChatGLM, MiniCPM5) | | ✓ (`gemma3-1b`, `phi-4-mini`, `qwen2.5-1.5b`) | ✓ (40+ families) | ✓ (`microsoft/Mage-VL`) | | | | | |
 | TTS | | ✓ (VoxCPM 0.5B + VoxCPM2) | | | | | | | | |
 | ASR | ✓ (Whisper) | | | | | ✓ | ✓ | | | |
 | Rerank | ✓ (BGE / mxbai / jina) | | | | | | | | | ✓ (hosted) |
 | Embedding | ✓ (MiniLM) | | | | | | | | | |
-| Vision | ✓ (YOLOv8 / RT-DETR / DETR) | | | | | | ✓ | ✓ | |
-| Chronos2 | ✓ | | | | | | | | | |
+| Vision | ✓ (ONNX session path: YOLOv8 / YOLO11 / RT-DETR / DETR / RF-DETR) | | | | | | | ✓ (tract executor) | | |
+| Chronos2 | ✓ (needs `--features chronos2` + a checkpoint) | | | | | | | | | |
 | Decision | | | | | | | ✓ | ✓ (bit-exact path) | | |
 
 **`mage_vl` is a dedicated column even though it sits on candle.** `MageVlRuntime` (`src/mage_vl/runtime.rs`) implements `engine::LlmRuntime` on top of candle directly — its own MageViT vision tower + Mage-specific multimodal token sequencer + per-request KV-cache reset. candle-transformers ships none of those, so the generic candle LLM runtime cannot serve `microsoft/Mage-VL`. Listing it as a candle row would be misleading; the dedicated column expresses "this model id has its own engine, even though both share the candle primitives".
@@ -702,14 +775,13 @@ _The runtime registry refactor (2026-06-12) added `LlmRuntimeRegistry`, `TtsRunt
 ### Known gaps
 _None — see commit log for the 2026-06-16 gap-closure follow-up, the 2026-06-25 plugin-architecture follow-up (Chunks 1-5 implemented: Canonical types, pluggable engines, pluggable adapters, Anthropic Messages v1 adapter, `/v1/messages` route wired), and the 2026-07-13 ModelScope-default + MiniCPM5-1B pass (3-source registry, MODELSCOPE_TOKEN, cancel API, dedup catalog, default-model switch)._
 
-### Sprint 3 — Chronos2 forecasting (in progress, 2026-07-13+)
+### Sprint 3 — Chronos2 forecasting (runtime landed, 2026-10-29 status)
 
-Skeleton landed: `src/chronos2/{mod,registry}.rs` + `Chronos2Runtime` trait + `Chronos2Registry` + `StubChronos2Runtime` (always returns `NotImplemented` until the architecture is vendored) + `POST /v1/forecast` handler. `ServerState.chronos2_registry` is wired; the handler maps each `Chronos2Error` variant to the matching `ServerError` so the route is observable end-to-end. **450 lib tests pass as of 2026-07-19** (up from 404 pre-T5 vendor phases 3A-3C; +46 from `c1855f7` + `5986d1e` + `27665f8`). No regression.
+The T5-style port **has landed**: `src/chronos2/vendor/` carries the encoder/decoder (`architecture.rs`, `config.rs`, `embeddings.rs`, `transformer.rs`) and `src/chronos2/candle_runtime.rs` implements `CandleChronos2Runtime` (loads a safetensors checkpoint, runs `forecast_batch`, quantile output head). The `chronos2` Cargo feature gates it — it is **not** in the default feature set, so a default build keeps the `StubChronos2Runtime` path (which answers `NotImplemented` → 503). `NEURON_CHRONOS2_MODEL_PATH` selects the checkpoint; `NEURON_CHRONOS2_RUNTIME` is documented but not read.
 
-**Not done in this commit**:
-- Vendor the T5-style encoder/decoder + safetensors loader in `src/chronos2/vendor/`. Estimate 2-3 weeks of focused engineering.
-- The candle-runtime `CandleChronos2Runtime` that exercises the vendored model. Same follow-up window.
-- Parietal `forecast` A2A skill. Pending the candle port being loadable end-to-end.
+**Still not done**:
+- A `SUPPORTED_CATALOG` entry (nothing downloadable loads as-is — the checkpoint comes from the upstream Chronos2 release).
+- Parietal `forecast` A2A skill.
 
 ### Sprint 4 — Mobile / edge optimization (Phase 1 landed 2026-09-01)
 

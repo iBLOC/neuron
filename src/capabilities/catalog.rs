@@ -124,7 +124,18 @@ pub fn default_capabilities() -> Vec<ModelCapabilities> {
         cap("candle", "chatglm-3-6b", &[TextInput], &[TextOutput],
             &[ApiStyle::openai_chat()], true, true, false, false),
 
+        // Whisper (OpenAI, MIT). The candle runtime serves any Whisper
+        // checkpoint (config.json + tokenizer.json + preprocessor_config.json
+        // + *.safetensors + mel_filters.safetensors).
         cap("candle", "whisper-base", &[AudioInput], &[TextOutput],
+            &[ApiStyle::openai_audio()], false, false, false, false),
+        cap("candle", "whisper-tiny", &[AudioInput], &[TextOutput],
+            &[ApiStyle::openai_audio()], false, false, false, false),
+        cap("candle", "whisper-small", &[AudioInput], &[TextOutput],
+            &[ApiStyle::openai_audio()], false, false, false, false),
+        cap("candle", "whisper-medium", &[AudioInput], &[TextOutput],
+            &[ApiStyle::openai_audio()], false, false, false, false),
+        cap("candle", "whisper-large-v3", &[AudioInput], &[TextOutput],
             &[ApiStyle::openai_audio()], false, false, false, false),
 
         // SenseVoiceSmall (Alibaba FunAudioLLM, Apache 2.0) — zh/en/ja/ko/yue
@@ -139,14 +150,39 @@ pub fn default_capabilities() -> Vec<ModelCapabilities> {
         cap("tract", "sensevoice-small", &[AudioInput], &[TextOutput],
             &[ApiStyle::openai_audio()], false, false, false, false),
 
+        // Rerankers — each family has its **own** engine, because the
+        // three checkpoints are three different architectures:
+        // bge = XLM-RoBERTa cross-encoder (candle),
+        // mxbai = a **Qwen2** cross-encoder with a custom
+        // `classifier.{weight,bias}` head (`src/rerank/mxbai.rs`),
+        // jina = an XLMRobertaForSequenceClassification with its own
+        // prefix handling (`src/rerank/jina.rs`).
+        //
+        // The `engine_impl` used to be "candle" for all three, which
+        // routed mxbai and jina into the BGE runtime — the load then
+        // failed with "cannot find tensor roberta.encoder…" /
+        // "missing field layer_norm_eps" (found 2026-10-29 while
+        // building the per-model benchmark).
         cap("candle", "bge-reranker-base", &[TextInput], &[EmbeddingOutput],
             &[ApiStyle::openai_rerank()], false, false, false, false),
-        cap("candle", "mxbai-rerank-base-v2", &[TextInput], &[EmbeddingOutput],
+        cap("mxbai", "mxbai-rerank-base-v2", &[TextInput], &[EmbeddingOutput],
             &[ApiStyle::openai_rerank()], false, false, false, false),
-        cap("candle", "jina-reranker-base-v2", &[TextInput], &[EmbeddingOutput],
+        cap("jina", "jina-reranker-base-v2", &[TextInput], &[EmbeddingOutput],
             &[ApiStyle::openai_rerank()], false, false, false, false),
 
+        // Embedding models — the candle runtime builds a
+        // `candle_transformers::models::bert::BertModel`, so every entry
+        // here is a **BERT architecture** checkpoint (MiniLM / BGE / E5 /
+        // GTE). XLM-R based checkpoints (bge-m3) and decoder-based
+        // embedding models (e5-mistral, Qwen3-Embedding) need a different
+        // architecture and are not supported.
         cap("candle", "all-minilm-l6-v2", &[TextInput], &[EmbeddingOutput],
+            &[ApiStyle::openai_embeddings()], false, false, false, false),
+        cap("candle", "bge-base-en-v1.5", &[TextInput], &[EmbeddingOutput],
+            &[ApiStyle::openai_embeddings()], false, false, false, false),
+        cap("candle", "e5-base-v2", &[TextInput], &[EmbeddingOutput],
+            &[ApiStyle::openai_embeddings()], false, false, false, false),
+        cap("candle", "gte-base", &[TextInput], &[EmbeddingOutput],
             &[ApiStyle::openai_embeddings()], false, false, false, false),
 
         cap("burn", "voxcpm-0.5b", &[TextInput], &[AudioOutput],
@@ -164,26 +200,49 @@ pub fn default_capabilities() -> Vec<ModelCapabilities> {
         cap("burn", "voxcpm2", &[TextInput], &[AudioOutput],
             &[ApiStyle::openai_audio()], true, false, false, false),
 
-        cap("candle", "yolov8n", &[ImageInput], &[BoundingBox],
+        // MOSS-Image (OpenMOSS, Apache 2.0, 2026-10-16 release). 5B
+        // single-stream DiT + Qwen3.5 hybrid-GDN text encoder + FLUX.2
+        // small-decoder VAE, served natively on candle at
+        // POST /v1/images/generations (b64_json). Activated with
+        // NEURON_IMAGEGEN_RUNTIME=moss-image; weights are the upstream
+        // MOSS-Image-Base/SFT repo layout pulled through the catalog
+        // into $NEURON_MODEL_DIRS/imagegen/moss-image/. ~27 GB resident
+        // at the default f16 dtype — practical speeds need CUDA.
+        cap("candle", "moss-image", &[TextInput], &[ImageOutput],
+            &[ApiStyle::openai_images()], false, false, false, false),
+
+        // Vision detection — served through the ONNX session path.
+        //
+        // The candle YOLOv8 port is deliberately absent: it approximates the
+        // architecture (no PAN-FPN neck, different head layout), cannot
+        // consume Ultralytics exports, and its runtime refuses to run on
+        // untrained weights. The ONNX path decodes the real outputs
+        // (`decode_yolov8_output` / `decode_rfdetr_output`).
+        //
+        // The `ort` engine name means "the ONNX session path"; the session
+        // executor is **tract** (pure Rust) — the `ort` Cargo feature does
+        // not change this path.
+        cap("ort", "yolov8n", &[ImageInput], &[BoundingBox],
             &[ApiStyle::openai_vision()], false, false, false, false),
-        cap("candle", "yolov8s", &[ImageInput], &[BoundingBox],
+        cap("ort", "yolov8s", &[ImageInput], &[BoundingBox],
             &[ApiStyle::openai_vision()], false, false, false, false),
-        cap("candle", "yolov11n", &[ImageInput], &[BoundingBox],
+        cap("ort", "yolov11n", &[ImageInput], &[BoundingBox],
             &[ApiStyle::openai_vision()], false, false, false, false),
-        // RT-DETR (transformer-based, no NMS needed)
-        cap("candle", "rtdetr-r50", &[ImageInput], &[BoundingBox],
+        // RT-DETR (transformer-based, no NMS needed) — DETR output layout.
+        cap("ort", "rtdetr-r50", &[ImageInput], &[BoundingBox],
             &[ApiStyle::openai_vision()], false, false, false, false),
-        // DETR (original transformer detector)
-        cap("candle", "detr-resnet50", &[ImageInput], &[BoundingBox],
+        // DETR (original transformer detector) — DETR output layout.
+        cap("ort", "detr-resnet50", &[ImageInput], &[BoundingBox],
             &[ApiStyle::openai_vision()], false, false, false, false),
         // RF-DETR (Roboflow DETR with DINOv2 backbone, query-based)
         cap("ort", "rf-detr-base", &[ImageInput], &[BoundingBox],
             &[ApiStyle::openai_vision()], false, false, false, false),
         cap("ort", "rf-detr-large", &[ImageInput], &[BoundingBox],
             &[ApiStyle::openai_vision()], false, false, false, false),
-        // Florence-2 (vision-language, text-prompted)
-        cap("ort", "florence-2-base", &[ImageInput], &[BoundingBox],
-            &[ApiStyle::openai_vision()], false, false, false, false),
+        // Florence-2 (vision-language, text-prompted) — NOT listed: the
+        // ort decoder for the Florence2 output layout returns an empty
+        // detection list (its token decoding is not implemented), so the
+        // entry would promise detections that never arrive.
         // PP-OCR (Baidu PaddlePaddle, Apache-2.0) — two-stage CNN OCR
         // (DB++ text detection + SVTR-LCNet recognition). Served by the
         // `paddle-ocr` engine (pluggable ONNX session: tract by default,
@@ -206,26 +265,18 @@ pub fn default_capabilities() -> Vec<ModelCapabilities> {
             &[ApiStyle::openai_chat(), ApiStyle::anthropic_messages()],
             true, true, false, false),
 
-        cap("litert", "gemma-3n-e2b-it", &[TextInput], &[TextOutput],
+        // LiteRT-LM (`litert`) backend. The `lit` CLI that `litert_lm`
+        // pins (LiteRT-LM v0.7.0) ships a baked-in download registry with
+        // exactly three entries — verified 2026-10-29 against the released
+        // `lit.windows_x86_64.exe`: `gemma3-1b`, `phi-4-mini`,
+        // `qwen2.5-1.5b`. Every other id (all Gemma 3n / Gemma 4
+        // spellings) is rejected by `lit pull` with "not found in
+        // registry", so neuron must not advertise them either.
+        cap("litert", "gemma3-1b", &[TextInput], &[TextOutput],
             &[ApiStyle::openai_chat(), ApiStyle::anthropic_messages()], true, false, false, false),
-        cap("litert", "gemma-3n-e4b-it", &[TextInput], &[TextOutput],
+        cap("litert", "phi-4-mini", &[TextInput], &[TextOutput],
             &[ApiStyle::openai_chat(), ApiStyle::anthropic_messages()], true, false, false, false),
-        cap("litert", "gemma-3-12b-it", &[TextInput], &[TextOutput],
-            &[ApiStyle::openai_chat(), ApiStyle::anthropic_messages()], true, false, false, false),
-        // Platform default for the litert engine — Gemma 4 E4B (Google, 4B
-        // effective params). Small enough for embedded / mobile / dev tier
-        // while still scoring well on general chat and instruction
-        // following. Source: https://www.modelscope.cn/models/google/gemma-4-E4B
-        cap("litert", "gemma-4-e2b-it", &[TextInput], &[TextOutput],
-            &[ApiStyle::openai_chat(), ApiStyle::anthropic_messages()], true, false, false, false),
-        // NB: the platform-wide default model is minicpm5-1b (registered
-        // under candle above); this entry is litert's own default and must
-        // not reuse DEFAULT_MODEL_ID — register() overwrites by model_id,
-        // so reusing it here would shadow minicpm5-1b's candle entry.
-        cap("litert", "gemma-4-e4b-it", &[TextInput], &[TextOutput],
-            &[ApiStyle::openai_chat(), ApiStyle::anthropic_messages()],
-            true, false, false, false),
-        cap("litert", "gemma-4-12b-it", &[TextInput], &[TextOutput],
+        cap("litert", "qwen2.5-1.5b", &[TextInput], &[TextOutput],
             &[ApiStyle::openai_chat(), ApiStyle::anthropic_messages()], true, false, false, false),
 
         ModelCapabilities {
@@ -241,6 +292,18 @@ pub fn default_capabilities() -> Vec<ModelCapabilities> {
             supports_extended_thinking: true,
             ..Default::default()
         },
+        // Qwen 3.5 on the mistralrs backend. The candle backend cannot
+        // serve it (nested `text_config` + hybrid linear/full attention
+        // with no upstream candle module), but mistral.rs v0.8.22 ships a
+        // `Qwen3_5` loader and its auto-pipeline routes
+        // `Qwen3_5ForConditionalGeneration` to it.
+        //
+        // Text only: neuron's mistralrs runtime sends text messages
+        // (`send_chat_request`), so the model's vision tower is loaded
+        // but unused — image input is not wired on this backend.
+        cap("mistralrs", "Qwen/Qwen3.5-4B", &[TextInput], &[TextOutput],
+            &[ApiStyle::openai_chat(), ApiStyle::anthropic_messages()],
+            true, false, false, false),
     ]
 }
 
@@ -280,7 +343,7 @@ mod tests {
         assert!(cat.lookup("qwen3-0.6b").is_some());
         assert!(cat.lookup("whisper-base").is_some());
         assert!(cat.lookup("voxcpm-0.5b").is_some());
-        assert!(cat.lookup("gemma-3n-e2b-it").is_some());
+        assert!(cat.lookup("gemma3-1b").is_some());
         assert!(cat.lookup("Qwen/Qwen3-0.6B").is_some());
     }
 
@@ -425,18 +488,20 @@ mod tests {
     #[test]
     fn test_with_defaults_has_vision_models() {
         let cat = CapabilityCatalog::with_defaults();
-        // YOLO family
+        // YOLO family (ONNX session path)
         assert!(cat.lookup("yolov8n").is_some());
         assert!(cat.lookup("yolov8s").is_some());
         assert!(cat.lookup("yolov11n").is_some());
-        // Transformer-based detectors
+        // Transformer-based detectors (DETR output layout)
         assert!(cat.lookup("rtdetr-r50").is_some());
         assert!(cat.lookup("detr-resnet50").is_some());
         // RF-DETR (Roboflow DETR, query-based)
         assert!(cat.lookup("rf-detr-base").is_some());
         assert!(cat.lookup("rf-detr-large").is_some());
-        // Vision-language
-        assert!(cat.lookup("florence-2-base").is_some());
+        // Florence-2 is not listed: its output decoder returns an empty
+        // detection list, so the entry would promise detections that
+        // never arrive.
+        assert!(cat.lookup("florence-2-base").is_none());
     }
 
     #[test]
@@ -447,6 +512,88 @@ mod tests {
         assert!(yolov8n.input_modalities.contains(&Modality::ImageInput));
         assert!(yolov8n.output_modalities.contains(&Modality::BoundingBox));
         assert!(yolov8n.api_styles.contains(&ApiStyle::openai_vision()));
+    }
+
+    /// The capability catalog (`/v1/models` capability metadata) and the
+    /// download catalog (`SUPPORTED_CATALOG`, the puller's source list)
+    /// must not drift apart.
+    ///
+    /// The drift this guards against is real: for months the download
+    /// catalog advertised six Gemma 3n / Gemma 4 ids that the pinned
+    /// `lit` binary cannot pull, and the capability catalog advertised
+    /// candle vision models that answered `not_implemented` on every
+    /// request. Both lists are now checked against each other so the
+    /// next addition cannot silently skip the other side.
+    #[test]
+    fn test_capability_and_download_catalogs_agree() {
+        /// Models a runtime can serve but that cannot be pulled with one
+        /// request — each needs a model directory assembled from several
+        /// upstream repos and a prep script.
+        const RUNTIME_ONLY: &[(&str, &str)] = &[
+            ("ppocrv5-mobile", "det + rec + dict live in 3 upstream repos; scripts/prep-ppocr-onnx.py rewrites the graphs"),
+            ("ppocrv5-server", "det + rec + dict live in 3 upstream repos; scripts/prep-ppocr-onnx.py rewrites the graphs"),
+            ("ppocrv6-medium", "det + rec + dict live in 3 upstream repos; scripts/prep-ppocr-onnx.py rewrites the graphs"),
+        ];
+
+        let caps = CapabilityCatalog::with_defaults();
+        let cap_ids = caps.list();
+        let mut dl_ids: Vec<String> = crate::models::SUPPORTED_CATALOG
+            .iter()
+            .map(|m| m.id.to_string())
+            .collect();
+        dl_ids.sort();
+        dl_ids.dedup();
+
+        // Every downloadable model must also be a declared capability.
+        for id in &dl_ids {
+            assert!(
+                cap_ids.contains(id),
+                "download catalog lists {id:?} but the capability catalog does not — \
+                 either add the capability entry or drop the download entry"
+            );
+        }
+
+        // Every capability must be downloadable, unless it is explicitly
+        // excused.
+        for id in &cap_ids {
+            if dl_ids.contains(id) {
+                continue;
+            }
+            let excused = RUNTIME_ONLY.iter().find(|(m, _)| m == id);
+            assert!(
+                excused.is_some(),
+                "capability catalog lists {id:?} but there is no download entry for it — \
+                 add one, or add it to the RUNTIME_ONLY list with the reason why it \
+                 cannot be pulled"
+            );
+        }
+    }
+
+    /// Every `engine_impl` in the capability catalog must be an engine
+    /// some runtime can actually parse — an id that registers fine and
+    /// then fails on every request is the failure mode this catches
+    /// (the candle RT-DETR / DETR ports were exactly that).
+    #[test]
+    fn test_capability_engine_impls_are_parseable() {
+        let caps = CapabilityCatalog::with_defaults();
+        for model_id in caps.list() {
+            let caps = caps.lookup(&model_id).expect("lookup");
+            match caps.engine_impl.as_str() {
+                "ort" => {
+                    crate::vision::VisionImpl::parse("ort")
+                        .unwrap_or_else(|e| panic!("vision engine {model_id}: {e}"));
+                }
+                "paddle-ocr" => {
+                    crate::ocr::OcrImpl::parse("paddle-ocr")
+                        .unwrap_or_else(|e| panic!("ocr engine {model_id}: {e}"));
+                }
+                "candle" | "burn" | "sherpa" | "tract" | "mistralrs" | "mage_vl"
+                | "litert" | "mxbai" | "jina" => {}
+                other => panic!(
+                    "capability {model_id:?} declares engine_impl {other:?}, which no runtime parses"
+                ),
+            }
+        }
     }
 
     #[test]

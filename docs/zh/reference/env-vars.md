@@ -23,7 +23,7 @@ neuron 在启动时从环境变量读取配置。下表完整列出每一个 `NE
 | `NEURON_ASR_MODEL_PATH` | (未设置) | ASR 模型目录路径(Whisper:`config.json` + `tokenizer.json` + `*.safetensors` + `mel_filters.safetensors`;SenseVoiceSmall:`model.onnx` 或 `model.int8.onnx` + `tokens.txt`;tract 路径还需要 `scripts/prep-sensevoice-onnx.py` 产出的 `model.prepped.onnx`) |
 | `NEURON_RERANK_MODEL_PATH` | (未设置) | Rerank 模型目录路径(BGE/mxbai/jina;cohere 不使用) |
 | `NEURON_EMBEDDING_MODEL_PATH` | (未设置) | Embedding 模型目录路径(MiniLM BERT) |
-| `NEURON_VISION_MODEL_PATH` | (未设置) | Vision 模型目录路径(YOLOv8:`config.json` + `yolov8n.safetensors`) |
+| `NEURON_VISION_MODEL_PATH` | (未设置) | Vision 模型目录路径。ONNX 路径从里面读 `model.onnx` + `config.json`；`candle-yolo` 从里面读 `*.safetensors`（且要求权重覆盖全部架构变量，否则拒绝运行）。 |
 | `NEURON_CHRONOS2_DEFAULT_MODEL` | (未设置) | Chronos2 能力注册的模型 id |
 
 ## 引擎选择
@@ -55,7 +55,8 @@ neuron 在启动时从环境变量读取配置。下表完整列出每一个 `NE
 | `NEURON_COHERE_API_KEY` | (未设置) | Cohere API 密钥(`NEURON_RERANK_RUNTIME=cohere` 时必填) |
 | `NEURON_COHERE_ENDPOINT` | `https://api.cohere.com` | Cohere API 基础 URL |
 | `NEURON_COHERE_MODEL` | `rerank-english-v3.0` | Cohere 模型 id(如 `rerank-multilingual-v3.0`) |
-| `NEURON_VISION_RUNTIME` | (未设置) | `candle-yolo` \| `candle-rtdetr` \| `candle-detr` \| `ort` — 加载哪个 Vision 引擎 + 模型家族。历史上的 `ultralytics` Python 子进程选项已移除(neuron 是纯 Rust)。 |
+| `NEURON_VISION_RUNTIME` | (未设置) | `candle` \| `candle-yolo` \| `ort` — 注册哪个 Vision 引擎。`candle` 是 `candle-yolo` 的别名；`ort` 指 ONNX 会话路径（执行器为 tract）。candle 的 RT-DETR / DETR id 已于 2026-10-29 移除——它们从未实现，请走 `ort` 服务这些模型家族。历史上的 `ultralytics` Python 子进程选项已移除(neuron 是纯 Rust)。 |
+| `NEURON_VISION_MODEL_ID` | `vision` | 通过 `NEURON_VISION_RUNTIME` 注册时，视觉请求使用的模型 id。 |
 | `NEURON_CHRONOS2_RUNTIME` | (未设置) | `candle` — 加载哪个 Chronos2 引擎(需要 `--features chronos2`) |
 | `NEURON_CHRONOS2_MODEL_PATH` | (未设置) | Chronos2 检查点目录路径 |
 | `NEURON_DECISION_RUNTIME` | (未设置) | `tract` — 加载哪个 Decision 引擎(需要 `--features tract`) |
@@ -73,6 +74,14 @@ neuron 在启动时从环境变量读取配置。下表完整列出每一个 `NE
 | `NEURON_OCR_TABLES` | `true` | 设为 `false` 时,即使存在可选的 `table.onnx` 也跳过 |
 | `NEURON_OCR_DEBUG` | (未设置) | `1` / `true` 打印 OCR 管线的中间张量(检测图、识别 logits)——调试辅助,不是生产设置 |
 | `ORT_DYLIB_PATH` | (未设置) | `ort` crate load-dynamic 链接所需的 `onnxruntime.dll`/`.so` 路径(回退到 `PATH` 查找) |
+
+## 图像生成
+
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `NEURON_IMAGEGEN_RUNTIME` | (未设置) | `moss-image` —— 注册哪个文生图引擎。在 candle 上原生服务 OpenMOSS MOSS-Image(5B DiT + Qwen3.5 文本编码器 + FLUX.2 解码 VAE),端点为 `POST /v1/images/generations`。需要 `candle` feature(默认开启) |
+| `NEURON_IMAGEGEN_MODEL_PATH` | (未设置) | MOSS-Image 模型目录路径——上游 HF 仓库布局(`transformer/` + `text_encoder/` + `vae/` + `tokenizer/` + `scheduler/`)。未设置时回退为 `$NEURON_MODEL_DIRS/imagegen/<model_id>/` |
+| `NEURON_IMAGEGEN_DTYPE` | `f16` | `f16` \| `f32` \| `bf16` —— DiT 与文本编码器权重的存储 dtype。VAE 始终以 fp32 解码。`f16` 约占 27 GB 常驻,`f32` 约 54 GB。candle 的 CPU 后端没有 BF16 matmul,`bf16` 需要 CUDA |
 
 ## 模型调度器
 

@@ -264,6 +264,32 @@ impl CandleLlmRuntime {
         }
     }
 
+    /// Make the CUDA primary context current on the calling thread.
+    ///
+    /// cudarc retains the device's **primary** context and binds it to
+    /// whichever thread created the `Device` — the context is shared, but
+    /// "current" is per-thread state. The streaming path runs the
+    /// generation on a freshly spawned thread, so without this call every
+    /// CUDA forward on that thread fails with
+    /// `CUDA_ERROR_INVALID_CONTEXT, invalid device context` (observed
+    /// 2026-10-29 while benchmarking the 3090: the SSE body came back
+    /// empty while the non-streaming path worked).
+    ///
+    /// No-op for the CPU device.
+    fn bind_cuda_context(device: &Device) {
+        #[cfg(feature = "cuda")]
+        if matches!(device, Device::Cuda(_)) {
+            // Creating the device here *binds* the device's primary
+            // context to this thread (cudarc retains the primary
+            // context and calls `bind_to_thread` on it). The context is
+            // shared across threads, so the weights allocated by the
+            // loading thread stay valid — only the "current context"
+            // (per-thread state) needed fixing.
+            let _ = Device::new_cuda(0);
+        }
+        let _ = device;
+    }
+
     /// Rebuild the Llama KV cache so a generation starts from a clean
     /// position axis.
     ///
@@ -653,6 +679,16 @@ impl super::LlmRuntime for CandleLlmRuntime {
             (m.tokenizer.clone(), m.eos_token_id)
         };
 
+        // The caller may run on a different worker thread than the one
+        // that loaded the model; re-bind the CUDA context before touching
+        // the device (see `bind_cuda_context`).
+        {
+            let inner = self.inner.lock().unwrap();
+            if let Some(m) = inner.as_ref() {
+                Self::bind_cuda_context(&m.device);
+            }
+        }
+
         let prompt = Self::render_chatml_prompt(&req.messages);
         let encoding = tokenizer
             .encode(prompt.as_str(), true)
@@ -812,6 +848,17 @@ impl super::LlmRuntime for CandleLlmRuntime {
         let inner = self.inner.clone();
 
         std::thread::spawn(move || {
+            // The CUDA primary context is bound per thread, and this
+            // generation runs on a thread that did not create the device.
+            // Without this, every CUDA forward here fails with
+            // "invalid device context" and the SSE body comes back empty
+            // (observed 2026-10-29 while benchmarking the RTX 3090).
+            {
+                let inner = inner.lock().unwrap();
+                if let Some(m) = inner.as_ref() {
+                    Self::bind_cuda_context(&m.device);
+                }
+            }
             // Hold the model lock for the entire generation: the candle Qwen
             // models carry an internal KV cache (ConcatKvCache) as part of
             // `self`, so concurrent forward passes would corrupt it. Holding
@@ -1085,10 +1132,14 @@ impl super::LlmRuntime for CandleLlmRuntime {
     }
 
     fn list_models(&self) -> Vec<ModelInfo> {
+        // Only families the candle runtime can actually load. Qwen3.5 is
+        // deliberately absent: its config is nested under `text_config`
+        // and its text tower is a hybrid linear/full-attention stack that
+        // upstream candle-transformers has no module for — `detect_arch`
+        // rejects it at config parse. Qwen3.5 is served by the mistralrs
+        // backend instead (see `src/models/catalog.rs`).
         vec![
             ModelInfo::new("qwen3-0.6b", "neuron-candle"),
-            ModelInfo::new("qwen3.5-0.6b", "neuron-candle"),
-            ModelInfo::new("qwen3.5-4b", "neuron-candle"),
             ModelInfo::new("qwen2.5-0.5b", "neuron-candle"),
             ModelInfo::new("qwen2.5-1.5b", "neuron-candle"),
             ModelInfo::new("qwen2.5-7b", "neuron-candle"),

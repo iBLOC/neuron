@@ -11,21 +11,26 @@ use crate::llm::{
     LlmRuntime, ModelInfo, NeuronError,
 };
 
-/// Gemma model sizes supported by the upstream `lit` binary's bundled
-/// registry. The user requested "Gemma 4 E2B / E4B / 12B" but the
-/// current `lit` binary (litert_lm 0.1) ships only Gemma 3 variants
-/// at those size classes. If Gemma 4 lands in a later `lit`
-/// release, add it here and bump the spec.
-const SUPPORTED_GEMMA_MODELS: &[(&str, &str)] = &[
-    // Gemma 4 (Apache 2.0) — listed here so validate_model_name
-    // accepts them; actual loading depends on the bundled `lit` runtime.
-    ("gemma-4-e2b-it", "Gemma 4 2B (E2B) instruction-tuned"),
-    ("gemma-4-e4b-it", "Gemma 4 4B (E4B) instruction-tuned"),
-    ("gemma-4-12b-it", "Gemma 4 12B instruction-tuned"),
-    // Gemma 3n / Gemma 3 (Gemma Terms of Use, gated).
-    ("gemma-3n-e2b-it", "Gemma 3 Nano 2B (E2B) instruction-tuned"),
-    ("gemma-3n-e4b-it", "Gemma 3 Nano 4B (E4B) instruction-tuned"),
-    ("gemma-3-12b-it", "Gemma 3 12B instruction-tuned"),
+/// Model ids present in the bundled `lit` binary's download registry.
+///
+/// The `lit` CLI is pinned by `litert_lm` to LiteRT-LM **v0.7.0**
+/// (see `litert_lm::binary`), and its registry is baked into the
+/// binary. Verified 2026-10-29 against the released `lit.windows_x86_64.exe`
+/// (v0.7.0): the registry holds exactly three entries — `gemma3-1b`,
+/// `phi-4-mini` and `qwen2.5-1.5b`. Every other id (including all
+/// Gemma 3n / Gemma 4 spellings) is rejected by `lit pull` with
+/// "model '<id>' not found in registry".
+///
+/// Only ids in this table are loadable, so only ids in this table are
+/// advertised by `list_models` and accepted by `validate_model_name`.
+/// Adding a model here requires a `lit` release that ships it.
+const SUPPORTED_LIT_MODELS: &[(&str, &str)] = &[
+    // Gemma 3 1B IT (Gemma Terms of Use — gated on HuggingFace).
+    ("gemma3-1b", "Gemma 3 1B instruction-tuned (int4)"),
+    // Phi-4-mini-instruct (MIT).
+    ("phi-4-mini", "Phi-4 mini instruction-tuned (int8)"),
+    // Qwen2.5-1.5B-Instruct (Apache-2.0).
+    ("qwen2.5-1.5b", "Qwen 2.5 1.5B instruction-tuned (int8)"),
 ];
 
 pub struct LitertLlmRuntime {
@@ -40,25 +45,26 @@ impl LitertLlmRuntime {
     }
 
     pub fn supported_model_ids() -> Vec<&'static str> {
-        SUPPORTED_GEMMA_MODELS
+        SUPPORTED_LIT_MODELS
             .iter()
             .map(|(id, _)| *id)
             .collect()
     }
 
-    /// True if `model` is one of the lit binary's registered Gemma
-    /// model identifiers. Used to fail-fast on unknown requests
-    /// (the `lit pull <model>` call would error out anyway, but
-    /// with a less helpful message).
+    /// True if `model` is one of the lit binary's registered model
+    /// identifiers. Used to fail-fast on unknown requests (the
+    /// `lit pull <model>` call would error out anyway, but with a
+    /// less helpful message).
     pub fn validate_model_name(model: &str) -> Result<(), String> {
-        if SUPPORTED_GEMMA_MODELS.iter().any(|(id, _)| *id == model) {
+        if SUPPORTED_LIT_MODELS.iter().any(|(id, _)| *id == model) {
             Ok(())
         } else {
             let known: Vec<&str> = Self::supported_model_ids();
             Err(format!(
-                "LitertLlmRuntime: model '{}' is not in the supported set {known:?}. \
-                 Set NEURON_LLM_RUNTIME=litert and request one of the known Gemma variants.",
-                model
+                "LitertLlmRuntime: model '{model}' is not in the `lit` registry. \
+                 The bundled LiteRT-LM v0.7.0 `lit` binary ships {known:?} — \
+                 `lit pull` rejects every other id with \"not found in registry\". \
+                 Set NEURON_LLM_RUNTIME=litert and request one of those ids."
             ))
         }
     }
@@ -208,7 +214,7 @@ impl LlmRuntime for LitertLlmRuntime {
     }
 
     fn list_models(&self) -> Vec<ModelInfo> {
-        SUPPORTED_GEMMA_MODELS
+        SUPPORTED_LIT_MODELS
             .iter()
             .map(|(id, _)| ModelInfo::new(id.to_string(), "neuron-litert"))
             .collect()
@@ -312,49 +318,60 @@ mod tests {
     }
 
     #[test]
-    fn test_litert_list_models_returns_six_gemma_sizes() {
+    fn test_litert_list_models_returns_the_lit_registry_models() {
         let runtime = LitertLlmRuntime::new();
         let models = runtime.list_models();
-        assert_eq!(models.len(), 6);
+        assert_eq!(models.len(), 3);
         let ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
-        assert!(ids.contains(&"gemma-4-e2b-it"));
-        assert!(ids.contains(&"gemma-4-e4b-it"));
-        assert!(ids.contains(&"gemma-4-12b-it"));
-        assert!(ids.contains(&"gemma-3n-e2b-it"));
-        assert!(ids.contains(&"gemma-3n-e4b-it"));
-        assert!(ids.contains(&"gemma-3-12b-it"));
+        assert!(ids.contains(&"gemma3-1b"));
+        assert!(ids.contains(&"phi-4-mini"));
+        assert!(ids.contains(&"qwen2.5-1.5b"));
     }
 
     #[test]
-    fn test_litert_supported_model_ids_lists_all_six() {
+    fn test_litert_supported_model_ids_lists_all_three() {
         let ids = LitertLlmRuntime::supported_model_ids();
-        assert_eq!(ids.len(), 6);
-        assert!(ids.contains(&"gemma-4-e2b-it"));
-        assert!(ids.contains(&"gemma-4-e4b-it"));
-        assert!(ids.contains(&"gemma-4-12b-it"));
-        assert!(ids.contains(&"gemma-3n-e2b-it"));
-        assert!(ids.contains(&"gemma-3n-e4b-it"));
-        assert!(ids.contains(&"gemma-3-12b-it"));
+        assert_eq!(ids.len(), 3);
+        assert!(ids.contains(&"gemma3-1b"));
+        assert!(ids.contains(&"phi-4-mini"));
+        assert!(ids.contains(&"qwen2.5-1.5b"));
     }
 
     #[test]
     fn test_litert_validate_model_name_accepts_known() {
-        assert!(LitertLlmRuntime::validate_model_name("gemma-4-e2b-it").is_ok());
-        assert!(LitertLlmRuntime::validate_model_name("gemma-4-e4b-it").is_ok());
-        assert!(LitertLlmRuntime::validate_model_name("gemma-4-12b-it").is_ok());
-        assert!(LitertLlmRuntime::validate_model_name("gemma-3n-e2b-it").is_ok());
-        assert!(LitertLlmRuntime::validate_model_name("gemma-3n-e4b-it").is_ok());
-        assert!(LitertLlmRuntime::validate_model_name("gemma-3-12b-it").is_ok());
+        assert!(LitertLlmRuntime::validate_model_name("gemma3-1b").is_ok());
+        assert!(LitertLlmRuntime::validate_model_name("phi-4-mini").is_ok());
+        assert!(LitertLlmRuntime::validate_model_name("qwen2.5-1.5b").is_ok());
+    }
+
+    /// The pinned LiteRT-LM v0.7.0 `lit` binary has no Gemma 3n / Gemma 4
+    /// entries — `lit pull` answers "not found in registry" for all of
+    /// them, so neuron must not accept them either.
+    #[test]
+    fn test_litert_validate_model_name_rejects_gemma3n_and_gemma4() {
+        for id in [
+            "gemma-4-e2b-it",
+            "gemma-4-e4b-it",
+            "gemma-4-12b-it",
+            "gemma-3n-e2b-it",
+            "gemma-3n-e4b-it",
+            "gemma-3-12b-it",
+        ] {
+            assert!(
+                LitertLlmRuntime::validate_model_name(id).is_err(),
+                "{id} is not in the lit v0.7.0 registry and must be rejected"
+            );
+        }
     }
 
     #[test]
     fn test_litert_validate_model_name_rejects_unknown() {
         let err = LitertLlmRuntime::validate_model_name("gemma-99-fake").unwrap_err();
         assert!(err.contains("gemma-99-fake"), "must mention bad model, got: {err}");
-        assert!(err.contains("gemma-3n-e2b-it"), "must list valid options, got: {err}");
+        assert!(err.contains("gemma3-1b"), "must list valid options, got: {err}");
 
         let err = LitertLlmRuntime::validate_model_name("").unwrap_err();
-        assert!(err.contains("not in the supported set"));
+        assert!(err.contains("not in the `lit` registry"));
 
         let err = LitertLlmRuntime::validate_model_name("qwen3-0.6b").unwrap_err();
         assert!(err.contains("qwen3-0.6b"));
@@ -369,7 +386,7 @@ mod tests {
     async fn test_litert_chat_before_load_returns_not_initialized() {
         let runtime = LitertLlmRuntime::new();
         let req = ChatRequest {
-            model: "gemma-3-12b-it".to_string(),
+            model: "gemma3-1b".to_string(),
             messages: vec![ChatMessage {
                 role: "user".to_string(),
                 content: "hello".to_string(),
@@ -391,7 +408,7 @@ mod tests {
     async fn test_litert_chat_stream_before_load_returns_not_initialized() {
         let runtime = LitertLlmRuntime::new();
         let req = ChatRequest {
-            model: "gemma-3-12b-it".to_string(),
+            model: "gemma3-1b".to_string(),
             messages: vec![ChatMessage {
                 role: "user".to_string(),
                 content: "hello".to_string(),

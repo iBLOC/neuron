@@ -97,13 +97,6 @@ impl VisionRuntimeRegistry {
                     })?;
                 Arc::from(loaded_box)
             }
-            #[cfg(feature = "candle")]
-            VisionImpl::CandleRtDetr | VisionImpl::CandleDetr => {
-                return Err(NeuronError::not_implemented(format!(
-                    "{:?} backend: architecture not yet wired (v1.0 only CandleYoloRuntime is implemented)",
-                    entry.impl_id
-                )));
-            }
             VisionImpl::Ort => {
                 let loaded_box: Box<dyn VisionRuntime> = OrtVisionRuntime::load(
                     &entry.model_id,
@@ -123,6 +116,18 @@ impl VisionRuntimeRegistry {
 
     pub fn list_registered(&self) -> Vec<String> {
         self.registered.iter().map(|r| r.model_id.clone()).collect()
+    }
+
+    /// Registered vision models, for `/v1/models`.
+    ///
+    /// Sourced from the registry rather than the `state.vision` shortcut:
+    /// the shortcut is a lazy-load handle, and listing through it would
+    /// pay for a model load just to answer a directory request.
+    pub fn list_models(&self) -> Vec<crate::llm::ModelInfo> {
+        self.registered
+            .iter()
+            .map(|r| crate::llm::ModelInfo::new(r.model_id.clone(), "vision"))
+            .collect()
     }
 
     pub fn default_runtime(&self) -> Arc<dyn VisionRuntime> {

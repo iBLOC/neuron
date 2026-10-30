@@ -3,14 +3,17 @@ use crate::llm::{ChatMessage, ChatRequest};
 use std::fs;
 
 #[test]
-fn test_candle_list_models_includes_qwen3_and_qwen3_5() {
+fn test_candle_list_models_includes_qwen3_and_excludes_qwen3_5() {
     let runtime = CandleLlmRuntime::new();
     let models = runtime.list_models();
     let ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
     assert!(ids.contains(&"qwen3-0.6b"));
-    assert!(ids.contains(&"qwen3.5-0.6b"));
-    assert!(ids.contains(&"qwen3.5-4b"));
     assert!(ids.contains(&"qwen2.5-0.5b"));
+    // Qwen3.5 cannot be parsed by the candle qwen3 config loader (nested
+    // `text_config` + hybrid linear attention) — advertising it here would
+    // promise a model that fails at load time.
+    assert!(!ids.contains(&"qwen3.5-0.6b"));
+    assert!(!ids.contains(&"qwen3.5-4b"));
 }
 
 #[test]
@@ -378,24 +381,110 @@ fn test_detect_arch_qwen3_from_config() {
     assert_eq!(model_type, "qwen3");
 }
 
+/// Verbatim shape of the upstream `Qwen/Qwen3.5-4B` `config.json`
+/// (2026-10): the text tower is nested under `text_config` and mixes
+/// linear-attention and full-attention layers, so the flat
+/// `qwen3::Config` the candle loader uses cannot parse it.
+const REAL_QWEN3_5_CONFIG: &str = r#"{
+  "architectures": ["Qwen3_5ForConditionalGeneration"],
+  "image_token_id": 248056,
+  "model_type": "qwen3_5",
+  "text_config": {
+    "attention_bias": false,
+    "attn_output_gate": true,
+    "dtype": "bfloat16",
+    "eos_token_id": 248044,
+    "full_attention_interval": 4,
+    "head_dim": 256,
+    "hidden_act": "silu",
+    "hidden_size": 2560,
+    "intermediate_size": 9216,
+    "layer_types": [
+      "linear_attention", "linear_attention", "linear_attention", "full_attention",
+      "linear_attention", "linear_attention", "linear_attention", "full_attention",
+      "linear_attention", "linear_attention", "linear_attention", "full_attention",
+      "linear_attention", "linear_attention", "linear_attention", "full_attention",
+      "linear_attention", "linear_attention", "linear_attention", "full_attention",
+      "linear_attention", "linear_attention", "linear_attention", "full_attention",
+      "linear_attention", "linear_attention", "linear_attention", "full_attention",
+      "linear_attention", "linear_attention", "linear_attention", "full_attention"
+    ],
+    "linear_conv_kernel_dim": 4,
+    "linear_key_head_dim": 128,
+    "linear_num_key_heads": 16,
+    "linear_num_value_heads": 32,
+    "linear_value_head_dim": 128,
+    "max_position_embeddings": 262144,
+    "mlp_only_layers": [],
+    "model_type": "qwen3_5_text",
+    "mtp_num_hidden_layers": 1,
+    "num_attention_heads": 16,
+    "num_hidden_layers": 32,
+    "num_key_value_heads": 4,
+    "rms_norm_eps": 1e-06,
+    "tie_word_embeddings": true,
+    "vocab_size": 248320,
+    "mamba_ssm_dtype": "float32",
+    "rope_parameters": {
+      "mrope_interleaved": true,
+      "mrope_section": [11, 11, 10],
+      "rope_type": "default",
+      "rope_theta": 10000000,
+      "partial_rotary_factor": 0.25
+    }
+  },
+  "tie_word_embeddings": true,
+  "video_token_id": 248057,
+  "vision_config": {
+    "depth": 24,
+    "hidden_act": "gelu_pytorch_tanh",
+    "hidden_size": 1024,
+    "in_channels": 3,
+    "intermediate_size": 4096,
+    "model_type": "qwen3_5",
+    "num_heads": 16,
+    "num_position_embeddings": 2304,
+    "out_hidden_size": 2560,
+    "patch_size": 16,
+    "spatial_merge_size": 2,
+    "temporal_patch_size": 2
+  }
+}"#;
+
+/// The `model_type` string is recognized (so diagnostics can name it),
+/// but the arch loader must FAIL on a real Qwen3.5 checkpoint instead of
+/// silently dispatching to the dense Qwen3 loader. Regression guard for
+/// the "string recognized ⇒ model loadable" assumption.
 #[test]
-fn test_detect_arch_qwen3_5_from_config() {
+fn test_qwen3_5_real_config_is_rejected_at_arch_load() {
     let tmp = tempfile::tempdir().unwrap();
-    let cfg = r#"{"model_type": "qwen3_5", "hidden_size": 1024}"#;
-    fs::write(tmp.path().join("config.json"), cfg).unwrap();
+    fs::write(tmp.path().join("config.json"), REAL_QWEN3_5_CONFIG).unwrap();
 
     let model_type = CandleLlmRuntime::detect_model_type(tmp.path()).unwrap();
     assert_eq!(model_type, "qwen3_5");
+
+    let err = CandleLlmRuntime::detect_arch(tmp.path())
+        .err()
+        .expect("Qwen3.5 must not load on the candle qwen3 path");
+    assert!(
+        err.contains("Qwen 3.5") && err.contains("mistralrs"),
+        "expected the explicit Qwen 3.5 rejection naming the working backends, got: {err}"
+    );
 }
 
 #[test]
-fn test_detect_arch_qwen3_5_dot_notation() {
+fn test_detect_arch_qwen3_5_moe_is_rejected_with_moe_error() {
     let tmp = tempfile::tempdir().unwrap();
-    let cfg = r#"{"model_type": "qwen3.5", "hidden_size": 1024}"#;
+    let cfg = r#"{"model_type": "qwen3_5_moe", "text_config": {"model_type": "qwen3_5_moe_text"}}"#;
     fs::write(tmp.path().join("config.json"), cfg).unwrap();
 
-    let model_type = CandleLlmRuntime::detect_model_type(tmp.path()).unwrap();
-    assert_eq!(model_type, "qwen3.5");
+    let err = CandleLlmRuntime::detect_arch(tmp.path())
+        .err()
+        .expect("Qwen3.5-MoE must not load on the dense candle path");
+    assert!(
+        err.contains("MoE") && err.contains("qwen3_5_moe"),
+        "expected the explicit MoE rejection, got: {err}"
+    );
 }
 
 #[test]
@@ -615,10 +704,9 @@ fn test_model_type_str_mapping() {
     let runtime = CandleLlmRuntime::new();
     let models = runtime.list_models();
     let ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
-    assert!(ids.contains(&"qwen3.5-0.6b"));
-    assert!(ids.contains(&"qwen3.5-4b"));
     assert!(ids.contains(&"qwen2.5-0.5b"));
     assert!(ids.contains(&"qwen2.5-1.5b"));
+    assert!(ids.contains(&"qwen3-0.6b"));
 }
 
 // ---- parse_use_flash_attn env-var resolution ----

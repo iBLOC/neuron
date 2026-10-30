@@ -34,6 +34,7 @@ pub struct ServerState {
     pub ocr_registry: Arc<crate::ocr::OcrRuntimeRegistry>,
     pub chronos2_registry: Arc<crate::chronos2::Chronos2Registry>,
     pub decision_registry: Arc<crate::decision::DecisionRuntimeRegistry>,
+    pub imagegen_registry: Arc<crate::imagegen::ImageGenRuntimeRegistry>,
 
     // -- Runtime registration locks (for dynamic model loading) --
     // These wrap the registries above to allow &mut self registration at runtime.
@@ -47,6 +48,7 @@ pub struct ServerState {
     pub(crate) ocr_registry_lock: Arc<Mutex<crate::ocr::OcrRuntimeRegistry>>,
     pub(crate) chronos2_registry_lock: Arc<Mutex<crate::chronos2::Chronos2Registry>>,
     pub(crate) decision_registry_lock: Arc<Mutex<crate::decision::DecisionRuntimeRegistry>>,
+    pub(crate) imagegen_registry_lock: Arc<Mutex<crate::imagegen::ImageGenRuntimeRegistry>>,
 
     // -- LoRA adapter registry (dynamic detection class extension) --
     pub vision_lora_registry: Arc<crate::vision::LoraRegistry>,
@@ -60,6 +62,7 @@ pub struct ServerState {
     pub vision: Arc<dyn crate::vision::VisionRuntime>,
     pub ocr: Arc<dyn crate::ocr::OcrRuntime>,
     pub decision: Arc<dyn crate::decision::DecisionRuntime>,
+    pub imagegen: Arc<dyn crate::imagegen::ImageGenRuntime>,
 
     // -- Engine registries (Phase 1, lazy-populated) --
     pub engines: Arc<crate::engine::registry::CapabilityRegistries>,
@@ -651,8 +654,15 @@ impl ServerState {
         let embedding_shortcut = embedding_registry.default_runtime();
 
         // ---- Vision registry ----------------------------------------------
-        // Vision is opt-in via NEURON_VISION_RUNTIME=candle. Defaults to no
-        // models registered (registry returns UnavailableVisionRuntime).
+        // Vision is opt-in. Two ways to register a vision model:
+        //   1. `NEURON_VISION_RUNTIME` — the engine (`candle` | `candle-yolo` |
+        //      `candle-rtdetr` | `candle-detr` | `ort`), optionally with
+        //      `NEURON_VISION_MODEL_PATH` (the model directory / file) and
+        //      `NEURON_VISION_MODEL_ID` (the id requests refer to).
+        //   2. `config.registrations` with capability = "vision" — for
+        //      embedded hosts that build a `NeuronEmbedConfig`.
+        // With neither, the registry hands out `UnavailableVisionRuntime`
+        // and every vision request fails with a clear 501.
         let mut vision_registry = crate::vision::VisionRuntimeRegistry::new(config_arc.clone());
         for reg in &config.registrations {
             if reg.capability == EngineType::Vision {
@@ -667,6 +677,38 @@ impl ServerState {
                     eprintln!(
                         "[neuron] config.registrations: unknown Vision engine impl {:?} for model {:?}",
                         reg.engine, reg.model_id
+                    );
+                }
+            }
+        }
+        // Env-var opt-in for hosts that only configure through the
+        // environment (no embed config).
+        if let Some(engine) = crate::config::env_var("VISION_RUNTIME") {
+            match crate::vision::VisionImpl::parse(&engine) {
+                Ok(impl_id) => {
+                    let model_id = crate::config::env_var("VISION_MODEL_ID")
+                        .unwrap_or_else(|| "vision".to_string());
+                    match vision_registry.register(
+                        model_id.clone(),
+                        impl_id,
+                        device.clone(),
+                        500_000_000,
+                    ) {
+                        Ok(()) => eprintln!(
+                            "[neuron] Vision runtime registered: model={model_id:?} engine={engine:?} \
+                             (set NEURON_VISION_MODEL_PATH to the model directory, \
+                             NEURON_VISION_MODEL_ID to the id requests use)"
+                        ),
+                        Err(e) => eprintln!(
+                            "[neuron] Vision runtime registration failed for model={model_id:?} \
+                             engine={engine:?}: {e}"
+                        ),
+                    }
+                }
+                Err(e) => {
+                    eprintln!(
+                        "[neuron] NEURON_VISION_RUNTIME={engine:?} is not a known vision engine: {e}. \
+                         Valid values: candle | candle-yolo | candle-rtdetr | candle-detr | ort"
                     );
                 }
             }
@@ -715,6 +757,54 @@ impl ServerState {
         }
         let chronos2_registry_lock = Arc::new(Mutex::new(chronos2_reg.clone()));
         let chronos2_registry = Arc::new(chronos2_reg);
+
+        // ---- Image generation registry -----------------------------------
+        //
+        // NEURON_IMAGEGEN_RUNTIME=moss-image registers the catalog id
+        // "moss-image" (OpenMOSS MOSS-Image, 5B DiT + Qwen3.5 text
+        // encoder + FLUX.2 decoder VAE, served on candle). The
+        // registered memory estimate covers the f16-materialized
+        // weights (~27 GB); NEURON_IMAGEGEN_DTYPE=f32 roughly doubles
+        // it.
+        let mut imagegen_registry = crate::imagegen::ImageGenRuntimeRegistry::new(config_arc.clone());
+        match crate::config::env_var("IMAGEGEN_RUNTIME").as_deref() {
+            Some("moss-image") | Some("moss_image") | Some("mossimage") | Some("moss") => {
+                #[cfg(feature = "candle")]
+                {
+                    let _ = imagegen_registry.register(
+                        "moss-image".into(),
+                        crate::imagegen::ImageGenImpl::MossImage,
+                        device.clone(),
+                        28_000_000_000,
+                    );
+                }
+                #[cfg(not(feature = "candle"))]
+                {
+                    eprintln!("[neuron] NEURON_IMAGEGEN_RUNTIME=moss-image but candle feature not enabled");
+                }
+            }
+            _ => {}
+        }
+        for reg in &config.registrations {
+            if reg.capability == EngineType::ImageGen {
+                match crate::imagegen::ImageGenImpl::parse(&reg.engine) {
+                    Ok(impl_id) => {
+                        let _ = imagegen_registry.register(
+                            reg.model_id.clone(),
+                            impl_id,
+                            reg.device,
+                            reg.required_memory_bytes,
+                        );
+                    }
+                    Err(e) => eprintln!(
+                        "[neuron] config.registrations: unknown imagegen engine impl {:?} for model {:?}: {e}",
+                        reg.engine, reg.model_id
+                    ),
+                }
+            }
+        }
+        let imagegen_registry = Arc::new(imagegen_registry);
+        let imagegen_shortcut = imagegen_registry.lazy_default_runtime();
 
         // ---- Shared infrastructure (unchanged) ----------------------------
         let mut source_registry = crate::models::SourceRegistry::new();
@@ -787,6 +877,7 @@ impl ServerState {
         let vision_registry_lock = Arc::new(Mutex::new(vision_registry.clone()));
         let ocr_registry_lock = Arc::new(Mutex::new(ocr_registry.clone()));
         let decision_registry_lock = Arc::new(Mutex::new(decision_registry.clone()));
+        let imagegen_registry_lock = Arc::new(Mutex::new((*imagegen_registry).clone()));
 
         // ---- Model scheduler (LLM capability, v1) ------------------------
         // The registry Arc must exist before the scheduler so the
@@ -831,6 +922,7 @@ impl ServerState {
             vision_registry: Arc::new(vision_registry),
             ocr_registry: Arc::new(ocr_registry),
             decision_registry: Arc::new(decision_registry),
+            imagegen_registry,
             vision_lora_registry,
             chronos2_registry,
             llm_registry_lock,
@@ -842,6 +934,7 @@ impl ServerState {
             ocr_registry_lock,
             chronos2_registry_lock,
             decision_registry_lock,
+            imagegen_registry_lock,
             llm: llm_shortcut,
             tts: tts_shortcut,
             asr: asr_shortcut,
@@ -850,6 +943,7 @@ impl ServerState {
             vision: vision_shortcut,
             ocr: ocr_shortcut,
             decision: decision_shortcut,
+            imagegen: imagegen_shortcut,
             engines: Arc::new(engines),
             adapters: {
                 let adapters = Arc::new(crate::adapter::registry::AdapterRegistry::new());
@@ -957,6 +1051,55 @@ impl ServerState {
             }
         }
 
+        // Same registry-not-shortcut reasoning as decision above. Vision
+        // models were missing from `/v1/models` entirely — a client could
+        // not discover which detection models the server can serve.
+        {
+            let reg = self.vision_registry_lock.lock().await;
+            for model in reg.list_models() {
+                models.push(ModelInfo {
+                    id: format!("vision/{}", model.id),
+                    object: "model".to_string(),
+                    created: now,
+                    owned_by: model.owned_by,
+                    capabilities: Some(vec!["vision".to_string()]),
+                    is_default: None,
+                });
+            }
+        }
+
+        // Chronos2 forecasters — same reasoning as decision above.
+        {
+            let reg = self.chronos2_registry_lock.lock().await;
+            for model in reg.list_models() {
+                models.push(ModelInfo {
+                    id: format!("chronos2/{}", model.id),
+                    object: "model".to_string(),
+                    created: now,
+                    owned_by: model.owned_by,
+                    capabilities: Some(vec!["forecast".to_string()]),
+                    is_default: None,
+                });
+            }
+        }
+
+        // Image generation: registered model ids from the registry
+        // (the shortcut is a lazy handle that would need 27 GB of
+        // weights to answer a listing).
+        {
+            let reg = self.imagegen_registry_lock.lock().await;
+            for model in reg.list_registered() {
+                models.push(ModelInfo {
+                    id: format!("imagegen/{model}"),
+                    object: "model".to_string(),
+                    created: now,
+                    owned_by: "neuron".to_string(),
+                    capabilities: Some(vec!["image_generation".to_string()]),
+                    is_default: None,
+                });
+            }
+        }
+
         models
     }
 
@@ -1036,9 +1179,15 @@ impl ServerState {
                     ));
                 }
             }
+            "imagegen" => {
+                let mut reg = self.imagegen_registry_lock.lock().await;
+                let impl_id = crate::imagegen::ImageGenImpl::parse(&engine)
+                    .map_err(|e| crate::llm::NeuronError::new(format!("Invalid imagegen engine: {e}")))?;
+                reg.register(model_id, impl_id, device, required_memory_bytes)?;
+            }
             _ => {
                 return Err(crate::llm::NeuronError::new(format!(
-                    "Unknown capability: {}. Valid: llm, tts, asr, rerank, embedding, vision, chronos2, decision, ocr",
+                    "Unknown capability: {}. Valid: llm, tts, asr, rerank, embedding, vision, chronos2, decision, ocr, imagegen",
                     capability
                 )));
             }

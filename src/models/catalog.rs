@@ -68,6 +68,26 @@ pub const SUPPORTED_CATALOG: &[SupportedModel] = &[
         source_id: "huggingface",
         families: &["qwen2"],
     },
+    // MOSS-Image (OpenMOSS text-to-image, Apache 2.0). The whole
+    // pipeline — 5B DiT + Qwen3.5 text encoder + FLUX.2 VAE — lives
+    // in one repo (~27 GB); both sources dedup into a single catalog
+    // entry offering "download from HF / ModelScope".
+    SupportedModel {
+        id: "moss-image",
+        engine: EngineType::ImageGen,
+        engine_impl: "moss-image",
+        default_repo: "huggingface:OpenMOSS-Team/MOSS-Image-Base",
+        source_id: "huggingface",
+        families: &["moss-image"],
+    },
+    SupportedModel {
+        id: "moss-image",
+        engine: EngineType::ImageGen,
+        engine_impl: "moss-image",
+        default_repo: "modelscope:OpenMOSS-Team/MOSS-Image-Base",
+        source_id: "modelscope",
+        families: &["moss-image"],
+    },
     SupportedModel {
         id: "qwen3-0.6b",
         engine: EngineType::Llm,
@@ -92,11 +112,48 @@ pub const SUPPORTED_CATALOG: &[SupportedModel] = &[
         source_id: "huggingface",
         families: &["phi3"],
     },
+    // Whisper (OpenAI, MIT). The candle runtime reads config.json +
+    // tokenizer.json + preprocessor_config.json + *.safetensors, and it
+    // ALSO needs `mel_filters.safetensors` in the same directory — that
+    // file lives in the `lmz/candle-whisper` space, not in the model
+    // repos, so it is a manual extra step after the pull.
     SupportedModel {
         id: "whisper-base",
         engine: EngineType::Asr,
         engine_impl: "candle",
         default_repo: "huggingface:openai/whisper-base",
+        source_id: "huggingface",
+        families: &["whisper"],
+    },
+    SupportedModel {
+        id: "whisper-tiny",
+        engine: EngineType::Asr,
+        engine_impl: "candle",
+        default_repo: "huggingface:openai/whisper-tiny",
+        source_id: "huggingface",
+        families: &["whisper"],
+    },
+    SupportedModel {
+        id: "whisper-small",
+        engine: EngineType::Asr,
+        engine_impl: "candle",
+        default_repo: "huggingface:openai/whisper-small",
+        source_id: "huggingface",
+        families: &["whisper"],
+    },
+    SupportedModel {
+        id: "whisper-medium",
+        engine: EngineType::Asr,
+        engine_impl: "candle",
+        default_repo: "huggingface:openai/whisper-medium",
+        source_id: "huggingface",
+        families: &["whisper"],
+    },
+    SupportedModel {
+        id: "whisper-large-v3",
+        engine: EngineType::Asr,
+        engine_impl: "candle",
+        default_repo: "huggingface:openai/whisper-large-v3",
         source_id: "huggingface",
         families: &["whisper"],
     },
@@ -108,6 +165,93 @@ pub const SUPPORTED_CATALOG: &[SupportedModel] = &[
         source_id: "huggingface",
         families: &["xlm-roberta"],
     },
+    // mxbai-rerank-base-v2 (mixedbread, Apache-2.0) — cross-encoder
+    // reranker, served by the `mxbai` runtime
+    // (NEURON_RERANK_RUNTIME=mxbai).
+    SupportedModel {
+        id: "mxbai-rerank-base-v2",
+        engine: EngineType::Rerank,
+        engine_impl: "mxbai",
+        default_repo: "huggingface:mixedbread-ai/mxbai-rerank-base-v2",
+        source_id: "huggingface",
+        families: &["bert", "mxbai"],
+    },
+    // jina-reranker-base-v2 (jinaai, CC-BY-NC-4.0) — XLMRoberta
+    // cross-encoder, served by the `jina` runtime
+    // (NEURON_RERANK_RUNTIME=jina). The repo layout is exactly what the
+    // runtime expects: config.json + tokenizer.json + model.safetensors.
+    SupportedModel {
+        id: "jina-reranker-base-v2",
+        engine: EngineType::Rerank,
+        engine_impl: "jina",
+        default_repo: "huggingface:jinaai/jina-reranker-v2-base-multilingual",
+        source_id: "huggingface",
+        families: &["xlm-roberta", "jina"],
+    },
+    // SenseVoiceSmall (Alibaba FunAudioLLM, Apache-2.0) — zh/en/ja/ko/yue
+    // ASR with emotion + event tags. The repo below is the sherpa-onnx
+    // packaging (model.int8.onnx + tokens.txt) that the `sherpa` runtime
+    // reads directly. The `tract` runtime needs the prepped graph from
+    // `scripts/prep-sensevoice-onnx.py` instead.
+    SupportedModel {
+        id: "sensevoice-small",
+        engine: EngineType::Asr,
+        engine_impl: "sherpa",
+        default_repo: "huggingface:csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2025-09-09",
+        source_id: "huggingface",
+        families: &["sensevoice"],
+    },
+    // VoxCPM2 (OpenBMB, Apache-2.0, 2026-04) — 2B / 48 kHz / 30 languages.
+    // The upstream checkpoint is loaded directly (config.json +
+    // tokenizer.json + model.safetensors + audiovae.pth); no conversion.
+    SupportedModel {
+        id: "voxcpm2",
+        engine: EngineType::Tts,
+        engine_impl: "burn",
+        default_repo: "huggingface:openbmb/VoxCPM2",
+        source_id: "huggingface",
+        families: &["voxcpm2"],
+    },
+    // MiniCPM5-2B (OpenBMB, Apache-2.0) — the 2B sibling of the platform
+    // default; same LlamaForCausalLM path, ~6-7 GB resident at BF16.
+    SupportedModel {
+        id: "minicpm5-2b",
+        engine: EngineType::Llm,
+        engine_impl: "candle",
+        default_repo: "huggingface:openbmb/MiniCPM5-2B",
+        source_id: "huggingface",
+        families: &["llama", "minicpm5"],
+    },
+    // ChatGLM3-6B (THUDM) — the `chatglm` architecture family.
+    SupportedModel {
+        id: "chatglm-3-6b",
+        engine: EngineType::Llm,
+        engine_impl: "candle",
+        default_repo: "huggingface:THUDM/chatglm3-6b",
+        source_id: "huggingface",
+        families: &["chatglm"],
+    },
+    // Mistral 7B Instruct v0.3 — gated on HuggingFace; set HF_TOKEN to
+    // pull it.
+    SupportedModel {
+        id: "mistral-7b",
+        engine: EngineType::Llm,
+        engine_impl: "candle",
+        default_repo: "huggingface:mistralai/Mistral-7B-Instruct-v0.3",
+        source_id: "huggingface",
+        families: &["mistral"],
+    },
+    // Mage-VL (Microsoft, Apache-2.0) — codec-native streaming VLM. The
+    // repo carries the LLM shards + `streammind_gate.safetensors` that
+    // the mage_vl runtime loads.
+    SupportedModel {
+        id: "microsoft/Mage-VL",
+        engine: EngineType::Llm,
+        engine_impl: "mage_vl",
+        default_repo: "huggingface:microsoft/Mage-VL",
+        source_id: "huggingface",
+        families: &["mage-vl"],
+    },
     SupportedModel {
         id: "voxcpm-0.5b",
         engine: EngineType::Tts,
@@ -116,6 +260,12 @@ pub const SUPPORTED_CATALOG: &[SupportedModel] = &[
         source_id: "huggingface",
         families: &["voxcpm"],
     },
+    // Embedding models. The candle runtime builds a
+    // `candle_transformers::models::bert::BertModel`, so any **BERT
+    // architecture** checkpoint works (config.json + tokenizer.json +
+    // model.safetensors). That covers the MiniLM / BGE / E5 / GTE
+    // families below — but NOT the XLM-R based ones (bge-m3) or the
+    // decoder-based embedding models (e5-mistral, Qwen3-Embedding).
     SupportedModel {
         id: "all-minilm-l6-v2",
         engine: EngineType::Embedding,
@@ -124,84 +274,95 @@ pub const SUPPORTED_CATALOG: &[SupportedModel] = &[
         source_id: "huggingface",
         families: &["bert", "minilm"],
     },
-    // Google Gemma family.
-    // - Gemma 4 (E2B/E4B/12B): Apache 2.0 — fully permissive.
-    // - Gemma 3n / Gemma 3: gated on HuggingFace (requires license
-    //   agreement in the user's HF account). Use `litert` runtime.
     SupportedModel {
-        id: "gemma-4-e2b-it",
-        engine: EngineType::Llm,
-        engine_impl: "litert",
-        default_repo: "huggingface:google/gemma-4-E2B-it",
+        id: "bge-base-en-v1.5",
+        engine: EngineType::Embedding,
+        engine_impl: "candle",
+        default_repo: "huggingface:BAAI/bge-base-en-v1.5",
         source_id: "huggingface",
-        families: &["gemma4"],
+        families: &["bert", "bge"],
     },
     SupportedModel {
-        id: "gemma-4-e4b-it",
-        engine: EngineType::Llm,
-        engine_impl: "litert",
-        default_repo: "huggingface:google/gemma-4-E4B-it",
+        id: "e5-base-v2",
+        engine: EngineType::Embedding,
+        engine_impl: "candle",
+        default_repo: "huggingface:intfloat/e5-base-v2",
         source_id: "huggingface",
-        families: &["gemma4"],
+        families: &["bert", "e5"],
     },
     SupportedModel {
-        id: "gemma-4-12b-it",
+        id: "gte-base",
+        engine: EngineType::Embedding,
+        engine_impl: "candle",
+        default_repo: "huggingface:thenlper/gte-base",
+        source_id: "huggingface",
+        families: &["bert", "gte"],
+    },
+    // LiteRT-LM (`litert`) family.
+    //
+    // The `lit` CLI that `litert_lm` pins (LiteRT-LM v0.7.0) has a
+    // baked-in download registry with exactly three entries, verified
+    // 2026-10-29 against the released `lit.windows_x86_64.exe`:
+    //   gemma3-1b  → litert-community/Gemma3-1B-IT
+    //   phi-4-mini → litert-community/Phi-4-mini-instruct
+    //   qwen2.5-1.5b → litert-community/Qwen2.5-1.5B-Instruct
+    // `lit pull` answers "model '<id>' not found in registry" for
+    // everything else — including all Gemma 3n / Gemma 4 spellings —
+    // so those ids must not be advertised as downloadable.
+    //
+    // NOTE: the litert runtime pulls through `lit pull` (its own cache),
+    // not through neuron's multi-source puller; these entries document
+    // which ids the engine can serve and where the weights live.
+    SupportedModel {
+        id: "gemma3-1b",
         engine: EngineType::Llm,
         engine_impl: "litert",
-        default_repo: "huggingface:google/gemma-4-12B-it",
+        default_repo: "huggingface:litert-community/Gemma3-1B-IT",
         source_id: "huggingface",
-        families: &["gemma4"],
+        families: &["gemma3"],
+    },
+    SupportedModel {
+        id: "phi-4-mini",
+        engine: EngineType::Llm,
+        engine_impl: "litert",
+        default_repo: "huggingface:litert-community/Phi-4-mini-instruct",
+        source_id: "huggingface",
+        families: &["phi4"],
+    },
+    SupportedModel {
+        id: "qwen2.5-1.5b",
+        engine: EngineType::Llm,
+        engine_impl: "litert",
+        default_repo: "huggingface:litert-community/Qwen2.5-1.5B-Instruct",
+        source_id: "huggingface",
+        families: &["qwen2"],
     },
     // HF Mirror — China-friendly CDN that fronts the same HF repos
     // without the gating/access checks. Same wire format, so the
     // HF download logic works unchanged.
     SupportedModel {
-        id: "gemma-4-e2b-it",
+        id: "gemma3-1b",
         engine: EngineType::Llm,
         engine_impl: "litert",
-        default_repo: "hf-mirror:google/gemma-4-E2B-it",
+        default_repo: "hf-mirror:litert-community/Gemma3-1B-IT",
         source_id: "hf-mirror",
-        families: &["gemma4"],
-    },
-    SupportedModel {
-        id: "gemma-4-e4b-it",
-        engine: EngineType::Llm,
-        engine_impl: "litert",
-        default_repo: "hf-mirror:google/gemma-4-E4B-it",
-        source_id: "hf-mirror",
-        families: &["gemma4"],
-    },
-    SupportedModel {
-        id: "gemma-4-12b-it",
-        engine: EngineType::Llm,
-        engine_impl: "litert",
-        default_repo: "hf-mirror:google/gemma-4-12B-it",
-        source_id: "hf-mirror",
-        families: &["gemma4"],
-    },
-    SupportedModel {
-        id: "gemma-3n-e2b-it",
-        engine: EngineType::Llm,
-        engine_impl: "litert",
-        default_repo: "huggingface:google/gemma-3n-E2B-it",
-        source_id: "huggingface",
-        families: &["gemma3n"],
-    },
-    SupportedModel {
-        id: "gemma-3n-e4b-it",
-        engine: EngineType::Llm,
-        engine_impl: "litert",
-        default_repo: "huggingface:google/gemma-3n-E4B-it",
-        source_id: "huggingface",
-        families: &["gemma3n"],
-    },
-    SupportedModel {
-        id: "gemma-3-12b-it",
-        engine: EngineType::Llm,
-        engine_impl: "litert",
-        default_repo: "huggingface:google/gemma-3-12b-it",
-        source_id: "huggingface",
         families: &["gemma3"],
+    },
+    SupportedModel {
+        id: "phi-4-mini",
+        engine: EngineType::Llm,
+        engine_impl: "litert",
+        default_repo: "hf-mirror:litert-community/Phi-4-mini-instruct",
+        source_id: "hf-mirror",
+        families: &["phi4"],
+    },
+    SupportedModel {
+        id: "qwen2.5-1.5b",
+        engine: EngineType::Llm,
+        engine_impl: "litert",
+        default_repo: "hf-mirror:litert-community/Qwen2.5-1.5B-Instruct",
+        source_id: "hf-mirror",
+        families: &["qwen2"],
     },
     // ModelScope models
     SupportedModel {
@@ -248,11 +409,41 @@ pub const SUPPORTED_CATALOG: &[SupportedModel] = &[
         source_id: "modelscope",
         families: &["llama", "minicpm5"],
     },
-    // Vision models — YOLO family via candle-yolo.
+    // MiniCPM5-2B (OpenBMB, Apache-2.0) — ModelScope mirror.
+    SupportedModel {
+        id: "minicpm5-2b",
+        engine: EngineType::Llm,
+        engine_impl: "candle",
+        default_repo: "modelscope:OpenBMB/MiniCPM5-2B",
+        source_id: "modelscope",
+        families: &["llama", "minicpm5"],
+    },
+    // VoxCPM2 (OpenBMB, Apache-2.0) — ModelScope mirror.
+    SupportedModel {
+        id: "voxcpm2",
+        engine: EngineType::Tts,
+        engine_impl: "burn",
+        default_repo: "modelscope:OpenBMB/VoxCPM2",
+        source_id: "modelscope",
+        families: &["voxcpm2"],
+    },
+    // Vision models — served through the ONNX session path (`ort`).
+    //
+    // The vision runtime loads a *prepared* model directory
+    // (`model.onnx` + `config.json`); no upstream repo ships that layout,
+    // so a pull here only fetches the source checkpoint (the Ultralytics
+    // `.pt` weights / the DETR `model.safetensors`). Converting it is a
+    // manual step — see `docs/howto/vision-tasks.md` for the export
+    // commands and the config.json fields the decoders read.
+    //
+    // The candle YOLOv8 port is deliberately NOT listed: it is an
+    // approximation of the architecture (no PAN-FPN neck, different head
+    // layout) and cannot consume Ultralytics exports, so it would only
+    // ever fail at load time.
     SupportedModel {
         id: "yolov8n",
         engine: EngineType::Vision,
-        engine_impl: "candle-yolo",
+        engine_impl: "ort",
         default_repo: "huggingface:Ultralytics/YOLOv8:yolov8n.pt",
         source_id: "huggingface",
         families: &["yolo"],
@@ -260,7 +451,7 @@ pub const SUPPORTED_CATALOG: &[SupportedModel] = &[
     SupportedModel {
         id: "yolov8s",
         engine: EngineType::Vision,
-        engine_impl: "candle-yolo",
+        engine_impl: "ort",
         default_repo: "huggingface:Ultralytics/YOLOv8:yolov8s.pt",
         source_id: "huggingface",
         families: &["yolo"],
@@ -268,30 +459,30 @@ pub const SUPPORTED_CATALOG: &[SupportedModel] = &[
     SupportedModel {
         id: "yolov11n",
         engine: EngineType::Vision,
-        engine_impl: "candle-yolo",
+        engine_impl: "ort",
         default_repo: "huggingface:Ultralytics/YOLO11:yolo11n.pt",
         source_id: "huggingface",
         families: &["yolo"],
     },
-    // RT-DETR (transformer-based, no NMS needed) — candle-rtdetr.
+    // RT-DETR (transformer-based, no NMS needed) — ONNX session path.
     SupportedModel {
         id: "rtdetr-r50",
         engine: EngineType::Vision,
-        engine_impl: "candle-rtdetr",
+        engine_impl: "ort",
         default_repo: "huggingface:PekingU/rtdetr_r50vd",
         source_id: "huggingface",
         families: &["rtdetr"],
     },
-    // DETR (original transformer detector) — candle-detr.
+    // DETR (original transformer detector) — ONNX session path.
     SupportedModel {
         id: "detr-resnet50",
         engine: EngineType::Vision,
-        engine_impl: "candle-detr",
+        engine_impl: "ort",
         default_repo: "huggingface:facebook/detr-resnet-50",
         source_id: "huggingface",
         families: &["detr"],
     },
-    // RF-DETR (Roboflow DETR with DINOv2 backbone) — ONNX Runtime.
+    // RF-DETR (Roboflow DETR with DINOv2 backbone) — ONNX session path.
     SupportedModel {
         id: "rf-detr-base",
         engine: EngineType::Vision,
@@ -308,15 +499,10 @@ pub const SUPPORTED_CATALOG: &[SupportedModel] = &[
         source_id: "huggingface",
         families: &["rf-detr"],
     },
-    // Florence-2 (vision-language, text-prompted) — ONNX Runtime.
-    SupportedModel {
-        id: "florence-2-base",
-        engine: EngineType::Vision,
-        engine_impl: "ort",
-        default_repo: "huggingface:microsoft/Florence-2-base",
-        source_id: "huggingface",
-        families: &["florence"],
-    },
+    // Florence-2 (vision-language, text-prompted) is intentionally absent:
+    // the ort decoder for the Florence2 output layout returns an empty
+    // detection list (its token decoding is not implemented), so the model
+    // cannot actually serve detections today.
     // mistralrs runtime — high-throughput inference for Qwen3.
     SupportedModel {
         id: "Qwen/Qwen3-0.6B",
@@ -325,6 +511,18 @@ pub const SUPPORTED_CATALOG: &[SupportedModel] = &[
         default_repo: "huggingface:Qwen/Qwen3-0.6B",
         source_id: "huggingface",
         families: &["qwen3"],
+    },
+    // Qwen 3.5 on the mistralrs runtime. The candle backend rejects
+    // Qwen 3.5 (nested `text_config` + hybrid linear/full attention),
+    // but mistral.rs v0.8.22 ships the Qwen3_5 loader. Text chat only —
+    // neuron's mistralrs runtime does not send image attachments.
+    SupportedModel {
+        id: "Qwen/Qwen3.5-4B",
+        engine: EngineType::Llm,
+        engine_impl: "mistralrs",
+        default_repo: "huggingface:Qwen/Qwen3.5-4B",
+        source_id: "huggingface",
+        families: &["qwen3_5"],
     },
 ];
 

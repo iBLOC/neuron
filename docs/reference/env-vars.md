@@ -23,7 +23,7 @@ neuron reads its configuration from environment variables on startup. The full m
 | `NEURON_ASR_MODEL_PATH` | (unset) | Path to the ASR model directory (Whisper: `config.json` + `tokenizer.json` + `*.safetensors` + `mel_filters.safetensors`; SenseVoiceSmall: `model.onnx` or `model.int8.onnx` + `tokens.txt`; tract path also wants the `model.prepped.onnx` produced by `scripts/prep-sensevoice-onnx.py`) |
 | `NEURON_RERANK_MODEL_PATH` | (unset) | Path to the Rerank model directory (BGE/mxbai/jina; not used for cohere) |
 | `NEURON_EMBEDDING_MODEL_PATH` | (unset) | Path to the Embedding model directory (MiniLM BERT) |
-| `NEURON_VISION_MODEL_PATH` | (unset) | Path to the Vision model directory (YOLOv8: `config.json` + `yolov8n.safetensors`) |
+| `NEURON_VISION_MODEL_PATH` | (unset) | Path to the Vision model directory. The ONNX path reads `model.onnx` + `config.json` from it; `candle-yolo` reads `*.safetensors` from it (and refuses to run without a full-coverage checkpoint). |
 | `NEURON_CHRONOS2_DEFAULT_MODEL` | (unset) | Model id registered for the Chronos2 capability |
 
 ## Engine selection
@@ -55,7 +55,8 @@ neuron reads its configuration from environment variables on startup. The full m
 | `NEURON_COHERE_API_KEY` | (unset) | Cohere API key (required when `NEURON_RERANK_RUNTIME=cohere`) |
 | `NEURON_COHERE_ENDPOINT` | `https://api.cohere.com` | Cohere API base URL |
 | `NEURON_COHERE_MODEL` | `rerank-english-v3.0` | Cohere model id (e.g. `rerank-multilingual-v3.0`) |
-| `NEURON_VISION_RUNTIME` | (unset) | `candle-yolo` \| `candle-rtdetr` \| `candle-detr` \| `ort` — which Vision engine + model family to load. The historical `ultralytics` Python-subprocess option was removed (neuron is pure Rust). |
+| `NEURON_VISION_RUNTIME` | (unset) | `candle` \| `candle-yolo` \| `ort` — which Vision engine to register. `candle` is an alias for `candle-yolo`; `ort` is the ONNX session path (executor: tract). The candle RT-DETR / DETR ids were removed on 2026-10-29 — they were never implemented; serve those families through `ort`. The historical `ultralytics` Python-subprocess option was removed (neuron is pure Rust). |
+| `NEURON_VISION_MODEL_ID` | `vision` | The model id vision requests refer to when the runtime is registered via `NEURON_VISION_RUNTIME`. |
 | `NEURON_CHRONOS2_RUNTIME` | (unset) | `candle` — which Chronos2 engine to load (requires `--features chronos2`) |
 | `NEURON_CHRONOS2_MODEL_PATH` | (unset) | Path to the Chronos2 checkpoint directory |
 | `NEURON_DECISION_RUNTIME` | (unset) | `tract` — which Decision engine to load (requires `--features tract`) |
@@ -72,6 +73,14 @@ neuron reads its configuration from environment variables on startup. The full m
 | `NEURON_OCR_LAYOUT` | `true` | `false` skips an optional `layout.onnx` even when present |
 | `NEURON_OCR_TABLES` | `true` | `false` skips an optional `table.onnx` even when present |
 | `NEURON_OCR_DEBUG` | (unset) | `1` / `true` prints the OCR pipeline's intermediate tensors (detection maps, recognition logits) — debugging aid, not a production setting |
+
+## Image generation
+
+| Variable | Default | Description |
+|---|---|---|
+| `NEURON_IMAGEGEN_RUNTIME` | (unset) | `moss-image` — which text-to-image engine to register. Serves OpenMOSS MOSS-Image (5B DiT + Qwen3.5 text encoder + FLUX.2 decoder VAE) natively on candle at `POST /v1/images/generations`. Requires the `candle` feature (default on) |
+| `NEURON_IMAGEGEN_MODEL_PATH` | (unset) | Path to the MOSS-Image model directory — the upstream HF repo layout (`transformer/` + `text_encoder/` + `vae/` + `tokenizer/` + `scheduler/`). Unset falls back to `$NEURON_MODEL_DIRS/imagegen/<model_id>/` |
+| `NEURON_IMAGEGEN_DTYPE` | `f16` | `f16` \| `f32` \| `bf16` — storage dtype the DiT and text encoder materialize their weights in. The VAE always decodes in fp32. `f16` ≈ 27 GB resident, `f32` ≈ 54 GB. candle's CPU backend has no BF16 matmul, so `bf16` needs CUDA |
 | `ORT_DYLIB_PATH` | (unset) | Path to `onnxruntime.dll`/`.so` for the `ort` crate's load-dynamic linking (falls back to `PATH`) |
 
 ## Model scheduler

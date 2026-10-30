@@ -69,6 +69,9 @@ impl CapabilityRegistries {
     }
 
     pub fn lookup(&self, cap: Capability, model_id: &str) -> Option<Arc<dyn crate::engine::AnyCapabilityEngine>> {
+        // Image generation serves through its dedicated handler +
+        // ImageGenRuntimeRegistry, not the adapter_dispatch engine
+        // path (same as chronos2).
         let reg: &EngineRegistry<dyn crate::engine::AnyCapabilityEngine> = match cap {
             Capability::Llm => &self.llm,
             Capability::Tts => &self.tts,
@@ -78,6 +81,7 @@ impl CapabilityRegistries {
             Capability::Vision => &self.vision,
             Capability::Decision => &self.decision,
             Capability::Ocr => &self.ocr,
+            Capability::ImageGen => return None,
         };
         reg.lookup(model_id)
     }
@@ -92,6 +96,7 @@ impl CapabilityRegistries {
             Capability::Vision => self.vision.default(),
             Capability::Decision => self.decision.default(),
             Capability::Ocr => self.ocr.default(),
+            Capability::ImageGen => None,
         }
     }
 

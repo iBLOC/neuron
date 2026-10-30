@@ -11,7 +11,7 @@ neuron 支持 **3 个 ML 框架**以及**每个框架的多个实现**，覆盖�
 | 能力面 | 引擎 | 特性开关 | 是否默认 | 后端 |
 |---|---|---|---|---|
 | LLM | candle | `candle` | ✅ | 经 `candle-transformers` 支持 Qwen 2/2.5/3/3.5、Llama 2/3、Phi-3、Mistral、ChatGLM、**MiniCPM5-1B / MiniCPM5-2B** |
-| LLM | litert_lm | `litert` | — | 经 Google LiteRT-LM 子进程支持 Gemma 3 / 3n / 4（shell 出 `lit` 二进制） |
+| LLM | litert_lm | `litert` | — | 经 Google LiteRT-LM 子进程支持 `gemma3-1b` / `phi-4-mini` / `qwen2.5-1.5b`（shell 出固定版本的 `lit` v0.7.0 二进制,它的注册表只有这三个） |
 | LLM | mistralrs | `mistralrs` | — | 经 mistral.rs 引擎支持 40+ 模型家族（PagedAttention、prefix caching、KV cache、ISQ） |
 | LLM | mage_vl | （默认 `candle`） | — | **neuron 原生的 Microsoft Mage-VL candle 移植**：MageViT 24 层 codec 原生 ViT（3D RoPE、I/P 帧补丁稀疏化）+ Qwen3-4B-Instruct-2507 解码器 + StreamMind 门控；经 `adapter_dispatch` 系统覆盖 OpenAI `/v1/chat/completions` 与 Anthropic `/v1/messages` |
 | TTS | burn (VoxCpm) | `voxcpm` | — | **VoxCPM 0.5B 与 VoxCPM2 均可加载**（burn 0.21 + `hound`）。0.5B：预转换的 `.mpk` 权重。VoxCPM2（2B、48 kHz、30 种语言）：直接加载上游 `openbmb/VoxCPM2` 检查点（无需转换），约需 10 GB 内存 |
@@ -21,11 +21,12 @@ neuron 支持 **3 个 ML 框架**以及**每个框架的多个实现**，覆盖�
 | Rerank | candle (BGE/mxbai/jina) | `candle` | ✅ | XLM-RoBERTa 交叉编码器 |
 | Rerank | cohere | `candle`（默认） | — | Cohere `/v1/rerank` HTTP 代理 |
 | Embedding | candle (MiniLM) | `candle` | ✅ | MiniLM BERT（经 `BatchLongest` 填充批量执行，base64 输出） |
-| Vision | candle (YOLOv8 / RT-DETR / DETR) | `candle` | ✅ | CSPDarknet + PANet + 解耦头 |
-| Vision | ort (YOLOv8 / RT-DETR / DETR / RF-DETR / Florence-2) | `ort` | — | 可插拔 ONNX 执行器：`ort` / `tract` / `onnxruntime` |
+| Vision | ort (YOLOv8 / YOLO11 / RT-DETR / DETR / RF-DETR) | `ort` | — | ONNX 会话路径；执行器是 **tract**（纯 Rust，`--features tract`），`ort` 这个 Cargo feature 不影响这条路径 |
+| Vision | candle (YOLOv8 近似实现) | `candle` | — | 缺少 PAN-FPN neck 的 CSPDarknet 近似实现；无法消费 Ultralytics 导出文件，且拒绝用未训练权重运行——检测请走上面的 ONNX 路径 |
 | Chronos2 | candle | `chronos2` | — | ✅ 2026-07-19 落地：vendored T5 编码器 + 解码器 + 线性输出头，`CandleChronos2Runtime`（844 行，19 个测试） |
 | Decision | tract (Laya int8 ONNX) | `tract` | — | ✅ 2026-09-24 落地：纯 Rust ONNX 执行器（无 C++ 工具链 / 系统 ONNX Runtime）。纯编码器 int8，每问题一次前向，无解码。图必须先用 `scripts/prep-laya-onnx.py` 预处理。该引擎**无法**与 onnxruntime 做到逐位一致——见[规格说明](../../superpowers/specs/2026-09-24-laya-decision.md)；当需要逐位一致时，`src/vision/ort_runtime.rs` 中的 `ort` 执行器槽位是现成的替代方案。 |
 | OCR | paddle-ocr | `tract`（默认）/ `ort`（快速执行器） | — | tract-onnx / ort（ONNX）—— PP-OCRv5/v6 文本检测 + 识别，可选版面分析（PP-DocLayoutV3）与表格结构（SLANeXt） |
+| ImageGen | candle (MOSS-Image) | `candle`（默认） | — | ✅ 2026-10-30 落地：OpenMOSS MOSS-Image（Apache-2.0）原生服务——5B 单流 DiT + Qwen3.5 混合 GDN 文本编码器 + FLUX.2 解码 VAE，全部自研移植在 `src/imagegen/moss_image/`。直接加载上游 HF 仓库布局（BF16 约 27 GB）。`POST /v1/images/generations`（b64_json）。**实践中只能用 CUDA**——CPU 上每张图是数 PFLOP 量级的工作量。见[规格说明](../../superpowers/specs/2026-10-30-moss-image-text-to-image.md) |
 
 ## 选择方式
 
@@ -108,7 +109,7 @@ curl -X POST http://localhost:8083/v1/chat/completions \
 ### LLM
 
 - **candle（默认）**：最适合开发 + CPU/Mac 上的小模型。覆盖 Qwen 2/2.5/3/3.5 + Llama 2/3 + Phi-3 + Mistral + ChatGLM + MiniCPM5-1B / MiniCPM5-2B。迭代快，无额外依赖。`minicpm5-1b` 是平台默认（1B，可放进 2 核 4 GB 的边缘设备）；`minicpm5-2b` 是服务器级备选（2.52B，约 6–7 GB 显存）。
-- **litert_lm**：需要端上 LLM（Android、iOS、嵌入式 Linux）时。要求 `PATH` 上有 `lit` 二进制和 Gemma 3 权重。适合无 GPU 的边缘部署。
+- **litert_lm**：需要端上 LLM（Android、iOS、嵌入式 Linux）时。要求 `PATH` 上有 `lit` 二进制（LiteRT-LM v0.7.0，按需下载）与注册表里的三个模型之一：`gemma3-1b`、`phi-4-mini`、`qwen2.5-1.5b`。适合无 GPU 的边缘部署。
 - **mistralrs**：需要生产级多家族支持（PagedAttention / prefix caching / KV cache）时。覆盖 40+ 家族。适合高吞吐并发服务多个模型。
 - **mage_vl**：需要 VLM（图像 + 多帧视频理解）、且由带 codec 原生 75% token 缩减的 Microsoft Mage-VL 支撑时使用。要求 `NEURON_MAGE_VL_SHARD_DIR` 指向来自 `microsoft/Mage-VL` 的两个 `model-0000X-of-00002.safetensors` 分片。经同一个 `MageVlRuntime` 同时覆盖 OpenAI 与 Anthropic 线上格式。2026-10-13 首次在 POPE / MME / MMStar 上跑了精度评估 — 分数与 0-token 诊断见 [VLM 评测 spec](/superpowers/specs/2026-10-13-mage-vl-vlm-bench)，复现脚本在 `scripts/vlm-bench/`。
 
@@ -135,7 +136,7 @@ curl -X POST http://localhost:8083/v1/chat/completions \
 
 ### Vision
 
-- **candle**：最适合原生 candle 推理的 YOLOv8 / RT-DETR / DETR。快，无子进程开销。
+- **candle**：原生 candle 推理，无子进程开销。其 YOLOv8 移植只是近似实现，目前无法提供真实检测结果——请用 ONNX 路径。
 - **ort**：模型已导出为 ONNX（RF-DETR、Florence-2、自定义架构）时使用。可插拔执行器：`ort`（默认）、`tract`（纯 Rust）、`onnxruntime`（最重、最快）。
 
 ## 性能考量
@@ -145,7 +146,7 @@ curl -X POST http://localhost:8083/v1/chat/completions \
 | candle (CPU) | 低（仅模型大小；F32 默认会翻倍——见 `NEURON_LLM_DTYPE`） | 快 | 快 | ≤3B 模型表现良好 |
 | candle (CUDA) | 高（显存） | 慢（首次构建约 5-10 分钟） | 快 | 7B+ 模型最佳 |
 | candle (Metal) | 高（统一内存） | 中 | 快 | Apple Silicon 最佳 |
-| litert_lm | 低（子进程） | 快 | 子进程开销 | 模型集合有限（Gemma 3 / 3n / 4） |
+| litert_lm | 低（子进程） | 快 | 子进程开销 | 模型集合固定——固定的 `lit` 注册表只有 `gemma3-1b` / `phi-4-mini` / `qwen2.5-1.5b` |
 | mistralrs | 高（显存） | 慢 | 快 | 并发服务多请求最佳 |
 | burn (VoxCpm) | 低 | 中（burn + hound） | 快 | 单模型吞吐 |
 
