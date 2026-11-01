@@ -16,9 +16,9 @@ use crate::CandleYoloRuntime;
 use crate::OrtVisionRuntime;
 
 pub struct VisionRuntimeRegistry {
-    pub registered: Vec<RegisteredVision>,
+    pub registered: Arc<Mutex<Vec<RegisteredVision>>>,
     loaded: Arc<tokio::sync::Mutex<HashMap<VisionRegistryKey, Arc<dyn VisionRuntime>>>>,
-    resources: Mutex<ResourceTracker>,
+    resources: Arc<Mutex<ResourceTracker>>,
 }
 
 impl Clone for VisionRuntimeRegistry {
@@ -26,7 +26,7 @@ impl Clone for VisionRuntimeRegistry {
         Self {
             registered: self.registered.clone(),
             loaded: self.loaded.clone(),
-            resources: Mutex::new(ResourceTracker::default()),
+            resources: self.resources.clone(),
         }
     }
 }
@@ -34,14 +34,14 @@ impl Clone for VisionRuntimeRegistry {
 impl VisionRuntimeRegistry {
     pub fn new(_config: Arc<NeuronConfig>) -> Self {
         Self {
-            registered: Vec::new(),
+            registered: Arc::new(Mutex::new(Vec::new())),
             loaded: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
-            resources: Mutex::new(ResourceTracker::default()),
+            resources: Arc::new(Mutex::new(ResourceTracker::default())),
         }
     }
 
     pub fn register(
-        &mut self,
+        &self,
         model_id: String,
         impl_id: VisionImpl,
         device: DeviceSelection,
@@ -60,7 +60,7 @@ impl VisionRuntimeRegistry {
         res.allocate(required_memory_bytes, &device)
             .map_err(NeuronError::new)?;
 
-        self.registered.push(RegisteredVision {
+        self.registered.lock().unwrap().push(RegisteredVision {
             model_id,
             impl_id,
             device,
@@ -70,11 +70,14 @@ impl VisionRuntimeRegistry {
     }
 
     pub async fn runtime_for(&self, model_id: &str) -> Result<Arc<dyn VisionRuntime>, NeuronError> {
-        let entry = self
-            .registered
-            .iter()
-            .find(|r| r.model_id == model_id)
-            .ok_or_else(|| NeuronError::new(format!("ModelNotRegistered: {model_id}")))?;
+        let entry = {
+            let registered = self.registered.lock().unwrap();
+            registered
+                .iter()
+                .find(|r| r.model_id == model_id)
+                .cloned()
+                .ok_or_else(|| NeuronError::new(format!("ModelNotRegistered: {model_id}")))?
+        };
 
         let key = VisionRegistryKey {
             model_id: entry.model_id.clone(),
@@ -115,7 +118,12 @@ impl VisionRuntimeRegistry {
     }
 
     pub fn list_registered(&self) -> Vec<String> {
-        self.registered.iter().map(|r| r.model_id.clone()).collect()
+        self.registered
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|r| r.model_id.clone())
+            .collect()
     }
 
     /// Registered vision models, for `/v1/models`.
@@ -125,13 +133,16 @@ impl VisionRuntimeRegistry {
     /// pay for a model load just to answer a directory request.
     pub fn list_models(&self) -> Vec<crate::llm::ModelInfo> {
         self.registered
+            .lock()
+            .unwrap()
             .iter()
             .map(|r| crate::llm::ModelInfo::new(r.model_id.clone(), "vision"))
             .collect()
     }
 
     pub fn default_runtime(&self) -> Arc<dyn VisionRuntime> {
-        match self.registered.first() {
+        let first = self.registered.lock().unwrap().first().cloned();
+        match first {
             Some(entry) => {
                 let id = entry.model_id.clone();
                 match tokio::runtime::Handle::try_current() {

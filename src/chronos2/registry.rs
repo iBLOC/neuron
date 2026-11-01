@@ -107,9 +107,13 @@ impl Chronos2Registry {
                         tracing::info!(model = %model, path = %path.display(), "loaded Chronos2 model");
                         Arc::new(rt) as Arc<dyn Chronos2Runtime>
                     }
-                    _ => {
-                        tracing::warn!(model = %model, path = %path.display(), "failed to load Chronos2 model; falling back to stub");
-                        Arc::new(StubChronos2Runtime::new(model))
+                    Ok(Err(load_err)) => {
+                        tracing::warn!(model = %model, path = %path.display(), error = %load_err, "failed to load Chronos2 model; falling back to stub");
+                        Arc::new(StubChronos2Runtime::with_load_error(model, load_err.to_string()))
+                    }
+                    Err(join_err) => {
+                        tracing::warn!(model = %model, path = %path.display(), error = %join_err, "Chronos2 load task panicked; falling back to stub");
+                        Arc::new(StubChronos2Runtime::with_load_error(model, join_err.to_string()))
                     }
                 }
             }

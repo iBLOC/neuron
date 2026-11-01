@@ -79,6 +79,15 @@ fn read_reference(name: &str) -> Option<Vec<(String, Tensor)>> {
     Some(out)
 }
 
+/// The `__metadata__` block of a reference file.
+fn reference_metadata(name: &str) -> std::collections::HashMap<String, String> {
+    let path = reference_dir().join(name);
+    match std::fs::read(&path) {
+        Ok(bytes) => read_safetensors_metadata(&bytes),
+        Err(_) => Default::default(),
+    }
+}
+
 fn get(fixture: &[(String, Tensor)], name: &str) -> Tensor {
     fixture
         .iter()
@@ -122,6 +131,35 @@ fn report(label: &str, got: &Tensor, expected: &Tensor, tolerance: f64) {
     );
 }
 
+/// The relative tolerance for a **deep** comparison.
+///
+/// bf16's error accumulates with depth: the same real weights give
+/// 0.7 % over 2 blocks and 21 % over 42 (the two sides accumulate in
+/// a different order, and 42 residual blocks add the difference up).
+/// A wrong formula would be O(1) at any depth, so the tolerance has
+/// to grow with the block count.
+fn dit_tolerance(dtype: DType, blocks: usize) -> f64 {
+    let base = tolerance(dtype);
+    let per_block = match dtype {
+        DType::F32 => 1e-5,
+        _ => 6e-3,
+    };
+    base.max(per_block * blocks as f64)
+}
+
+/// The relative tolerance for a dtype.
+///
+/// fp32 accumulation differences are ~1e-6; bf16 has 8 mantissa
+/// bits (≈0.4 % per value), so the same comparison is a couple of
+/// orders of magnitude looser.
+fn tolerance(dtype: DType) -> f64 {
+    match dtype {
+        DType::F32 => 1e-3,
+        DType::BF16 => 5e-2,
+        _ => 1e-2,
+    }
+}
+
 /// The device the real-weight tests run on.
 fn device() -> Device {
     match crate::config::env_var("DEVICE").as_deref() {
@@ -139,14 +177,17 @@ fn device() -> Device {
     }
 }
 
-/// The dtype the real weights are loaded in. `f16` matches the
-/// reference script's default, so both sides round the bf16
-/// checkpoint identically.
+/// The dtype the real weights are loaded in.
+///
+/// The checkpoint ships **bf16**, and candle's CPU backend widens bf16
+/// gemms to f32 internally (it has no f16 CPU matmul), so bf16 is the
+/// only dtype that lets a CPU host run the real weights — and it
+/// needs no conversion, so the resident memory is the file size.
 fn dtype() -> DType {
     match crate::config::env_var("IMAGEGEN_DTYPE").as_deref() {
         Some("f32") | Some("float32") => DType::F32,
-        Some("bf16") | Some("bfloat16") => DType::BF16,
-        _ => DType::F16,
+        Some("f16") | Some("float16") => DType::F16,
+        _ => DType::BF16,
     }
 }
 
@@ -181,7 +222,12 @@ mod tests {
 
         let tokens = ids.to_dtype(DType::U32).expect("token ids");
         let hidden = model.forward_hidden(&tokens).expect("forward");
-        report("text encoder (real weights)", &hidden, &expected, 5e-2);
+        report(
+            "text encoder (real weights)",
+            &hidden,
+            &expected,
+            tolerance(dt),
+        );
     }
 
     /// The DiT on the real checkpoint, fed the text encoder's real
@@ -190,13 +236,27 @@ mod tests {
     #[ignore = "needs the real checkpoint (see the module docs)"]
     fn test_dit_matches_upstream_on_real_weights() {
         let dir = model_dir();
-        let configs = load_configs(&dir).expect("configs");
+        let mut configs = load_configs(&dir).expect("configs");
         let Some(reference) = read_reference("dit_ref.safetensors") else {
             return;
         };
         let latents = get(&reference, "latents");
         let encoder_states = get(&reference, "encoder_hidden_states");
         let expected = get(&reference, "output");
+
+        // The reference records how many blocks it ran (the script can
+        // truncate the model to the first N — a cheap way to tell a
+        // wrong port from bf16 noise accumulated over 42 blocks);
+        // this side truncates to the same count.
+        let blocks = reference_metadata("dit_ref.safetensors")
+            .get("layers")
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(configs.dit.num_layers);
+        assert!(
+            blocks <= configs.dit.num_layers,
+            "the reference ran more blocks than the checkpoint has"
+        );
+        configs.dit.num_layers = blocks;
 
         let dev = device();
         let dt = dtype();
@@ -215,7 +275,12 @@ mod tests {
         let out = dit
             .forward(&latents, 500.0, &encoder_states, &[])
             .expect("forward");
-        report("dit (real weights)", &out, &expected, 5e-2);
+        report(
+            "dit (real weights)",
+            &out,
+            &expected,
+            dit_tolerance(dt, blocks),
+        );
     }
 
     /// The FLUX.2 decoder on the real checkpoint.
@@ -241,7 +306,7 @@ mod tests {
         let vae = Flux2Vae::new(vb, configs.vae).expect("vae");
 
         let decoded = vae.decode(&packed).expect("decode");
-        report("vae (real weights)", &decoded, &expected, 5e-2);
+        report("vae (real weights)", &decoded, &expected, tolerance(DType::F32));
     }
 
     /// neuron's hard-coded prompt template must render exactly what

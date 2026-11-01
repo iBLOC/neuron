@@ -1,6 +1,6 @@
 # neuron (神经元) — AGENTS guide
 
-**Status:** READ-ONLY contributor reference. Updated 2026-10-30 (**MOSS-Image text-to-image capability landed** — the first image-generation capability: `imagegen` + `POST /v1/images/generations`, serving OpenMOSS MOSS-Image natively on candle with the DiT, the Qwen3.5 hybrid-GDN text encoder and the FLUX.2 decoder all vendored; **743 lib tests** default (up from 701); prior 2026-10-26: **VoxCPM2 GPU backend landed** — `--features voxcpm-cuda` + `NEURON_DEVICE=nvidia` runs the 2B model on an NVIDIA GPU through burn's CubeCL CUDA backend in f16; five latent dtype assumptions the f32 path hid were fixed; the CPU stays the default because VoxCPM2's per-patch decode measured ~6× *slower* on an RTX 3090 than on a 12-core CPU; **701 lib tests** default / **734 with `--features voxcpm`** / **735 with `--features voxcpm-cuda`** / **761 with `--features tract`** / **741 with `--features ort`** (all re-measured 2026-10-27 after the RustSec dependency patches); prior 2026-10-25: **TTS model-level streaming landed** — `POST /v1/audio/speech/stream`, VoxCPM2 decodes each latent patch as the model emits it; verified bit-comparable against the full decode on the real `audiovae.pth`; four real-checkpoint load bugs fixed — pth wrapper, VAE module-tree paths, burn-store contiguous index remapping, RoPE head dim — plus the TTS default-shortcut startup panic; prior 2026-10-15: **llama.cpp backend landed** — `NEURON_LLM_RUNTIME=llamacpp`, gated by the `llamacpp` Cargo feature, see the "Llama.cpp (loadable)" section; **681 lib tests** default as of 2026-10-15; prior 2026-10-09 baseline: post-OCR capability (PP-OCR), **679 lib tests** default / **739 with `--features tract`** / **715 with `--features ort`** / **750 with `tract,ort`**; prior 2026-09-27 baseline: post-candle 0.11 upgrade per `huggingface/candle.git#aebc405`; post-`f643c1c` LLM auto-registration + USERPROFILE fallback on Windows GUI processes; **VoxCPM2 (2B/48 kHz) local inference landed** — `NEURON_TTS_RUNTIME=voxcpm2`, direct checkpoint load, see the "VoxCPM2 (loadable)" section; **model scheduler landed** — bounded-memory LLM swap queue behind `/v1/chat/completions` + `/v1/messages`, see the "Model scheduler" bullet and `docs/superpowers/specs/2026-09-29-model-scheduler.md`; GitHub Pages CI now base-URL-configured + adds a `lychee` link-check job; prior 2026-09-25 baseline: post-rename `neure → neuron` per commit `e3d2c41` (2026-09-21); `AppState::register_engine` capability per `bccef7c`; earlier 2026-07-19 baseline: license switch + Shadow decoupling).
+**Status:** READ-ONLY contributor reference. Updated 2026-10-31 (**the capability registries now share their state across clones** — `ServerState` clones each registry twice (handler `Arc` + registration lock) and `registered` was a plain `Vec`, so a runtime-registered model never reached the handler ("ModelNotRegistered"); all nine registries fixed and pinned by `src/imagegen/registry_sharing_test.rs`; **764 lib tests** default / **859 with `tract,voxcpm,ocr`**). Updated 2026-10-30 (**MOSS-Image text-to-image capability landed** — the first image-generation capability: `imagegen` + `POST /v1/images/generations`, serving OpenMOSS MOSS-Image natively on candle with the DiT, the Qwen3.5 hybrid-GDN text encoder and the FLUX.2 decoder all vendored; prior 2026-10-26: **VoxCPM2 GPU backend landed** — `--features voxcpm-cuda` + `NEURON_DEVICE=nvidia` runs the 2B model on an NVIDIA GPU through burn's CubeCL CUDA backend in f16; five latent dtype assumptions the f32 path hid were fixed; the CPU stays the default because VoxCPM2's per-patch decode measured ~6× *slower* on an RTX 3090 than on a 12-core CPU; **701 lib tests** default / **734 with `--features voxcpm`** / **735 with `--features voxcpm-cuda`** / **761 with `--features tract`** / **741 with `--features ort`** (all re-measured 2026-10-27 after the RustSec dependency patches); prior 2026-10-25: **TTS model-level streaming landed** — `POST /v1/audio/speech/stream`, VoxCPM2 decodes each latent patch as the model emits it; verified bit-comparable against the full decode on the real `audiovae.pth`; four real-checkpoint load bugs fixed — pth wrapper, VAE module-tree paths, burn-store contiguous index remapping, RoPE head dim — plus the TTS default-shortcut startup panic; prior 2026-10-15: **llama.cpp backend landed** — `NEURON_LLM_RUNTIME=llamacpp`, gated by the `llamacpp` Cargo feature, see the "Llama.cpp (loadable)" section; **681 lib tests** default as of 2026-10-15; prior 2026-10-09 baseline: post-OCR capability (PP-OCR), **679 lib tests** default / **739 with `--features tract`** / **715 with `--features ort`** / **750 with `tract,ort`**; prior 2026-09-27 baseline: post-candle 0.11 upgrade per `huggingface/candle.git#aebc405`; post-`f643c1c` LLM auto-registration + USERPROFILE fallback on Windows GUI processes; **VoxCPM2 (2B/48 kHz) local inference landed** — `NEURON_TTS_RUNTIME=voxcpm2`, direct checkpoint load, see the "VoxCPM2 (loadable)" section; **model scheduler landed** — bounded-memory LLM swap queue behind `/v1/chat/completions` + `/v1/messages`, see the "Model scheduler" bullet and `docs/superpowers/specs/2026-09-29-model-scheduler.md`; GitHub Pages CI now base-URL-configured + adds a `lychee` link-check job; prior 2026-09-25 baseline: post-rename `neure → neuron` per commit `e3d2c41` (2026-09-21); `AppState::register_engine` capability per `bccef7c`; earlier 2026-07-19 baseline: license switch + Shadow decoupling).
 
 ## What neuron is
 
@@ -177,7 +177,15 @@ Load-bearing points:
    vocab is `table_structure_dict.txt`-shaped with merged `<td></td>`
    tokens. Not wired yet — next increment.
 
-### MOSS-Image (text-to-image capability, 2026-10-30)
+### MOSS-Image (text-to-image capability, 2026-10-30; real image verified 2026-11-01)
+
+**It generates real images.** The full pipeline runs natively on an
+RTX 3090 (24 GB) with the real 27 GB checkpoint: a 1024×1024 PNG that
+matches the prompt (a grey tabby cat wearing a **red scarf** by a
+**window**, **snowy forest** outside), 6 min 16 s for 50 steps on the
+3090 with the staged residency. Build it with
+`scripts\cuda-build.bat cargo build --release --example neuron_server --features candle,cuda`,
+run with `NEURON_IMAGEGEN_RUNTIME=moss-image` + `NEURON_DEVICE=nvidia`.
 
 neuron gained its first **text-to-image capability**: `imagegen`, served
 at `POST /v1/images/generations` (OpenAI Images shape, `b64_json`).
@@ -227,13 +235,15 @@ single-stream joint-sequence transformer (shared time modulation,
    (`1.0, 0.996, 0.992, 0.987, 0.983, …, 0.024`, verified against the
    upstream Python). The CFG negative branch **skips DiT block 22**
    (two forwards per step, not three).
-6. **CUDA-only in practice.** f16 weights ≈ 27 GB resident (f32 ≈ 54 GB,
-   registration budget 28 GB); CPU is a multi-PFLOP-per-image workload
-   and candle's CPU backend has no BF16 matmul. A 24 GB card needs the
-   text encoder unloaded before the DiT runs — that staged residency is
-   **not implemented yet** (both components load eagerly), and the
-   capability is **not wired into the model scheduler** (LLM-only), so
-   a 27 GB image model cannot coexist cooperatively with an LLM yet.
+6. **The weights are bf16 by default** (`NEURON_IMAGEGEN_DTYPE`), which
+   is what the checkpoint ships (no conversion → the resident memory is
+   the file size, ~27 GB) and the only half-precision dtype candle's
+   **CPU** backend can matmul (bf16 gemms are widened to f32; there is
+   no f16 CPU matmul). Practical speeds need a GPU: the CPU is a
+   multi-PFLOP-per-image workload. A 24 GB card works in the staged
+   mode (peak ≈ one component); the `cached` mode needs all 27 GB and
+   is refused on smaller cards.
+
 7. **Numerical parity against the upstream implementation**
    (`src/imagegen/moss_image/parity.rs` + the fixtures in
    `testdata/`). `scripts/gen-moss-parity.py` runs the **upstream code
@@ -277,18 +287,46 @@ single-stream joint-sequence transformer (shared time modulation,
    markers are invisible in most terminal output (they look like
    `<|…|>` and get filtered), so the comparison is done on the raw
    bytes, not on what a human reads.
-9. **Staged residency** — the pipeline is ~27 GB at f16, which does
+9. **candle's CUDA matmul rejects strided operands.** The CPU backend
+   tolerates the non-contiguous views that `transpose`, `narrow` and the
+   RoPE arithmetic produce; the CUDA backend fails with "matmul is only
+   supported for contiguous tensors". Every matmul input in the DiT, the
+   text encoder's full attention and the GDN kernel materialises its
+   operands with `.contiguous()`. This only shows on a GPU run.
+10. **The registry's memory budget is a placeholder.** `ResourceTracker`
+   ships a hard-coded 8 GB GPU / 16 GB CPU budget, so a 17 GB model cannot
+   even be *registered* on a 24 GB card — and the registration error was
+   swallowed by `let _ =`, surfacing as a confusing "ModelNotRegistered".
+   The image-generation registry probes the device's memory (`nvidia-smi`,
+   once at startup) and the registration estimate is the **peak residency**
+   (~18 GB staged, ~28 GB cached), not the total.
+11. **Staged residency** — the pipeline is ~27 GB at f16, which does
    not fit a 24 GB card, so the components load **per stage**: the
    text encoder encodes the prompt and is dropped, the DiT samples
    and is dropped, the VAE decodes. Peak residency is one component
    (~17 GB). `NEURON_IMAGEGEN_RESIDENCY=cached` keeps them all
    resident instead (faster, needs the memory).
-10. **No real-weight run of the full pipeline yet.** The port's weight
-   paths and shapes are verified against the upstream checkpoint
-   (below), and the forward pass matches upstream numerically, but no
-   image has been generated from the real 27 GB checkpoint — image
-   quality is unverified.
-11. **Weight-path + shape verification**
+12. **The HTTP contract is covered** (`src/imagegen/http_tests.rs`,
+   mock runtime, no weights): the response shape, the base64 PNG
+   payload, the parameter mapping, the defaults and every error
+   path. Writing those tests surfaced a **pre-existing bug in every
+   capability registry**: `ServerState` clones each registry twice —
+   once for the `Arc` the handlers read, once for the lock the
+   dynamic `register_model` path mutates — and `registered` was a
+   plain `Vec`, so a clone **copied** it. A runtime-registered model
+   landed in the lock's copy and the handler never found it
+   ("ModelNotRegistered"). **All nine registries are fixed now** (their
+   `registered` list and resource tracker live behind a shared
+   `Arc<Mutex<_>>`), pinned by
+   `src/imagegen/registry_sharing_test.rs`. The `llm` case mattered:
+   `register_model` is the documented path for a host to load a model
+   at runtime.
+13. **The remaining gap is the text encoder's own real-weight
+    comparison** — 16.8 GB of weights, and the reference side needs a
+    CUDA-enabled PyTorch. Its *formulas* are covered by the parity
+    tests above; the DiT and the VAE are verified on the real weights.
+
+14. **Weight-path + shape verification**
    (`src/imagegen/moss_image/weight_names.rs`): a recording
    `VarBuilder` backend answers every request with a one-element
    tensor and remembers the path **and the requested shape**, so
@@ -535,7 +573,7 @@ async fn execute_with_media(
    - `DELETE /v1/scheduler/models/{id}` — administratively evict a resident model (409 while in use)
    - `POST /v1/messages` — Anthropic Messages v1 (via `adapter_dispatch`)
 
-8. **Each capability uses a `*RuntimeRegistry`** (e.g. `LlmRuntimeRegistry`) that holds registered model entries, a loaded-instance cache, and a `ResourceTracker`. Handlers route via `runtime_for(model_id)` which lazy-loads on first request. `ServerState` keeps both the registry (primary) and shortcut fields (backward compat).
+8. **Each capability uses a `*RuntimeRegistry`** (e.g. `LlmRuntimeRegistry`) that holds registered model entries, a loaded-instance cache, and a `ResourceTracker`. Handlers route via `runtime_for(model_id)` which lazy-loads on first request. `ServerState` keeps both the registry (primary) and shortcut fields (backward compat). **A registry clone must share its state**: `ServerState` clones each registry twice (once for the handler's `Arc`, once for the registration lock), so `registered` and the `ResourceTracker` live behind `Arc<Mutex<_>>` — a plain `Vec`/`Mutex<ResourceTracker>` is copied by the clone and a runtime-registered model would never reach the handler (fixed 2026-10-31 for all nine registries; pinned by `src/imagegen/registry_sharing_test.rs`).
 
 9. **TTS trait has a default `synthesize_stream` impl** that yields 16 KiB chunks of the synthesized audio. Runtimes only need to override it if they can stream from the model itself. The `/v1/audio/speech` handler respects the request's `stream: bool` field; `false` (default) returns the full audio as a single response body, `true` returns axum `Body::from_stream` with chunked transfer encoding. **Model-level streaming is a separate trait method** — `TtsRuntime::synthesize_stream_incremental(text, TtsStreamOptions)` — because it needs a container choice (`TtsStreamFormat::Wav` | `Pcm`) and an optional voice-clone reference; the default impl falls back to the full-synthesis path so runtimes without model-level streaming keep working. It is served by `POST /v1/audio/speech/stream`.
 
@@ -637,7 +675,7 @@ points if you touch it:
 ## Conformance tests
 
 ```bash
-cargo test --lib                                  # 748 unit tests (src/**/mod.rs) — 0 failures (2026-10-30, after the MOSS-Image parity fixtures landed; +5 parity/weight-name tests on the 2026-10-27 baseline of 743)
+cargo test --lib                                  # 764 unit tests (src/**/mod.rs) — 0 failures (2026-10-31, after the MOSS-Image parity fixtures and the registry-sharing fix landed; +21 on the 2026-10-27 baseline of 743)
 cargo test --lib --features voxcpm                # 734 unit tests — 0 failures (VoxCPM2 adds the weights/model/runtime/clone-audio/streaming suites; two pre-existing V1 audiovae roundtrip tests are slow, ~5 min, on ndarray)
 cargo test --lib --features voxcpm-cuda           # 735 unit tests — 0 failures (adds the f16 GPU stack test; needs an NVIDIA GPU + the CUDA toolkit's bin on PATH)
 cargo test --lib --features tract                 # 761 unit tests — 0 failures (tract adds the decision + vision-ONNX + sensevoice paths + the full PP-OCR pipeline suites: DB++ postprocess, CTC decode, preprocess, paddle runtime)
@@ -776,7 +814,7 @@ neuron has **no direct dependency** on any particular host — the integration c
 | `ORT_DYLIB_PATH` | (unset) | Path to `onnxruntime.dll` for the `ort` crate's load-dynamic linking (needed by the OCR `ort` executor; falls back to `PATH` lookup) |
 | `NEURON_IMAGEGEN_RUNTIME` | (unset) | `moss-image` — which text-to-image engine to register (MOSS-Image on candle, `POST /v1/images/generations`). Requires the `candle` feature (default on) |
 | `NEURON_IMAGEGEN_MODEL_PATH` | (unset) | Path to the MOSS-Image model dir — the upstream HF repo layout (`transformer/` + `text_encoder/` + `vae/` + `tokenizer/` + `scheduler/`). Unset falls back to `$NEURON_MODEL_DIRS/imagegen/<model_id>/` |
-| `NEURON_IMAGEGEN_DTYPE` | `f16` | `f16` \| `f32` \| `bf16` — storage dtype for the DiT + text encoder weights (the VAE always decodes fp32). `f16` ≈ 27 GB resident, `f32` ≈ 54 GB; candle's CPU backend has no BF16 matmul, so `bf16` needs CUDA |
+| `NEURON_IMAGEGEN_DTYPE` | `bf16` | `bf16` \| `f16` \| `f32` — storage dtype for the DiT + text encoder weights (the VAE always decodes fp32). `bf16` is the default: it is what the checkpoint ships (no conversion → the resident memory is the file size, ~27 GB) and the only half-precision dtype candle's **CPU** backend can matmul (bf16 gemms are widened to f32; there is no f16 CPU matmul). `f32` ≈ 54 GB |
 | `NEURON_IMAGEGEN_RESIDENCY` | `staged` | `staged` \| `cached` — how the three components share device memory. `staged` loads one at a time (the text encoder is dropped before the DiT loads), so the peak residency is ~17 GB at f16 instead of ~27 GB — the only way a 24 GB card can serve the model. `cached` keeps everything resident (faster; needs the memory) |
 
 ## Where the design specs live

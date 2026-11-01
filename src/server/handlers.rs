@@ -460,10 +460,14 @@ pub struct ImageDatum {
     pub seed: u64,
 }
 
-pub async fn images_generations(
-    State(state): State<ServerState>,
-    Json(payload): Json<ImagesGenerationsRequest>,
-) -> Result<Response, ServerError> {
+/// Translate the wire request into the runtime parameters.
+///
+/// Pure so it can be tested without a model: the validation rules
+/// (size parsing, the `b64_json`-only response format, the prompt
+/// and the diffusion knobs) all live here.
+pub fn images_request_to_params(
+    payload: &ImagesGenerationsRequest,
+) -> Result<(String, crate::imagegen::ImageGenParams), ServerError> {
     if payload.prompt.is_empty() {
         return Err(ServerError::BadRequest("prompt cannot be empty".to_string()));
     }
@@ -484,16 +488,6 @@ pub async fn images_generations(
         })?,
         None => (1024, 1024),
     };
-
-    let model = payload.model.as_deref().unwrap_or("moss-image");
-    let rt = match state.imagegen_registry.runtime_for(model).await {
-        Ok(rt) => rt,
-        Err(e) if e.error_type == "model_not_registered" => {
-            return Err(ServerError::BadRequest(e.message));
-        }
-        Err(_) => state.imagegen.clone(),
-    };
-
     let params = crate::imagegen::ImageGenParams {
         prompt: payload.prompt.clone(),
         negative_prompt: payload.negative_prompt.clone(),
@@ -507,6 +501,22 @@ pub async fn images_generations(
     params
         .validate()
         .map_err(|e| ServerError::BadRequest(e.message))?;
+    let model = payload.model.clone().unwrap_or_else(|| "moss-image".to_string());
+    Ok((model, params))
+}
+
+pub async fn images_generations(
+    State(state): State<ServerState>,
+    Json(payload): Json<ImagesGenerationsRequest>,
+) -> Result<Response, ServerError> {
+    let (model, params) = images_request_to_params(&payload)?;
+    let rt = match state.imagegen_registry.runtime_for(&model).await {
+        Ok(rt) => rt,
+        Err(e) if e.error_type == "model_not_registered" => {
+            return Err(ServerError::BadRequest(e.message));
+        }
+        Err(_) => state.imagegen.clone(),
+    };
 
     let mut data = Vec::with_capacity(payload.n);
     for _ in 0..payload.n {

@@ -823,6 +823,12 @@ async fn run_chronos2(
 ) -> Result<Timing, String> {
     let dir = dir.ok_or_else(|| "weights not found on this machine".to_string())?;
     unsafe { std::env::set_var("NEURON_CHRONOS2_MODEL_PATH", &dir) };
+    // env_discovery() resolves `<CHRONOS2_DEFAULT_MODEL>` under the path
+    // above — with the default "chronos-bolt-small" the id mismatches the
+    // downloaded chronos-t5-small directory and the registry falls back
+    // to the stub (which answers NotImplemented → the row reports the
+    // misleading "Sprint 3 skeleton" note; found 2026-10-31).
+    unsafe { std::env::set_var("NEURON_CHRONOS2_DEFAULT_MODEL", model_id) };
 
     let mut registry = neuron_lib::chronos2::Chronos2Registry::new();
     registry
@@ -1025,6 +1031,12 @@ async fn main() {
         gpu_description()
     );
 
+    // Capabilities to exclude (e.g. re-running only the tail of a sweep
+    // that OOMed partway through — llm rows dominate resident memory).
+    let skip: Vec<String> = env("NEURON_BENCH_SKIP")
+        .map(|v| v.split(',').map(|s| s.trim().to_string()).collect())
+        .unwrap_or_default();
+
     let caps = neuron_lib::capabilities::catalog::default_capabilities();
     let mut rows: Vec<Row> = Vec::new();
 
@@ -1037,6 +1049,9 @@ async fn main() {
         // The capability is derived from the modality set + engine so the
         // table groups sensibly.
         let capability = capability_of(&cap);
+        if skip.iter().any(|s| s == &capability) {
+            continue;
+        }
 
         let dir = resolve_dir(&capability, &engine, &model_id);
         let device = device_for(&capability, device);

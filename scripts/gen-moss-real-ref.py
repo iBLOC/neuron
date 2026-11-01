@@ -210,8 +210,17 @@ def gen_text_encoder(model_dir: str, out_dir: str, device: str, dtype: torch.dty
     )
 
 
-def gen_dit(model_dir: str, out_dir: str, device: str, dtype: torch.dtype) -> None:
-    """The DiT on the real checkpoint, fed the text encoder's outputs."""
+def gen_dit(
+    model_dir: str, out_dir: str, device: str, dtype: torch.dtype, layers: int = 0
+) -> None:
+    """The DiT on the real checkpoint.
+
+    The text conditioning is **synthetic** (a deterministic tensor),
+    not the text encoder's output: the text encoder is 16.8 GB and
+    does not fit a CPU host, while the DiT's own forward is what this
+    reference covers. The same synthetic tensor is fed to neuron's
+    port, so the comparison isolates the DiT.
+    """
     module = load_upstream_pipeline(model_dir)
     print("loading the transformer...", flush=True)
     dit = (
@@ -221,31 +230,37 @@ def gen_dit(model_dir: str, out_dir: str, device: str, dtype: torch.dtype) -> No
         .to(device)
         .eval()
     )
+    if layers:
+        # Run only the first N blocks — the same truncation on neuron's
+        # side. With a handful of blocks the bf16 noise is ~1 %, so a
+        # large divergence means the port is wrong rather than noisy.
+        dit.layers = torch.nn.ModuleList(list(dit.layers)[:layers])
+        print(f"truncated to {len(dit.layers)} blocks", flush=True)
     # A deterministic latent (no RNG: the fixture must be reproducible).
-    h = w = 32
+    # 8x8 → 64 latent tokens: the CPU reference and neuron's port both
+    # run this in bf16, where candle widens every gemm to f32 — a
+    # 1024-token latent would take tens of minutes on a CPU.
+    h = w = 8
     latent_channels = dit.config.latent_channels
     latents = deterministic((1, latent_channels, h, w), 0.37).to(
         device=device, dtype=dtype
     )
-    # The text encoder's real hidden states (the same file the
-    # text-encoder reference writes).
-    ref_path = os.path.join(out_dir, "text_encoder_ref.safetensors")
-    if not os.path.exists(ref_path):
-        raise SystemExit(f"{ref_path} is missing — run the text encoder first")
-    from safetensors.torch import load_file
-
-    hidden = load_file(ref_path)["hidden"].to(device=device, dtype=dtype)
-    mask = torch.ones(hidden.shape[:2], dtype=torch.bool, device=device)
+    # Deterministic text conditioning with the encoder's output width.
+    text_dim = dit.config.text_dim
+    encoder_states = deterministic((1, 12, text_dim), 0.83).to(
+        device=device, dtype=dtype
+    )
+    mask = torch.ones(encoder_states.shape[:2], dtype=torch.bool, device=device)
     timestep = 500.0
     with torch.no_grad():
-        out = dit(latents, timestep, hidden, mask).sample
+        out = dit(latents, timestep, encoder_states, mask).sample
     out_cpu = out.float().cpu()
     print(f"dit output: {tuple(out_cpu.shape)}", flush=True)
     save(
         os.path.join(out_dir, "dit_ref.safetensors"),
         {
             "latents": latents.float().cpu(),
-            "encoder_hidden_states": hidden.float().cpu(),
+            "encoder_hidden_states": encoder_states.float().cpu(),
             "output": out_cpu,
         },
         {
@@ -254,6 +269,7 @@ def gen_dit(model_dir: str, out_dir: str, device: str, dtype: torch.dtype) -> No
             "timestep": str(timestep),
             "dtype": str(dtype),
             "device": device,
+            "layers": str(len(dit.layers)),
         },
     )
 
@@ -277,9 +293,21 @@ def main() -> int:
     )
     parser.add_argument(
         "--dtype",
-        default="float16",
+        default="bfloat16",
         choices=["float16", "float32", "bfloat16"],
-        help="compute dtype for the reference (default: %(default)s)",
+        help=(
+            "compute dtype for the reference (default: %(default)s). bfloat16 is "
+            "what the checkpoint ships and what neuron's CPU backend can run "
+            "(candle widens bf16 gemms to f32 internally; it has no f16 CPU "
+            "matmul)"
+        ),
+    )
+    parser.add_argument(
+        "--layers",
+        type=int,
+        default=0,
+        help="run only the first N DiT blocks (0 = all); a small N makes the "
+        "bf16 comparison cheap and separates a wrong port from bf16 noise",
     )
     parser.add_argument(
         "--only",
@@ -307,7 +335,7 @@ def main() -> int:
         gen_text_encoder(model_dir, args.out, device, dtype)
     if args.only in (None, "dit"):
         print("== DiT reference ==", flush=True)
-        gen_dit(model_dir, args.out, device, dtype)
+        gen_dit(model_dir, args.out, device, dtype, args.layers)
 
     print()
     print("reference outputs written to", os.path.abspath(args.out))

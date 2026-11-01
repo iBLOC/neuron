@@ -763,20 +763,42 @@ impl ServerState {
         // NEURON_IMAGEGEN_RUNTIME=moss-image registers the catalog id
         // "moss-image" (OpenMOSS MOSS-Image, 5B DiT + Qwen3.5 text
         // encoder + FLUX.2 decoder VAE, served on candle). The
-        // registered memory estimate covers the f16-materialized
-        // weights (~27 GB); NEURON_IMAGEGEN_DTYPE=f32 roughly doubles
-        // it.
+        // registered memory estimate is the peak residency (~18 GB in
+        // the staged mode, ~28 GB when everything stays resident).
         let mut imagegen_registry = crate::imagegen::ImageGenRuntimeRegistry::new(config_arc.clone());
         match crate::config::env_var("IMAGEGEN_RUNTIME").as_deref() {
             Some("moss-image") | Some("moss_image") | Some("mossimage") | Some("moss") => {
                 #[cfg(feature = "candle")]
                 {
-                    let _ = imagegen_registry.register(
+                    // The estimate is the **peak residency**, not the
+                    // total: in the staged mode only one component is
+                    // resident at a time (the text encoder is ~17 GB
+                    // at bf16, the DiT ~10 GB), so the model fits a
+                    // 24 GB card. The cached mode needs all of it
+                    // (~27 GB) and is refused on smaller cards.
+                    // `cached` keeps every component resident (~28 GB);
+                    // the default staged mode peaks at one component
+                    // (~18 GB) and fits a 24 GB card.
+                    let cached = crate::config::env_var("IMAGEGEN_RESIDENCY")
+                        .as_deref()
+                        .map(|v| v.eq_ignore_ascii_case("cached"))
+                        .unwrap_or(false);
+                    let estimate = if cached {
+                        28_000_000_000
+                    } else {
+                        18_000_000_000
+                    };
+                    if let Err(e) = imagegen_registry.register(
                         "moss-image".into(),
                         crate::imagegen::ImageGenImpl::MossImage,
                         device.clone(),
-                        28_000_000_000,
-                    );
+                        estimate,
+                    ) {
+                        eprintln!(concat!(
+                            "[neuron] imagegen: registering moss-image failed ",
+                            "(estimate {} bytes, device {:?}): {}"
+                        ), estimate, device, e);
+                    }
                 }
                 #[cfg(not(feature = "candle"))]
                 {
@@ -1113,43 +1135,43 @@ impl ServerState {
     ) -> Result<(), crate::llm::NeuronError> {
         match capability {
             "llm" => {
-                let mut reg = self.llm_registry_lock.lock().await;
+                let reg = self.llm_registry_lock.lock().await;
                 let impl_id = LlmImpl::parse(&engine)
                     .map_err(|e| crate::llm::NeuronError::new(format!("Invalid LLM engine: {e}")))?;
                 reg.register(model_id, impl_id, device, required_memory_bytes)?;
             }
             "tts" => {
-                let mut reg = self.tts_registry_lock.lock().await;
+                let reg = self.tts_registry_lock.lock().await;
                 let impl_id = crate::tts::TtsImpl::parse(&engine)
                     .map_err(|e| crate::llm::NeuronError::new(format!("Invalid TTS engine: {e}")))?;
                 reg.register(model_id, impl_id, device, required_memory_bytes)?;
             }
             "asr" => {
-                let mut reg = self.asr_registry_lock.lock().await;
+                let reg = self.asr_registry_lock.lock().await;
                 let impl_id = crate::asr::AsrImpl::parse(&engine)
                     .map_err(|e| crate::llm::NeuronError::new(format!("Invalid ASR engine: {e}")))?;
                 reg.register(model_id, impl_id, device, required_memory_bytes)?;
             }
             "rerank" => {
-                let mut reg = self.rerank_registry_lock.lock().await;
+                let reg = self.rerank_registry_lock.lock().await;
                 let impl_id = crate::rerank::RerankImpl::parse(&engine)
                     .map_err(|e| crate::llm::NeuronError::new(format!("Invalid rerank engine: {e}")))?;
                 reg.register(model_id, impl_id, device, required_memory_bytes)?;
             }
             "embedding" => {
-                let mut reg = self.embedding_registry_lock.lock().await;
+                let reg = self.embedding_registry_lock.lock().await;
                 let impl_id = crate::embedding::EmbeddingImpl::parse(&engine)
                     .map_err(|e| crate::llm::NeuronError::new(format!("Invalid embedding engine: {e}")))?;
                 reg.register(model_id, impl_id, device, required_memory_bytes)?;
             }
             "vision" => {
-                let mut reg = self.vision_registry_lock.lock().await;
+                let reg = self.vision_registry_lock.lock().await;
                 let impl_id = crate::vision::VisionImpl::parse(&engine)
                     .map_err(|e| crate::llm::NeuronError::new(format!("Invalid vision engine: {e}")))?;
                 reg.register(model_id, impl_id, device, required_memory_bytes)?;
             }
             "ocr" => {
-                let mut reg = self.ocr_registry_lock.lock().await;
+                let reg = self.ocr_registry_lock.lock().await;
                 let impl_id = crate::ocr::OcrImpl::parse(&engine)
                     .map_err(|e| crate::llm::NeuronError::new(format!("Invalid OCR engine: {e}")))?;
                 reg.register(model_id, impl_id, device, required_memory_bytes)?;
@@ -1161,7 +1183,7 @@ impl ServerState {
             "decision" => {
                 #[cfg(feature = "tract")]
                 {
-                    let mut reg = self.decision_registry_lock.lock().await;
+                    let reg = self.decision_registry_lock.lock().await;
                     let impl_id = crate::decision::DecisionImpl::parse(&engine)
                         .map_err(|e| {
                             crate::llm::NeuronError::new(format!("Invalid Decision engine: {e}"))
@@ -1180,7 +1202,7 @@ impl ServerState {
                 }
             }
             "imagegen" => {
-                let mut reg = self.imagegen_registry_lock.lock().await;
+                let reg = self.imagegen_registry_lock.lock().await;
                 let impl_id = crate::imagegen::ImageGenImpl::parse(&engine)
                     .map_err(|e| crate::llm::NeuronError::new(format!("Invalid imagegen engine: {e}")))?;
                 reg.register(model_id, impl_id, device, required_memory_bytes)?;

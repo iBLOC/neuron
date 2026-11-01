@@ -406,25 +406,38 @@ impl Chronos2Runtime for CandleChronos2Runtime {
 }
 
 fn parse_config(raw: &serde_json::Value) -> Result<Chronos2Config, CandleChronos2Error> {
-    let require_usize = |key: &'static str| -> Result<usize, CandleChronos2Error> {
-        raw.get(key)
-            .and_then(|v| v.as_u64())
-            .map(|v| v as usize)
-            .ok_or(CandleChronos2Error::ConfigField(key))
-    };
+    // The upstream Chronos-T5 releases use T5-style key names, not the
+    // flattened layout the port's synthetic fixtures write. Accept both
+    // (first match wins): max_seq_len ← n_positions, n_enc ← num_layers,
+    // n_dec ← num_decoder_layers, layer_norm_eps ← layer_norm_epsilon.
+    let require_usize_alias =
+        |keys: &[&'static str]| -> Result<usize, CandleChronos2Error> {
+            for key in keys {
+                if let Some(v) = raw.get(*key).and_then(|v| v.as_u64()) {
+                    return Ok(v as usize);
+                }
+            }
+            Err(CandleChronos2Error::ConfigField(keys[0]))
+        };
+    let require_f64_alias =
+        |keys: &[&'static str]| -> Result<f64, CandleChronos2Error> {
+            for key in keys {
+                if let Some(v) = raw.get(*key).and_then(|v| v.as_f64()) {
+                    return Ok(v);
+                }
+            }
+            Err(CandleChronos2Error::ConfigField(keys[0]))
+        };
 
     Ok(Chronos2Config {
-        d_model: require_usize("d_model")?,
-        num_heads: require_usize("num_heads")?,
-        d_ff: require_usize("d_ff")?,
-        vocab_size: require_usize("vocab_size")?,
-        max_seq_len: require_usize("max_seq_len")?,
-        n_enc: require_usize("n_enc")?,
-        n_dec: require_usize("n_dec")?,
-        layer_norm_eps: raw
-            .get("layer_norm_eps")
-            .and_then(|v| v.as_f64())
-            .unwrap_or(1e-6),
+        d_model: require_usize_alias(&["d_model"])?,
+        num_heads: require_usize_alias(&["num_heads"])?,
+        d_ff: require_usize_alias(&["d_ff"])?,
+        vocab_size: require_usize_alias(&["vocab_size"])?,
+        max_seq_len: require_usize_alias(&["max_seq_len", "n_positions"])?,
+        n_enc: require_usize_alias(&["n_enc", "num_layers"])?,
+        n_dec: require_usize_alias(&["n_dec", "num_decoder_layers"])?,
+        layer_norm_eps: require_f64_alias(&["layer_norm_eps", "layer_norm_epsilon"]).unwrap_or(1e-6),
         num_quantiles: raw
             .get("num_quantiles")
             .and_then(|v| v.as_u64())

@@ -9,14 +9,14 @@ use crate::config::{DeviceSelection, NeuronConfig, ResourceTracker};
 use crate::llm::{ChatRequest, ChatResponse, ChatChunk};
 
 pub struct LlmRuntimeRegistry {
-    pub registered: Vec<RegisteredLlm>,
+    pub registered: Arc<Mutex<Vec<RegisteredLlm>>>,
     // std (not tokio) mutex: the load itself runs *outside* the lock
     // and re-checks on insert, so this guard never crosses an await.
     // That is what lets `unload` be synchronous — the scheduler
     // evicts models from lease-Drop contexts, where blocking on a
     // tokio mutex is not allowed.
     loaded: Arc<std::sync::Mutex<HashMap<RegistryKey, Arc<dyn LlmRuntime>>>>,
-    resources: Mutex<ResourceTracker>,
+    resources: Arc<Mutex<ResourceTracker>>,
 }
 
 impl Clone for LlmRuntimeRegistry {
@@ -24,7 +24,7 @@ impl Clone for LlmRuntimeRegistry {
         Self {
             registered: self.registered.clone(),
             loaded: self.loaded.clone(),
-            resources: Mutex::new(ResourceTracker::default()),
+            resources: self.resources.clone(),
         }
     }
 }
@@ -32,14 +32,14 @@ impl Clone for LlmRuntimeRegistry {
 impl LlmRuntimeRegistry {
     pub fn new(_config: Arc<NeuronConfig>) -> Self {
         Self {
-            registered: Vec::new(),
+            registered: Arc::new(Mutex::new(Vec::new())),
             loaded: Arc::new(std::sync::Mutex::new(HashMap::new())),
-            resources: Mutex::new(ResourceTracker::default()),
+            resources: Arc::new(Mutex::new(ResourceTracker::default())),
         }
     }
 
     pub fn register(
-        &mut self,
+        &self,
         model_id: String,
         impl_id: LlmImpl,
         device: DeviceSelection,
@@ -59,7 +59,7 @@ impl LlmRuntimeRegistry {
         res.allocate(required_memory_bytes, &device)
             .map_err(NeuronError::new)?;
 
-        self.registered.push(RegisteredLlm {
+        self.registered.lock().unwrap().push(RegisteredLlm {
             model_id,
             impl_id,
             device,
@@ -69,13 +69,16 @@ impl LlmRuntimeRegistry {
     }
 
     pub async fn runtime_for(&self, model_id: &str) -> Result<Arc<dyn LlmRuntime>, NeuronError> {
-        let entry = self
-            .registered
-            .iter()
-            .find(|r| r.model_id == model_id)
-            .ok_or_else(|| {
+        let entry = {
+            let registered = self.registered.lock().unwrap();
+            registered
+                .iter()
+                .find(|r| r.model_id == model_id)
+                .cloned()
+                .ok_or_else(|| {
                 NeuronError::new(format!("ModelNotRegistered: {model_id}"))
-            })?;
+            })?
+        };
 
         let key = RegistryKey {
             model_id: entry.model_id.clone(),
@@ -173,7 +176,11 @@ impl LlmRuntimeRegistry {
     }
 
     pub fn is_registered(&self, model_id: &str) -> bool {
-        self.registered.iter().any(|r| r.model_id == model_id)
+        self.registered
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|r| r.model_id == model_id)
     }
 
     pub fn is_loaded(&self, model_id: &str) -> bool {
@@ -193,7 +200,12 @@ impl LlmRuntimeRegistry {
     }
 
     pub fn list_registered(&self) -> Vec<String> {
-        self.registered.iter().map(|r| r.model_id.clone()).collect()
+        self.registered
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|r| r.model_id.clone())
+            .collect()
     }
 
     /// Return a placeholder for the first registered model, or an
@@ -216,7 +228,8 @@ impl LlmRuntimeRegistry {
     /// stub just makes the failure explicit instead of panicking on
     /// startup.
     pub fn default_runtime(&self) -> Arc<dyn LlmRuntime> {
-        match self.registered.first() {
+        let first = self.registered.lock().unwrap().first().cloned();
+        match first {
             Some(_) => Arc::new(UnavailableLlmRuntime),
             None => Arc::new(UnavailableLlmRuntime),
         }

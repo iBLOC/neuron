@@ -32,7 +32,7 @@ Full report: [`target/model-bench-cuda.md`](https://github.com/iBLOC/neuron/blob
 (regenerate with `scripts\cuda-build.bat cargo bench --bench model_bench
 --features "candle,cuda,tract,ocr,sherpa,voxcpm,chronos2,litert"`).
 
-Measured: **41 cases — 17 measured, 24 skipped (weights absent), 0 failed.**
+Measured: **42 cases — 20 measured, 22 skipped (weights absent), 0 failed.**
 Each case runs inside its own tokio task, so an engine panic becomes a
 `failed` row naming the panic instead of killing the sweep.
 
@@ -40,50 +40,57 @@ Each case runs inside its own tokio task, so an engine panic becomes a
 
 | model | params | decode tok/s | p50 (ms) | notes |
 |---|---:|---:|---:|---|
-| minicpm5-1b | 1B | **62.4** | 1 099 | platform default; fastest of the set |
-| qwen3-0.6b | 0.6B | 60.7 | 1 131 | |
-| qwen2.5-0.5b | 0.5B | 54.5 | 538 | |
-| minicpm5-2b | 2.5B | 35.2 | 1 881 | |
+| minicpm5-1b | 1B | **69.9** | 969 | platform default; fastest of the set |
+| qwen3-0.6b | 0.6B | 68.7 | 998 | |
+| qwen2.5-0.5b | 0.5B | 54.8 | 544 | |
+| minicpm5-2b | 2.5B | 40.4 | 1 651 | |
 
 ### Embedding (candle, CUDA, 8 short texts)
 
 | model | texts/s | p50 (ms) |
 |---|---:|---:|
-| all-minilm-l6-v2 | 664.9 | 12.8 |
-| bge-base-en-v1.5 | 213.3 | 38.3 |
-| e5-base-v2 | 719.2 | 11.0 |
-| gte-base | 825.3 | 9.5 |
+| all-minilm-l6-v2 | 1156.8 | 7.4 |
+| bge-base-en-v1.5 | 348.4 | 23.8 |
+| e5-base-v2 | 377.2 | 20.9 |
+| gte-base | 638.0 | 12.6 |
 
 ### ASR (RTF = audio seconds per wall second; higher is better)
 
 | model | engine | RTF | p50 (ms) | notes |
 |---|---|---:|---:|---|
-| sensevoice-small | sherpa | 19.1 | 106 | int8 sherpa-onnx graph |
-| whisper-small | candle | 9.6 | 199 | CUDA |
-| whisper-tiny | candle | 15.8 | 126 | CUDA |
+| sensevoice-small | sherpa | 20.6 | 100 | int8 sherpa-onnx graph |
+| whisper-tiny | candle | 16.2 | 123 | CUDA |
+| whisper-small | candle | 11.2 | 175 | CUDA |
+| whisper-base | candle | 12.0 | 169 | CUDA |
 
 ### Vision / OCR (ONNX session path, tract executor, 640×640)
 
 | model | engine | images/s | p50 (ms) | notes |
 |---|---|---:|---:|---|
-| yolov11n | ort | 2.50 | 399 | |
-| yolov8n | ort | 2.44 | 412 | |
-| yolov8s | ort | 1.17 | 844 | |
-| ppocrv5-mobile | paddle-ocr | 1.82 | 533 | det+rec |
+| yolov11n | ort | 3.14 | 317 | |
+| yolov8n | ort | 2.99 | 321 | |
+| yolov8s | ort | 1.39 | 727 | |
+| ppocrv5-mobile | paddle-ocr | 2.17 | 468 | det+rec |
 
 ### Rerank (1 query × 8 documents)
 
 | model | engine | docs/s | p50 (ms) | notes |
 |---|---|---:|---:|---|
-| mxbai-rerank-base-v2 | mxbai | **37.0** | 215 | generative yes/no scorer; verified directionally against 4 docs (relevant → "1" ≈ 1.00, irrelevant → "0" ≈ 0.00) |
-| jina-reranker-base-v2 | jina | 15.7 | 509 | flash-checkpoint loads via key remap; direction verified (relevant 0.83, irrelevant ≈ 0.03) |
-| bge-reranker-base | candle | 16.2 | 495 | XLM-RoBERTa cross-encoder |
+| mxbai-rerank-base-v2 | mxbai | **40.1** | 201 | generative yes/no scorer; verified directionally against 4 docs (relevant → "1" ≈ 1.00, irrelevant → "0" ≈ 0.00) |
+| bge-reranker-base | candle | 16.5 | 473 | XLM-RoBERTa cross-encoder |
+| jina-reranker-base-v2 | jina | 16.3 | 472 | flash-checkpoint loads via key remap; direction verified (relevant 0.83, irrelevant ≈ 0.03) |
 
 ### TTS (burn, CPU)
 
 | model | engine | p50 (ms) | notes |
 |---|---|---:|---|
-| voxcpm2 | burn | 251 191 | **CPU** — the burn CUDA backend links `nccl.lib`, which the CUDA toolkit does not ship; also measured ~6× slower than the CPU on this GPU (per-patch decode is latency-bound) |
+| voxcpm2 | burn | 91 995 | **CPU** — the burn CUDA backend links `nccl.lib`, which the CUDA toolkit does not ship; also measured ~6× slower than the CPU on this GPU (per-patch decode is latency-bound) |
+
+### Chronos2 (forecast, 64-point series → 12 steps)
+
+| model | engine | status | notes |
+|---|---|---|---|
+| chronos-t5-small | candle | fails to load | the vendored port is a **different architecture** from the upstream release: upstream ships Google's vanilla T5 (`shared.weight`, `SelfAttention.{q,k,v,o}`, `DenseReluDense.wi/wo`, LayerNorm, `relative_attention_bias`) plus the MeanScaleUniformBins tokenizer, while the port expects a RmsNorm-based custom naming (`token_emb`, `self_q`, `ffn_up`, …). Unlike the jina reranker this is NOT key-remappable — serving the upstream release needs a real T5 port. `load()` names the missing tensor (`token_emb.weight`). |
 
 ::: warning What this sweep found
 Building the harness surfaced **three real bugs**, all fixed:

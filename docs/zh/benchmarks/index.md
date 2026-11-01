@@ -27,7 +27,7 @@ neuron 各推理路径的实测速度、延迟、内存与精度数据 —— �
 (用 `scripts\cuda-build.bat cargo bench --bench model_bench
 --features "candle,cuda,tract,ocr,sherpa,voxcpm,chronos2,litert"` 重新生成)。
 
-实测:**41 个用例 —— 17 个测出数据,24 个跳过(缺权重),0 个失败。**
+实测:**42 个用例 —— 20 个测出数据,22 个跳过(缺权重),0 个失败。**
 每个用例跑在独立的 tokio task 里,引擎 panic 会变成一行 `failed` 并附上
 panic 内容,不会杀掉整个扫描。
 
@@ -35,50 +35,57 @@ panic 内容,不会杀掉整个扫描。
 
 | 模型 | 参数量 | decode tok/s | p50 (ms) | 备注 |
 |---|---:|---:|---:|---|
-| minicpm5-1b | 1B | **62.4** | 1 099 | 平台默认;本组最快 |
-| qwen3-0.6b | 0.6B | 60.7 | 1 131 | |
-| qwen2.5-0.5b | 0.5B | 54.5 | 538 | |
-| minicpm5-2b | 2.5B | 35.2 | 1 881 | |
+| minicpm5-1b | 1B | **69.9** | 969 | 平台默认;本组最快 |
+| qwen3-0.6b | 0.6B | 68.7 | 998 | |
+| qwen2.5-0.5b | 0.5B | 54.8 | 544 | |
+| minicpm5-2b | 2.5B | 40.4 | 1 651 | |
 
 ### Embedding(candle,CUDA,8 条短文本)
 
 | 模型 | texts/s | p50 (ms) |
 |---|---:|---:|
-| all-minilm-l6-v2 | 664.9 | 12.8 |
-| bge-base-en-v1.5 | 213.3 | 38.3 |
-| e5-base-v2 | 719.2 | 11.0 |
-| gte-base | 825.3 | 9.5 |
+| all-minilm-l6-v2 | 1156.8 | 7.4 |
+| bge-base-en-v1.5 | 348.4 | 23.8 |
+| e5-base-v2 | 377.2 | 20.9 |
+| gte-base | 638.0 | 12.6 |
 
 ### ASR(RTF = 音频秒数 / 墙钟秒数,越大越好)
 
 | 模型 | 引擎 | RTF | p50 (ms) | 备注 |
 |---|---|---:|---:|---|
-| sensevoice-small | sherpa | 19.1 | 106 | int8 sherpa-onnx 图 |
-| whisper-small | candle | 9.6 | 199 | CUDA |
-| whisper-tiny | candle | 15.8 | 126 | CUDA |
+| sensevoice-small | sherpa | 20.6 | 100 | int8 sherpa-onnx 图 |
+| whisper-tiny | candle | 16.2 | 123 | CUDA |
+| whisper-small | candle | 11.2 | 175 | CUDA |
+| whisper-base | candle | 12.0 | 169 | CUDA |
 
 ### Vision / OCR(ONNX 会话路径,tract 执行器,640×640)
 
 | 模型 | 引擎 | images/s | p50 (ms) | 备注 |
 |---|---|---:|---:|---|
-| yolov11n | ort | 2.50 | 399 | |
-| yolov8n | ort | 2.44 | 412 | |
-| yolov8s | ort | 1.17 | 844 | |
-| ppocrv5-mobile | paddle-ocr | 1.82 | 533 | det+rec |
+| yolov11n | ort | 3.14 | 317 | |
+| yolov8n | ort | 2.99 | 321 | |
+| yolov8s | ort | 1.39 | 727 | |
+| ppocrv5-mobile | paddle-ocr | 2.17 | 468 | det+rec |
 
 ### Rerank(1 query × 8 documents)
 
 | 模型 | 引擎 | docs/s | p50 (ms) | 备注 |
 |---|---|---:|---:|---|
-| mxbai-rerank-base-v2 | mxbai | **37.0** | 215 | 生成式 yes/no 打分器;4 篇文档方向性验证通过(相关 → "1" ≈ 1.00,不相关 → "0" ≈ 0.00) |
-| jina-reranker-base-v2 | jina | 15.7 | 509 | flash checkpoint 经键重映射加载;方向已验证(相关 0.83,不相关 ≈ 0.03) |
-| bge-reranker-base | candle | 16.2 | 495 | XLM-RoBERTa 交叉编码器 |
+| mxbai-rerank-base-v2 | mxbai | **40.1** | 201 | 生成式 yes/no 打分器;4 篇文档方向性验证通过(相关 → "1" ≈ 1.00,不相关 → "0" ≈ 0.00) |
+| bge-reranker-base | candle | 16.5 | 473 | XLM-RoBERTa 交叉编码器 |
+| jina-reranker-base-v2 | jina | 16.3 | 472 | flash checkpoint 经键重映射加载;方向已验证(相关 0.83,不相关 ≈ 0.03) |
 
 ### TTS(burn,CPU)
 
 | 模型 | 引擎 | p50 (ms) | 备注 |
 |---|---|---:|---|
-| voxcpm2 | burn | 251 191 | **CPU** —— burn 的 CUDA 后端要链 `nccl.lib`,而 CUDA toolkit 不带;而且实测在这张卡上比 CPU 还慢约 6 倍(逐 patch 解码是延迟瓶颈) |
+| voxcpm2 | burn | 91 995 | **CPU** —— burn 的 CUDA 后端要链 `nccl.lib`,而 CUDA toolkit 不带;而且实测在这张卡上比 CPU 还慢约 6 倍(逐 patch 解码是延迟瓶颈) |
+
+### Chronos2(预测,64 点序列 → 12 步)
+
+| 模型 | 引擎 | 状态 | 备注 |
+|---|---|---|---|
+| chronos-t5-small | candle | 加载失败 | vendored port 与上游 release **不是同一架构**:上游发的是 Google 原生 T5(`shared.weight`、`SelfAttention.{q,k,v,o}`、`DenseReluDense.wi/wo`、LayerNorm、`relative_attention_bias`)加 MeanScaleUniformBins tokenizer,而 port 期望另一套基于 RmsNorm 的自定义命名(`token_emb`、`self_q`、`ffn_up`…)。与 jina 不同,这**无法靠键重映射解决**——要服务上游 release 需要真正的 T5 移植。`load()` 会报出缺失张量名(`token_emb.weight`)。 |
 
 ::: warning 这轮扫描查出三个真 bug,均已修复
 1. **CUDA context 绑定在加载线程上。** `chat_stream` 把生成放在新起的

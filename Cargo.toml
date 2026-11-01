@@ -190,6 +190,11 @@ required-features = ["voxcpm"]
 name = "voxcpm2_stream_http_smoke"
 required-features = ["voxcpm"]
 
+# Probes loading a real Chronos2 checkpoint through the candle runtime.
+[[example]]
+name = "chronos2_load_probe"
+required-features = ["chronos2"]
+
 [features]
 default = ["candle"]
 candle = ["dep:candle", "dep:candle-nn", "dep:candle-transformers", "dep:tokenizers", "dep:image", "dep:base64", "dep:safetensors", "dep:wide"]

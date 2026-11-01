@@ -93,11 +93,17 @@ impl DitRmsNorm {
 
 impl Module for DitRmsNorm {
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
+        // The reference computes the norm in fp32, casts back to the
+        // input dtype and multiplies by the weight — in torch the
+        // multiply promotes, in candle it does not, so the weight is
+        // cast explicitly (a bf16 weight with an fp32 activation
+        // would otherwise be a dtype mismatch).
         let dtype = x.dtype();
         let xf = x.to_dtype(DType::F32)?;
         let var = xf.sqr()?.mean_keepdim(D::Minus1)?;
         let y = xf.broadcast_mul(&(var + 1e-6)?.powf(-0.5)?)?;
-        y.to_dtype(dtype)?.broadcast_mul(&self.weight)
+        let weight = self.weight.to_dtype(dtype)?;
+        y.to_dtype(dtype)?.broadcast_mul(&weight)
     }
 }
 
@@ -134,7 +140,9 @@ fn rotate_with_rope(x: &Tensor, rope: &Tensor) -> Result<Tensor> {
     let a = x.narrow(D::Minus1, 0, half)?;
     let b = x.narrow(D::Minus1, half, half)?;
     let rotated = Tensor::cat(&[&(b * -1.0)?, &a], D::Minus1)?;
-    x.broadcast_mul(&cos)? + rotated.broadcast_mul(&sin)?
+    // The CUDA matmul needs contiguous operands (the CPU backend
+    // tolerates the strided view this produces).
+    x.broadcast_mul(&cos)?.contiguous()? + rotated.broadcast_mul(&sin)?.contiguous()?
 }
 
 /// Scaled dot-product attention over `[B, H, T, hd]` with the softmax
@@ -630,6 +638,33 @@ mod tests {
         assert!(finite.iter().all(|v| v.is_finite()));
     }
 
+    /// The real checkpoint ships **bf16** weights, and the CPU
+    /// backend has no f16 matmul (it widens bf16 to f32 internally).
+    /// So a CPU-side real-weight run must work in bf16 — this test
+    /// pins that the whole forward survives the dtype.
+    #[test]
+    fn test_tiny_dit_forward_in_bf16() {
+        let dev = Device::Cpu;
+        let cfg = tiny_config();
+        let ts = tiny_weights(&cfg, &dev);
+        let vb = candle_compat::from_tensors(ts, DType::BF16, &dev);
+        let dit = MossDit::new(vb, cfg.clone()).expect("load tiny dit in bf16");
+
+        let latents = Tensor::randn(0f32, 1f32, (1, cfg.latent_channels, 8, 8), &dev)
+            .unwrap()
+            .to_dtype(DType::BF16)
+            .unwrap();
+        let text = Tensor::randn(0f32, 1f32, (1, 12, cfg.text_dim), &dev)
+            .unwrap()
+            .to_dtype(DType::BF16)
+            .unwrap();
+        let out = dit.forward(&latents, 500.0, &text, &[]).expect("bf16 forward");
+        assert_eq!(out.dims(), &[1, cfg.latent_channels, 8, 8]);
+        assert_eq!(out.dtype(), DType::F32, "the output is fp32 by contract");
+        let finite = out.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        assert!(finite.iter().all(|v| v.is_finite()));
+    }
+
     #[test]
     fn test_tiny_dit_skip_layer_changes_output() {
         let dev = Device::Cpu;
@@ -668,9 +703,6 @@ mod tests {
 
     #[test]
     fn test_rms_norm_divides_by_rms_not_multiplies() {
-        // Regression guard: an RMSNorm must SHRINK a large activation
-        // (x / rms(x)), not scale it up (x * rms(x)). Getting the
-        // direction wrong silently produced inf attention scores.
         let dev = Device::Cpu;
         let mut ts = std::collections::HashMap::new();
         ts.insert(

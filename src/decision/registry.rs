@@ -16,9 +16,9 @@ use crate::config::{DeviceSelection, NeuronConfig, ResourceTracker};
 use crate::llm::{ModelInfo, NeuronError};
 
 pub struct DecisionRuntimeRegistry {
-    pub registered: Vec<RegisteredDecision>,
+    pub registered: Arc<Mutex<Vec<RegisteredDecision>>>,
     loaded: Arc<tokio::sync::Mutex<HashMap<DecisionRegistryKey, Arc<dyn DecisionRuntime>>>>,
-    resources: Mutex<ResourceTracker>,
+    resources: Arc<Mutex<ResourceTracker>>,
 }
 
 impl Clone for DecisionRuntimeRegistry {
@@ -26,7 +26,7 @@ impl Clone for DecisionRuntimeRegistry {
         Self {
             registered: self.registered.clone(),
             loaded: self.loaded.clone(),
-            resources: Mutex::new(ResourceTracker::default()),
+            resources: self.resources.clone(),
         }
     }
 }
@@ -34,14 +34,14 @@ impl Clone for DecisionRuntimeRegistry {
 impl DecisionRuntimeRegistry {
     pub fn new(_config: Arc<NeuronConfig>) -> Self {
         Self {
-            registered: Vec::new(),
+            registered: Arc::new(Mutex::new(Vec::new())),
             loaded: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
-            resources: Mutex::new(ResourceTracker::default()),
+            resources: Arc::new(Mutex::new(ResourceTracker::default())),
         }
     }
 
     pub fn register(
-        &mut self,
+        &self,
         model_id: String,
         impl_id: DecisionImpl,
         device: DeviceSelection,
@@ -61,7 +61,7 @@ impl DecisionRuntimeRegistry {
         res.allocate(required_memory_bytes, &device)
             .map_err(NeuronError::new)?;
 
-        self.registered.push(RegisteredDecision {
+        self.registered.lock().unwrap().push(RegisteredDecision {
             model_id,
             impl_id,
             device,
@@ -72,11 +72,14 @@ impl DecisionRuntimeRegistry {
     }
 
     pub async fn runtime_for(&self, model_id: &str) -> Result<Arc<dyn DecisionRuntime>, NeuronError> {
-        let entry = self
-            .registered
-            .iter()
-            .find(|r| r.model_id == model_id)
-            .ok_or_else(|| NeuronError::new(format!("ModelNotRegistered: {model_id}")))?;
+        let entry = {
+            let registered = self.registered.lock().unwrap();
+            registered
+                .iter()
+                .find(|r| r.model_id == model_id)
+                .cloned()
+                .ok_or_else(|| NeuronError::new(format!("ModelNotRegistered: {model_id}")))?
+        };
 
         let key = DecisionRegistryKey {
             model_id: entry.model_id.clone(),
@@ -109,13 +112,20 @@ impl DecisionRuntimeRegistry {
     /// Look up where a registered model's prepped ONNX graph lives.
     pub fn model_path(&self, model_id: &str) -> Option<String> {
         self.registered
+            .lock()
+            .unwrap()
             .iter()
             .find(|r| r.model_id == model_id)
             .map(|r| r.model_path.clone())
     }
 
     pub fn list_registered(&self) -> Vec<String> {
-        self.registered.iter().map(|r| r.model_id.clone()).collect()
+        self.registered
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|r| r.model_id.clone())
+            .collect()
     }
 
     /// Enumerate the registered models without loading any of them.
@@ -126,6 +136,8 @@ impl DecisionRuntimeRegistry {
     /// the source of truth here.
     pub fn list_models(&self) -> Vec<ModelInfo> {
         self.registered
+            .lock()
+            .unwrap()
             .iter()
             .map(|r| ModelInfo::new(r.model_id.clone(), "decision"))
             .collect()
@@ -142,7 +154,8 @@ impl DecisionRuntimeRegistry {
     /// full rationale — the lazy load happens on `runtime_for`'s
     /// async path, which the HTTP handlers call.
     pub fn default_runtime(&self) -> Arc<dyn DecisionRuntime> {
-        match self.registered.first() {
+        let first = self.registered.lock().unwrap().first().cloned();
+        match first {
             Some(_) => Arc::new(UnavailableDecisionRuntime),
             None => Arc::new(UnavailableDecisionRuntime),
         }

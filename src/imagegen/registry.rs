@@ -14,7 +14,15 @@ use crate::llm::{ModelInfo, NeuronError};
 use crate::imagegen::ImageGenRuntime;
 
 pub struct ImageGenRuntimeRegistry {
-    pub registered: Vec<RegisteredImageGen>,
+    /// The registered models.
+    ///
+    /// Shared behind an `Arc<Mutex<_>>` so that a **clone** of the
+    /// registry sees the same list: `ServerState` keeps one copy for
+    /// the handlers and one inside the registration lock, and a model
+    /// registered at runtime must reach both. (The other capability
+    /// registries still copy their list on clone — see
+    /// `src/imagegen/registry_sharing_test.rs`.)
+    pub registered: Arc<Mutex<Vec<RegisteredImageGen>>>,
     loaded: Arc<tokio::sync::Mutex<HashMap<ImageGenRegistryKey, Arc<dyn ImageGenRuntime>>>>,
     resources: Mutex<ResourceTracker>,
 }
@@ -29,17 +37,47 @@ impl Clone for ImageGenRuntimeRegistry {
     }
 }
 
+/// The device's total memory in bytes, if it can be determined.
+///
+/// The shared `ResourceTracker` ships a hard-coded 8 GB GPU / 16 GB
+/// CPU budget — a placeholder from the 8 GB edge tier this crate
+/// started on. A 24 GB card therefore refuses to register a 17 GB
+/// model, and the refusal surfaces as a confusing
+/// "ModelNotRegistered". `nvidia-smi` is queried once at startup (the
+/// model puller already shells out to `huggingface-cli`, so the
+/// pattern is not new); a failure is not fatal — the default budget
+/// is used and the registration error says what to do.
+fn device_total_bytes(device: &DeviceSelection) -> Option<u64> {
+    match device {
+        DeviceSelection::Nvidia => {
+            let output = std::process::Command::new("nvidia-smi")
+                .args(["--query-gpu=memory.total", "--format=csv,noheader,nounits"])
+                .output()
+                .ok()?;
+            let text = String::from_utf8(output.stdout).ok()?;
+            let mib: u64 = text.lines().next()?.trim().parse().ok()?;
+            // Leave a slice for the CUDA context and the activations.
+            Some(mib * 1024 * 1024 / 10 * 9)
+        }
+        _ => None,
+    }
+}
+
 impl ImageGenRuntimeRegistry {
-    pub fn new(_config: Arc<NeuronConfig>) -> Self {
+    pub fn new(config: Arc<NeuronConfig>) -> Self {
+        let resources = match device_total_bytes(&config.device) {
+            Some(gpu) => ResourceTracker::new(16_000_000_000, gpu),
+            None => ResourceTracker::default(),
+        };
         Self {
-            registered: Vec::new(),
+            registered: Arc::new(Mutex::new(Vec::new())),
             loaded: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
-            resources: Mutex::new(ResourceTracker::default()),
+            resources: Mutex::new(resources),
         }
     }
 
     pub fn register(
-        &mut self,
+        &self,
         model_id: String,
         impl_id: ImageGenImpl,
         device: DeviceSelection,
@@ -58,7 +96,7 @@ impl ImageGenRuntimeRegistry {
         res.allocate(required_memory_bytes, &device)
             .map_err(NeuronError::new)?;
 
-        self.registered.push(RegisteredImageGen {
+        self.registered.lock().unwrap().push(RegisteredImageGen {
             model_id,
             impl_id,
             device,
@@ -71,11 +109,14 @@ impl ImageGenRuntimeRegistry {
         &self,
         model_id: &str,
     ) -> Result<Arc<dyn ImageGenRuntime>, NeuronError> {
-        let entry = self
-            .registered
-            .iter()
-            .find(|r| r.model_id == model_id)
-            .ok_or_else(|| NeuronError::model_not_registered(model_id))?;
+        let entry = {
+            let registered = self.registered.lock().unwrap();
+            registered
+                .iter()
+                .find(|r| r.model_id == model_id)
+                .cloned()
+                .ok_or_else(|| NeuronError::model_not_registered(model_id))?
+        };
 
         let key = ImageGenRegistryKey {
             model_id: entry.model_id.clone(),
@@ -98,6 +139,12 @@ impl ImageGenRuntimeRegistry {
                 loaded.insert(key, rt.clone());
                 return Ok(rt);
             }
+            #[cfg(test)]
+            ImageGenImpl::Mock => {
+                let rt: Arc<dyn ImageGenRuntime> = Arc::new(super::mock::MockImageGenRuntime::new());
+                loaded.insert(key, rt.clone());
+                return Ok(rt);
+            }
             #[allow(unreachable_patterns)]
             _ => Err(NeuronError::new(
                 "image generation requires building neuron with the candle feature".to_string(),
@@ -109,7 +156,8 @@ impl ImageGenRuntimeRegistry {
     /// first use. See [`crate::tts::registry`]'s lazy default for why
     /// the eager variant cannot work inside `ServerState::new`.
     pub fn lazy_default_runtime(self: &Arc<Self>) -> Arc<dyn ImageGenRuntime> {
-        match self.registered.first() {
+        let first = self.registered.lock().unwrap().first().cloned();
+        match first {
             Some(entry) => {
                 let model_id = entry.model_id.clone();
                 Arc::new(LazyImageGenRuntime {
@@ -123,7 +171,12 @@ impl ImageGenRuntimeRegistry {
     }
 
     pub fn list_registered(&self) -> Vec<String> {
-        self.registered.iter().map(|r| r.model_id.clone()).collect()
+        self.registered
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|r| r.model_id.clone())
+            .collect()
     }
 }
 

@@ -6,25 +6,38 @@
 //! `feature = "chronos2"` gate around the real candle-based
 //! implementation.
 //!
-//! ## Current status (2026-07-13, Sprint 3 first commit)
+//! ## Current status (2026-10-31)
 //!
-//! The first commit of the Sprint 3 chronos2 port lays down:
-//! - the trait + DTOs (no architecture implementation yet)
-//! - a `StubChronos2Runtime` that always returns
-//!   `NeuronError::not_implemented(...)` so the HTTP layer can
-//!   surface a clean 503 before the candle port is in place
-//! - the route `POST /v1/forecast` wired through the registry
-//! - env-var discovery (NEURON_CHRONOS2_RUNTIME, NEURON_CHRONOS2_MODEL_PATH)
-//! - unit tests covering request validation, state-machine flags,
-//!   and the not-implemented 503 path
+//! The trait + DTOs, the registry, the `POST /v1/forecast` route and a
+//! candle runtime (`CandleChronos2Runtime`, behind the `chronos2`
+//! feature) are all in place. The runtime loads a safetensors
+//! checkpoint, runs a forward pass and returns a quantile output head.
 //!
-//! ## TODO (next commits)
+//! **KNOWN GAP (found 2026-10-31 by `benches/model_bench.rs` on the
+//! real upstream checkpoint): the vendored port does NOT match the
+//! upstream Chronos-T5 architecture.** The upstream release
+//! (`amazon/chronos-t5-small`) ships Google's **vanilla T5** module
+//! tree — `shared.weight`, `encoder.block.N.layer.0.SelfAttention.{q,k,v,o}`,
+//! `DenseReluDense.wi/wo`, `layer_norm` (LayerNorm), plus
+//! `relative_attention_bias` — while the vendored port expects a
+//! different, RmsNorm-based naming (`token_emb`, `self_q`/`self_k`,
+//! `attn_norm`/`ffn_norm`, `ffn_up`/`ffn_down`). The checkpoint also
+//! needs the **MeanScaleUniformBins** tokenizer
+//! (`chronos_config.tokenizer_class` in config.json), which the port
+//! does not implement.
 //!
-//! Vendor a T5-style encoder/decoder port of Chronos2 in
-//! `src/chronos2/vendor/`, register an `CandleChronos2Runtime` that
-//! loads the safetensors weights and runs a forward pass returning
-//! a probability distribution over future values. The trait shape
-//! is stable so the rest of the wiring stays put.
+//! So the failure is NOT a key-remap away (unlike the jina reranker,
+//! where a remap WAS enough): the port is a different architecture.
+//! Serving the upstream release needs a real T5 port — encoder +
+//! decoder + relative attention bias + the bin tokenizer. Until then
+//! `load()` fails naming the missing tensor (`token_emb.weight`) and
+//! the registry surfaces that error verbatim instead of the old canned
+//! "port not vendored" note.
+//!
+//! The config parser now accepts BOTH the port's flattened key names
+//! and the upstream T5 names (`n_positions` → `max_seq_len`,
+//! `num_layers` → `n_enc`, `num_decoder_layers` → `n_dec`,
+//! `layer_norm_epsilon` → `layer_norm_eps`).
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -146,12 +159,27 @@ pub enum Chronos2Error {
 /// `feature = "chronos2"` build.
 pub struct StubChronos2Runtime {
     model_id: String,
+    /// Why the real runtime is unavailable (a failed checkpoint load, or
+    /// the feature being off). Surfaced verbatim by `forecast` so callers
+    /// see the ACTUAL reason instead of a canned "port not vendored"
+    /// note — that canned text was actively misleading once the port
+    /// landed: it told users to enable a feature that was already on
+    /// (found 2026-10-31 by the per-model bench).
+    load_error: Option<String>,
 }
 
 impl StubChronos2Runtime {
     pub fn new(model_id: impl Into<String>) -> Self {
         Self {
             model_id: model_id.into(),
+            load_error: None,
+        }
+    }
+
+    pub fn with_load_error(model_id: impl Into<String>, load_error: impl Into<String>) -> Self {
+        Self {
+            model_id: model_id.into(),
+            load_error: Some(load_error.into()),
         }
     }
 }
@@ -165,11 +193,15 @@ impl Chronos2Runtime for StubChronos2Runtime {
         &self,
         _request: ForecastRequest,
     ) -> Result<ForecastResponse, Chronos2Error> {
-        Err(Chronos2Error::NotImplemented(
-            "chronos2 candle port is not yet implemented; this is the Sprint 3 skeleton. \
+        Err(Chronos2Error::NotImplemented(match &self.load_error {
+            Some(err) => format!(
+                "chronos2 runtime unavailable for '{}': {err}",
+                self.model_id
+            ),
+            None => "chronos2 candle port is not yet implemented; this is the Sprint 3 skeleton. \
              Enable the `chronos2` cargo feature once the architecture is vendored."
                 .into(),
-        ))
+        }))
     }
 }
 

@@ -213,8 +213,10 @@ pub(super) fn chunk_gated_delta_rule(
         let m = lhs.dim(3)?;
         let k_ = lhs.dim(4)?;
         let n = rhs.dim(4)?;
-        let l = lhs.flatten(0, 2)?;
-        let r = rhs.flatten(0, 2)?;
+        // Contiguous: the CUDA matmul rejects the strided views that
+        // flatten/transpose produce (the CPU backend tolerates them).
+        let l = lhs.contiguous()?.flatten(0, 2)?;
+        let r = rhs.contiguous()?.flatten(0, 2)?;
         let out = l.matmul(&r)?;
         out.reshape((b, h, nc, m, n)).map_err(|_| {
             candle::Error::Msg(format!("bmm3 reshape {b3}x{m}x{k_}x{n}"))
@@ -294,13 +296,16 @@ pub(super) fn chunk_gated_delta_rule(
         let g_c = sel5(&g_cum)?; // [B,H,C]
         let decay_c = sel5(&decay)?; // [B,H,C,C]
 
-        let attn_c = q_c.matmul(&k_c.transpose(D::Minus1, D::Minus2)?.contiguous()?)?
+        let attn_c = q_c
+            .contiguous()?
+            .matmul(&k_c.transpose(D::Minus1, D::Minus2)?.contiguous()?)?
             .broadcast_mul(&decay_c)?;
         let kcd_c = sel5(&k_cumdecay)?; // [B,H,C,dk]
-        let v_prime = kcd_c.matmul(&state)?;
+        let v_prime = kcd_c.contiguous()?.matmul(&state)?;
         let v_new = (v_c - v_prime)?;
         let inter = q_c
             .broadcast_mul(&g_c.exp()?.unsqueeze(D::Minus1)?)?
+            .contiguous()?
             .matmul(&state)?;
         let out_c = (inter + attn_c.matmul(&v_new)?)?;
 
@@ -318,7 +323,7 @@ pub(super) fn chunk_gated_delta_rule(
             .broadcast_mul(&decay_to_end)?
             .transpose(D::Minus1, D::Minus2)?
             .contiguous()?
-            .matmul(&v_new)?;
+            .matmul(&v_new.contiguous()?)?;
         state = (state.broadcast_mul(&g_last_raw.exp()?.unsqueeze(D::Minus2)?)? + update)?;
 
         outs.push(out_c);
@@ -555,8 +560,11 @@ impl FullAttention {
             let pass = t.narrow(D::Minus1, rotary_dim, hd - rotary_dim)?;
             let rot_half = rot.chunk(2, D::Minus1)?;
             let rotated = Tensor::cat(&[&(&rot_half[1] * -1.0)?, &rot_half[0]], D::Minus1)?;
-            let out = (rot.broadcast_mul(&cos)? + rotated.broadcast_mul(&sin)?)?;
-            Tensor::cat(&[&out, &pass], D::Minus1)
+            // Contiguous: candle's CUDA matmul rejects the strided
+            // view this produces (the CPU backend tolerates it).
+            let out = (rot.broadcast_mul(&cos)?.contiguous()?
+                + rotated.broadcast_mul(&sin)?.contiguous()?)?;
+            Tensor::cat(&[&out, &pass], D::Minus1)?.contiguous()
         };
     let q = apply_rope(&q)?;
     let k = apply_rope(&k)?;
@@ -795,6 +803,25 @@ mod tests {
         let vals = hidden.flatten_all().unwrap().to_vec1::<f32>().unwrap();
         let bad = vals.iter().filter(|v| !v.is_finite()).count();
         assert_eq!(bad, 0, "{bad} non-finite outputs from the hybrid stack");
+    }
+
+    /// The hybrid stack must also survive the **bf16** dtype: the
+    /// real checkpoint ships bf16 weights, and candle (unlike torch)
+    /// does not promote mixed dtypes in a binary op.
+    #[test]
+    fn test_tiny_text_model_forward_in_bf16() {
+        let dev = candle::Device::Cpu;
+        let cfg = tiny_config();
+        let ts = tiny_weights(&cfg, &dev);
+        let vb = crate::candle_compat::from_tensors(ts, DType::BF16, &dev);
+        let model = Qwen35TextModel::new(vb, cfg).expect("build");
+        let ids: Vec<u32> = (0..80u32).map(|i| i % 512).collect();
+        let tokens = Tensor::from_vec(ids, 80, &dev).unwrap();
+        let hidden = model.forward_hidden(&tokens).expect("bf16 forward");
+        assert_eq!(hidden.dims(), &[1, 80, 64]);
+        let vals = hidden.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        let bad = vals.iter().filter(|v| !v.is_finite()).count();
+        assert_eq!(bad, 0, "{bad} non-finite outputs in bf16");
     }
 
     /// The GDN chunk kernel must be causal: appending tokens must not

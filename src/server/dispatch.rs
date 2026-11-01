@@ -245,7 +245,8 @@ async fn resolve_engine_legacy(
             Ok(rt) => return Ok(Arc::new(crate::engine::bridge::LlmRuntimeBridge::new(rt, model_id))),
             Err(e) => {
                 eprintln!("[neuron] llm fallback runtime_for({model_id:?}) failed: {e}");
-                if let Some(entry) = state.llm_registry.registered.first() {
+                let first = state.llm_registry.registered.lock().unwrap().first().cloned();
+                if let Some(entry) = first {
                     match state.llm_registry.runtime_for(&entry.model_id).await {
                         Ok(rt) => {
                             return Ok(Arc::new(crate::engine::bridge::LlmRuntimeBridge::new(
@@ -281,7 +282,8 @@ fn resolve_llm_target(
     if state.llm_registry.is_registered(requested) {
         return Ok(requested.to_string());
     }
-    if let Some(first) = state.llm_registry.registered.first() {
+    let first_entry = state.llm_registry.registered.lock().unwrap().first().cloned();
+    if let Some(first) = first_entry {
         eprintln!(
             "[neuron] scheduler: model {requested:?} not registered, serving first registered {:?}",
             first.model_id

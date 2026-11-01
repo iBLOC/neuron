@@ -129,16 +129,6 @@ impl Components {
     fn release_dit(&mut self) {
         self.dit = None;
     }
-
-    fn release_vae(&mut self) {
-        self.vae = None;
-    }
-
-    fn release_all(&mut self) {
-        self.release_text();
-        self.release_dit();
-        self.release_vae();
-    }
 }
 
 /// Render the prompt exactly as the reference does for a single user
@@ -219,13 +209,19 @@ fn map_device(device: &DeviceSelection) -> Result<Device, String> {
     }
 }
 
+/// The dtype the weights are materialized in.
+///
+/// **bf16 is the default** — it is what the checkpoint ships (so no
+/// conversion happens and the resident memory is the file size), and
+/// it is the only half-precision dtype candle's **CPU** backend can
+/// matmul (it widens bf16 gemms to f32 internally; there is no f16
+/// CPU matmul at all). f16 remains available for CUDA hosts that
+/// prefer it.
 fn parse_dtype() -> DType {
     match crate::config::env_var("IMAGEGEN_DTYPE").as_deref() {
         Some("f32") | Some("float32") => DType::F32,
-        // bf16 only makes sense on CUDA (candle CPU has no bf16
-        // matmul); default to f16 everywhere.
-        Some("bf16") | Some("bfloat16") => DType::BF16,
-        _ => DType::F16,
+        Some("f16") | Some("float16") => DType::F16,
+        _ => DType::BF16,
     }
 }
 
@@ -600,8 +596,6 @@ mod tests {
         assert!(components.vae.is_none());
         components.release_text();
         components.release_dit();
-        components.release_vae();
-        components.release_all();
     }
 
 
@@ -645,9 +639,18 @@ mod tests {
     }
 
     /// Default dtype resolution.
+    /// The default dtype is **bf16**: it is what the checkpoint
+    /// ships (no conversion → the resident memory is the file size)
+    /// and the only half-precision dtype candle's CPU backend can
+    /// matmul. f16 would make a CPU host fail at the first matmul.
     #[test]
-    fn test_default_dtype_is_f16() {
+    fn test_default_dtype_is_bf16() {
         unsafe { std::env::remove_var("NEURON_IMAGEGEN_DTYPE") };
+        assert_eq!(parse_dtype(), DType::BF16);
+        unsafe { std::env::set_var("NEURON_IMAGEGEN_DTYPE", "f32") };
+        assert_eq!(parse_dtype(), DType::F32);
+        unsafe { std::env::set_var("NEURON_IMAGEGEN_DTYPE", "f16") };
         assert_eq!(parse_dtype(), DType::F16);
+        unsafe { std::env::remove_var("NEURON_IMAGEGEN_DTYPE") };
     }
 }

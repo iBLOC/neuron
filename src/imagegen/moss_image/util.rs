@@ -39,10 +39,16 @@ pub fn attention_chunked(
     let t = q.dim(2)?;
     let mut outs = Vec::new();
     let mut start = 0;
+    // candle's CUDA matmul requires contiguous operands; the CPU
+    // backend tolerates strided ones. The transposes and narrows below
+    // produce strided views, so they are materialised here — without
+    // this the CUDA path fails with "matmul is only supported for
+    // contiguous tensors".
+    let k_t = k.transpose(2, 3)?.contiguous()?;
     while start < t {
         let len = ATTN_QUERY_BLOCK.min(t - start);
-        let qb = q.narrow(2, start, len)?;
-        let scores = qb.matmul(&k.transpose(2, 3)?)?.affine(scale, 0.0)?;
+        let qb = q.narrow(2, start, len)?.contiguous()?;
+        let scores = qb.matmul(&k_t)?.affine(scale, 0.0)?;
         let scores = scores.to_dtype(DType::F32)?;
         let scores = match mask {
             Some(mask) => {
@@ -52,7 +58,7 @@ pub fn attention_chunked(
             None => scores,
         };
         let probs = candle_nn::ops::softmax_last_dim(&scores)?.to_dtype(q.dtype())?;
-        outs.push(probs.matmul(v)?);
+        outs.push(probs.matmul(&v.contiguous()?)?);
         start += len;
     }
     Tensor::cat(&outs, 2)

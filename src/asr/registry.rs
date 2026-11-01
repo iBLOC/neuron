@@ -16,9 +16,9 @@ use crate::asr::TractSenseVoiceRuntime;
 use crate::asr::SherpaAsrRuntime;
 
 pub struct AsrRuntimeRegistry {
-    pub registered: Vec<RegisteredAsr>,
+    pub registered: Arc<Mutex<Vec<RegisteredAsr>>>,
     loaded: Arc<tokio::sync::Mutex<HashMap<AsrRegistryKey, Arc<dyn AsrRuntime>>>>,
-    resources: Mutex<ResourceTracker>,
+    resources: Arc<Mutex<ResourceTracker>>,
 }
 
 impl Clone for AsrRuntimeRegistry {
@@ -26,7 +26,7 @@ impl Clone for AsrRuntimeRegistry {
         Self {
             registered: self.registered.clone(),
             loaded: self.loaded.clone(),
-            resources: Mutex::new(ResourceTracker::default()),
+            resources: self.resources.clone(),
         }
     }
 }
@@ -34,14 +34,14 @@ impl Clone for AsrRuntimeRegistry {
 impl AsrRuntimeRegistry {
     pub fn new(_config: Arc<NeuronConfig>) -> Self {
         Self {
-            registered: Vec::new(),
+            registered: Arc::new(Mutex::new(Vec::new())),
             loaded: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
-            resources: Mutex::new(ResourceTracker::default()),
+            resources: Arc::new(Mutex::new(ResourceTracker::default())),
         }
     }
 
     pub fn register(
-        &mut self,
+        &self,
         model_id: String,
         impl_id: AsrImpl,
         device: DeviceSelection,
@@ -60,7 +60,7 @@ impl AsrRuntimeRegistry {
         res.allocate(required_memory_bytes, &device)
             .map_err(NeuronError::new)?;
 
-        self.registered.push(RegisteredAsr {
+        self.registered.lock().unwrap().push(RegisteredAsr {
             model_id,
             impl_id,
             device,
@@ -70,13 +70,16 @@ impl AsrRuntimeRegistry {
     }
 
     pub async fn runtime_for(&self, model_id: &str) -> Result<Arc<dyn AsrRuntime>, NeuronError> {
-        let entry = self
-            .registered
-            .iter()
-            .find(|r| r.model_id == model_id)
-            .ok_or_else(|| {
+        let entry = {
+            let registered = self.registered.lock().unwrap();
+            registered
+                .iter()
+                .find(|r| r.model_id == model_id)
+                .cloned()
+                .ok_or_else(|| {
                 NeuronError::new(format!("ModelNotRegistered: {model_id}"))
-            })?;
+            })?
+        };
 
         let key = AsrRegistryKey {
             model_id: entry.model_id.clone(),
@@ -124,11 +127,17 @@ impl AsrRuntimeRegistry {
     }
 
     pub fn list_registered(&self) -> Vec<String> {
-        self.registered.iter().map(|r| r.model_id.clone()).collect()
+        self.registered
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|r| r.model_id.clone())
+            .collect()
     }
 
     pub fn default_runtime(&self) -> Arc<dyn AsrRuntime> {
-        match self.registered.first() {
+        let first = self.registered.lock().unwrap().first().cloned();
+        match first {
             Some(entry) => {
                 let id = entry.model_id.clone();
                 match tokio::runtime::Handle::try_current() {

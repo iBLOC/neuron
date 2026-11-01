@@ -10,9 +10,9 @@ use crate::config::{DeviceSelection, NeuronConfig, ResourceTracker};
 use crate::llm::{ChatResult, ModelInfo, NeuronError};
 
 pub struct OcrRuntimeRegistry {
-    pub registered: Vec<RegisteredOcr>,
+    pub registered: Arc<Mutex<Vec<RegisteredOcr>>>,
     loaded: Arc<tokio::sync::Mutex<HashMap<OcrRegistryKey, Arc<dyn OcrRuntime>>>>,
-    resources: Mutex<ResourceTracker>,
+    resources: Arc<Mutex<ResourceTracker>>,
 }
 
 impl Clone for OcrRuntimeRegistry {
@@ -20,7 +20,7 @@ impl Clone for OcrRuntimeRegistry {
         Self {
             registered: self.registered.clone(),
             loaded: self.loaded.clone(),
-            resources: Mutex::new(ResourceTracker::default()),
+            resources: self.resources.clone(),
         }
     }
 }
@@ -28,14 +28,14 @@ impl Clone for OcrRuntimeRegistry {
 impl OcrRuntimeRegistry {
     pub fn new(_config: Arc<NeuronConfig>) -> Self {
         Self {
-            registered: Vec::new(),
+            registered: Arc::new(Mutex::new(Vec::new())),
             loaded: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
-            resources: Mutex::new(ResourceTracker::default()),
+            resources: Arc::new(Mutex::new(ResourceTracker::default())),
         }
     }
 
     pub fn register(
-        &mut self,
+        &self,
         model_id: String,
         impl_id: OcrImpl,
         device: DeviceSelection,
@@ -54,7 +54,7 @@ impl OcrRuntimeRegistry {
         res.allocate(required_memory_bytes, &device)
             .map_err(NeuronError::new)?;
 
-        self.registered.push(RegisteredOcr {
+        self.registered.lock().unwrap().push(RegisteredOcr {
             model_id,
             impl_id,
             device,
@@ -64,11 +64,14 @@ impl OcrRuntimeRegistry {
     }
 
     pub async fn runtime_for(&self, model_id: &str) -> Result<Arc<dyn OcrRuntime>, NeuronError> {
-        let entry = self
-            .registered
-            .iter()
-            .find(|r| r.model_id == model_id)
-            .ok_or_else(|| NeuronError::new(format!("ModelNotRegistered: {model_id}")))?;
+        let entry = {
+            let registered = self.registered.lock().unwrap();
+            registered
+                .iter()
+                .find(|r| r.model_id == model_id)
+                .cloned()
+                .ok_or_else(|| NeuronError::new(format!("ModelNotRegistered: {model_id}")))?
+        };
 
         let key = OcrRegistryKey {
             model_id: entry.model_id.clone(),
@@ -108,13 +111,20 @@ impl OcrRuntimeRegistry {
     }
 
     pub fn list_registered(&self) -> Vec<String> {
-        self.registered.iter().map(|r| r.model_id.clone()).collect()
+        self.registered
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|r| r.model_id.clone())
+            .collect()
     }
 
     /// Registered entries (not loaded instances), so a catalog listing never
     /// pays for a pipeline load. Same shape as the decision registry's.
     pub fn list_models(&self) -> Vec<ModelInfo> {
         self.registered
+            .lock()
+            .unwrap()
             .iter()
             .map(|r| ModelInfo::new(r.model_id.clone(), "ocr"))
             .collect()

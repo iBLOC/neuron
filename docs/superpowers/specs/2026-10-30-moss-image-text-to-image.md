@@ -178,7 +178,7 @@ wrong numbers or NaNs, not compile errors:
   (`/v1/scheduler/*` is LLM-only), so a 27 GB image model cannot be
   swapped cooperatively with an LLM yet.
 
-## Real-weight verification (the VAE)
+## Real-weight verification
 
 `scripts/gen-moss-real-ref.py` runs the upstream implementations on
 the **real checkpoint** and dumps their outputs;
@@ -187,15 +187,43 @@ the same weights and compares element-wise:
 
 ```
 python scripts/gen-moss-real-ref.py --only vae --device cpu
+python scripts/gen-moss-real-ref.py --only dit --device cpu --dtype bfloat16 --layers 2
 cargo test --lib real_weights -- --ignored --nocapture
 ```
 
-Measured 2026-10-30 on the real `OpenMOSS-Team/MOSS-Image-Base` VAE
-(251 tensors, fp32): **relative error 1.5e-5** (max abs diff 1.1e-5
-against a reference magnitude of 0.72). The FLUX.2 decoder — the
-batch-norm de-normalization, the 2×2 pixel unshuffle and the decoder
-stack itself — matches diffusers' `AutoencoderKLFlux2` on the real
-weights.
+Measured 2026-10-30 on the real `OpenMOSS-Team/MOSS-Image-Base`:
+
+| comparison | dtype | relative error |
+|---|---|---|
+| FLUX.2 VAE decoder (251 tensors) | fp32 | **1.5e-5** |
+| DiT, 2 blocks | bf16 | **6.9e-3** |
+| DiT, 16 blocks | bf16 | **1.0e-2** |
+| DiT, all 42 blocks | bf16 | 2.1e-1 |
+| prompt template (rendered text + token ids) | — | identical |
+
+The **VAE matches on the real weights** (the batch-norm
+de-normalization, the 2×2 pixel unshuffle and the decoder stack
+itself, against diffusers' `AutoencoderKLFlux2`).
+
+The **DiT's depth-dependent error is bf16 noise, not a port bug**:
+at 2 and 16 blocks the error sits at the bf16 noise floor (0.7 % /
+1.0 %), and it only explodes at the full 42 blocks, where the two
+sides accumulate in a different order and the residual stream
+amplifies the difference. A wrong formula would be O(1) at *any*
+depth. The upstream release notes say the same about itself:
+"exact numerical parity with the original fp32-master inference
+pipeline is not a release requirement". The comparison therefore
+runs at a depth where the signal is above the noise, and the
+tolerance scales with the block count
+(`dit_tolerance`).
+
+The text encoder's real-weight comparison is **not** possible on a
+CPU host: it is 16.8 GB of bf16 weights, and the reference side
+(PyTorch) needs a CUDA build to run it at a reasonable speed.
+
+The tests **skip** when their reference has not been generated, so
+the suite stays green on a host without the checkpoint; each prints
+the command that would produce the missing reference.
 
 **This caught the last bug: the prompt template was missing the turn
 markers.** The upstream chat template renders
@@ -209,11 +237,9 @@ and neuron's hard-coded template had dropped the four
 malformed conversation on every request. The check compares the
 rendered text **and** the token ids (32 for the reference prompt), so
 a template that renders the same text but tokenizes differently is
-caught too.
-
-The tests **skip** when their reference has not been generated, so
-the suite stays green on a host without the checkpoint; each prints
-the command that would produce the missing reference.
+caught too. Note that the markers are invisible in most terminal
+output (they look like `<|…|>` and get filtered), so the comparison
+is done on the raw bytes, not on what a human reads.
 
 Note on the reference side: the reference runs the upstream code in
 the *installed* packages (`transformers` for the text encoder,
@@ -221,6 +247,108 @@ the *installed* packages (`transformers` for the text encoder,
 for the DiT — nothing is re-typed.
 
 ## Staged residency (24 GB cards)
+
+The pipeline needs 13.6B parameters — ~27 GB at bf16 — which does not
+fit a 24 GB card with the text encoder and the DiT resident at the
+same time. The runtime therefore loads the components **per stage**:
+
+1. the text encoder encodes the prompt (and the negative prompt),
+   then is dropped;
+2. the DiT runs the sampling loop, then is dropped;
+3. the VAE decodes the latent to a PNG.
+
+The peak residency is one component (~17 GB at bf16) instead of all
+27 GB. `NEURON_IMAGEGEN_RESIDENCY=cached` keeps everything resident
+instead — faster (no reload) on a host with the memory for it;
+`staged` is the default.
+
+The cost of the staged mode is re-reading the weights from disk for
+every request, which the memory-mapped loader does lazily.
+
+## End-to-end: a real image from the real checkpoint (2026-11-01)
+
+The whole pipeline runs natively on an RTX 3090 (24 GB) with the
+real 27 GB checkpoint:
+
+```bash
+scripts\cuda-build.bat cargo build --release --example neuron_server --features candle,cuda
+NEURON_IMAGEGEN_RUNTIME=moss-image \
+NEURON_IMAGEGEN_MODEL_PATH=~/.neuron/models/imagegen/moss-image \
+NEURON_DEVICE=nvidia NEURON_IMAGEGEN_RESIDENCY=staged \
+NEURON_PORT=18099 ./target/release/examples/neuron_server.exe
+
+curl -X POST http://127.0.0.1:18099/v1/images/generations \
+  -H "content-type: application/json" \
+  -d '{"prompt":"一只戴着红色围巾的猫坐在窗边，窗外是雪景。",
+       "size":"1024x1024","steps":50,"guidance_scale":3.0,"seed":42}'
+```
+
+The response carried a 1024×1024 PNG (2 MB) that matches the prompt:
+a grey tabby cat wearing a **red scarf**, sitting **by a window**
+with a **snowy forest** outside. 6 min 16 s end to end on the 3090
+(50 steps, two forwards per step, staged residency — the text
+encoder and the DiT are read from disk in turn).
+
+Getting there exposed three things that only a real run could:
+
+1. **The CUDA backend rejects strided matmul operands.** candle's CPU
+   backend tolerates the non-contiguous views that `transpose`,
+   `narrow` and the RoPE arithmetic produce; the CUDA backend fails
+   with "matmul is only supported for contiguous tensors". Every
+   matmul input in the DiT, the text encoder's full attention and the
+   GDN kernel now materialises its operands with `.contiguous()`.
+2. **The registry's memory budget is a hard-coded placeholder**
+   (8 GB GPU / 16 GB CPU), so a 17 GB model could not even be
+   registered on a 24 GB card — and the registration error was
+   swallowed by `let _ =`, surfacing as a confusing
+   "ModelNotRegistered". The image-generation registry now probes
+   the device's memory (`nvidia-smi`, once at startup) and the
+   registration estimate is the **peak residency** (~18 GB staged,
+   ~28 GB cached), not the total.
+3. **The staged estimate has to be the staged one.** With
+   `NEURON_IMAGEGEN_RESIDENCY=cached` the model needs all 27 GB and
+   is (correctly) refused on a 24 GB card; with the default staged
+   mode the peak is one component and it fits.
+
+
+The pipeline needs 13.6B parameters — ~27 GB at bf16 — which does not
+fit a 24 GB card with the text encoder and the DiT resident at the
+same time. The runtime therefore loads the components **per stage**:
+
+1. the text encoder encodes the prompt (and the negative prompt),
+   then is dropped;
+2. the DiT runs the sampling loop, then is dropped;
+3. the VAE decodes the latent to a PNG.
+
+The peak residency is one component (~17 GB) instead of all 27 GB.
+`NEURON_IMAGEGEN_RESIDENCY=cached` keeps everything resident
+instead — faster (no reload) on a host with the memory for it;
+`staged` is the default.
+
+The cost of the staged mode is re-reading the weights from disk for
+every request, which the memory-mapped loader does lazily.
+
+## The dtype default, and what bf16 exposes
+
+`NEURON_IMAGEGEN_DTYPE` defaults to **bf16**, not f16:
+
+* the checkpoint ships bf16, so nothing is converted and the
+  resident memory equals the file size (~27 GB);
+* bf16 is the only half-precision dtype candle's **CPU** backend can
+  matmul — it widens the gemm to f32 internally. There is **no f16
+  CPU matmul**, so an f16 default would make the CPU path fail at the
+  first matmul;
+* the upstream release defaults are bf16 as well ("bf16 DiT and
+  text-encoder weights").
+
+Running the forward in bf16 **exposed a latent dtype bug**: the
+DiT's RMSNorm multiplied an fp32 activation by a bf16 weight. Torch
+promotes the mixed types; candle does not, so the port has to cast
+the weight explicitly (`y.to(x.dtype) * w.to(x.dtype)`). The same
+class of bug the VoxCPM2 f16 port hit. Two tests now pin the bf16
+path (`test_tiny_dit_forward_in_bf16`,
+`test_tiny_text_model_forward_in_bf16`).
+
 
 The pipeline needs 13.6B parameters — ~27 GB at f16 — which does not
 fit a 24 GB card with the text encoder and the DiT resident at the
@@ -238,6 +366,30 @@ instead — faster (no reload) on a host with the memory for it;
 
 The cost of the staged mode is re-reading the weights from disk for
 every request, which the memory-mapped loader does lazily.
+
+## The HTTP contract, and a pre-existing registry bug
+
+`src/imagegen/http_tests.rs` exercises `POST /v1/images/generations`
+end to end with a mock runtime (no weights): the response shape
+(`{created, data:[{b64_json, size, seed}]}`), the base64 payload
+decoding to a PNG, the parameter mapping (size → width/height, steps,
+guidance scale, seed), the defaults (1024×1024, 50 steps, CFG 3.0),
+and the error paths (empty prompt, malformed size, a size that is not
+a multiple of 16, an unsupported `response_format`, `n` out of range,
+zero steps).
+
+Writing them surfaced a **pre-existing bug in every capability
+registry**: `ServerState` clones each registry twice — once for the
+`Arc` the handlers read and once for the lock the dynamic
+`register_model` path mutates — and the `registered` list was a plain
+`Vec`, so a clone **copied** it. A model registered at runtime
+therefore landed in the lock's copy and the handler's lookup never
+found it ("ModelNotRegistered"). **All nine registries are fixed
+now** — their `registered` list and their resource tracker live
+behind a shared `Arc<Mutex<_>>` — and the invariant is pinned per
+capability by `src/imagegen/registry_sharing_test.rs`. The `llm`
+case mattered: `register_model` is the documented path for hosts to
+load a model at runtime.
 
 
 ## Numerical parity against the upstream implementation

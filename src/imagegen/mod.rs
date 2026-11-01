@@ -16,6 +16,13 @@ pub mod moss_image;
 #[cfg(feature = "candle")]
 pub use moss_image::MossImageRuntime;
 
+#[cfg(test)]
+mod http_tests;
+#[cfg(test)]
+pub mod mock;
+#[cfg(test)]
+mod registry_sharing_test;
+
 pub mod registry;
 pub use registry::ImageGenRuntimeRegistry;
 
@@ -32,6 +39,10 @@ use crate::llm::{ChatResult, ModelInfo, NeuronError};
 pub enum ImageGenImpl {
     #[cfg(feature = "candle")]
     MossImage,
+    /// A test-only runtime that returns a fixed PNG — it lets the
+    /// HTTP contract be exercised without the 27 GB checkpoint.
+    #[cfg(test)]
+    Mock,
 }
 
 impl ImageGenImpl {
@@ -39,6 +50,8 @@ impl ImageGenImpl {
         match self {
             #[cfg(feature = "candle")]
             Self::MossImage => "moss-image",
+            #[cfg(test)]
+            Self::Mock => "mock",
             #[allow(unreachable_patterns)]
             _ => unreachable!("no ImageGenImpl variant at runtime"),
         }
@@ -48,6 +61,8 @@ impl ImageGenImpl {
         match s {
             #[cfg(feature = "candle")]
             "moss-image" | "moss_image" | "mossimage" | "moss" => Ok(Self::MossImage),
+            #[cfg(test)]
+            "mock" => Ok(Self::Mock),
             other => Err(format!("unknown ImageGenImpl: {other}")),
         }
     }
