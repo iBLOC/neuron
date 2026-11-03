@@ -21,6 +21,7 @@ neuron 支持 **3 个 ML 框架**以及**每个框架的多个实现**，覆盖�
 | Rerank | candle (BGE/mxbai/jina) | `candle` | ✅ | XLM-RoBERTa 交叉编码器 |
 | Rerank | cohere | `candle`（默认） | — | Cohere `/v1/rerank` HTTP 代理 |
 | Embedding | candle (MiniLM) | `candle` | ✅ | MiniLM BERT（经 `BatchLongest` 填充批量执行，base64 输出） |
+| Embedding | gemma2 (EmbeddingGemma 2) | `gemma2` | ✅ | vendor 的双向 Gemma 塔 + 逐层嵌入（PLE）、双 RoPE、768 维 MRL 输出;OpenAI `dimensions` 截断 + 重归一化。见 `docs/superpowers/specs/2026-11-02-embeddinggemma2.md`。 |
 | Vision | ort (YOLOv8 / YOLO11 / RT-DETR / DETR / RF-DETR) | `ort` | — | ONNX 会话路径；执行器是 **tract**（纯 Rust，`--features tract`），`ort` 这个 Cargo feature 不影响这条路径 |
 | Vision | candle (YOLOv8 近似实现) | `candle` | — | 缺少 PAN-FPN neck 的 CSPDarknet 近似实现；无法消费 Ultralytics 导出文件，且拒绝用未训练权重运行——检测请走上面的 ONNX 路径 |
 | Chronos2 | candle | `chronos2` | — | ✅ 2026-07-19 落地：vendored T5 编码器 + 解码器 + 线性输出头，`CandleChronos2Runtime`（844 行，19 个测试） |
@@ -132,7 +133,8 @@ curl -X POST http://localhost:8083/v1/chat/completions \
 
 ### Embedding
 
-- **candle (MiniLM)** 是唯一引擎。通用嵌入请用 `all-MiniLM-L6-v2`（384 维，Apache-2.0）。经 `NEURON_EMBEDDING_MODEL_PATH` 可换成其他 MiniLM 家族模型。
+- **candle (MiniLM)**：384 维，Apache-2.0，通用嵌入。经 `NEURON_EMBEDDING_MODEL_PATH` 可换成其他 MiniLM 家族（BERT 架构）模型。
+- **gemma2 (EmbeddingGemma 2)**：Google `google/embeddinggemma-2`（Apache-2.0，2026-10）——24 层双向塔 + 逐层嵌入（PLE），768 维多语言 MRL 嵌入。直接加载上游 HF 布局;`dimensions` 可选 768/512/256/128。权重：`NEURON_EMBEDDING_MODEL_PATH` 或 `<模型根目录>/gemma2/embeddinggemma-2/`。
 
 ### Vision
 

@@ -438,6 +438,7 @@ mod tests {
             input: crate::embedding::EmbeddingInput::Single("".into()),
             user: None,
             encoding_format: None,
+            dimensions: None,
         };
         let resp = handlers::embedding_handler(
             axum::extract::State(state),

@@ -217,6 +217,8 @@ Response:
 }
 ```
 
+MRL-trained embedding models (EmbeddingGemma 2) also accept OpenAI's `dimensions` parameter — the response embedding is truncated to the first `dimensions` components and re-normalized (512 / 256 / 128 are the card-recommended sizes; runtimes without MRL support ignore the field).
+
 For compact output, use `encoding_format: "base64"`:
 ```json
 {

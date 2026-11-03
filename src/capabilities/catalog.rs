@@ -185,6 +185,18 @@ pub fn default_capabilities() -> Vec<ModelCapabilities> {
         cap("candle", "gte-base", &[TextInput], &[EmbeddingOutput],
             &[ApiStyle::openai_embeddings()], false, false, false, false),
 
+        // EmbeddingGemma 2 (Google, Apache-2.0, 2026-10). The first
+        // non-BERT embedding family: a 24-layer bidirectional Gemma
+        // tower with per-layer embeddings (PLE) and dual RoPE, loaded
+        // from the upstream HF layout via the vendored text tower in
+        // `src/embedding/gemma2/`. 768-d MRL embeddings — the OpenAI
+        // `dimensions` parameter truncates + re-normalizes (512 / 256
+        // / 128 are the card-recommended sizes). ~1.49 GB bf16
+        // checkpoint, f32 on CPU ≈ 1.1 GB RAM. Enable with
+        // `NEURON_EMBEDDING_RUNTIME=gemma2`.
+        cap("gemma2", "embeddinggemma-2", &[TextInput], &[EmbeddingOutput],
+            &[ApiStyle::openai_embeddings()], false, false, false, false),
+
         cap("burn", "voxcpm-0.5b", &[TextInput], &[AudioOutput],
             &[ApiStyle::openai_audio()], true, false, false, false),
         // VoxCPM2 (OpenBMB, Apache 2.0, 2026-04 release). Loadable via
@@ -586,6 +598,10 @@ mod tests {
                 "paddle-ocr" => {
                     crate::ocr::OcrImpl::parse("paddle-ocr")
                         .unwrap_or_else(|e| panic!("ocr engine {model_id}: {e}"));
+                }
+                "gemma2" => {
+                    crate::embedding::EmbeddingImpl::parse("gemma2")
+                        .unwrap_or_else(|e| panic!("embedding engine {model_id}: {e}"));
                 }
                 "candle" | "burn" | "sherpa" | "tract" | "mistralrs" | "mage_vl"
                 | "litert" | "mxbai" | "jina" => {}

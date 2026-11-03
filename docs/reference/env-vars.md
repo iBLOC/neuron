@@ -22,7 +22,7 @@ neuron reads its configuration from environment variables on startup. The full m
 | `NEURON_TTS_MODEL_PATH` | (unset) | Path to the TTS model directory (VoxCpm: `config.json` + `tokenizer.json` + `model.mpk` + `audiovae.mpk`) |
 | `NEURON_ASR_MODEL_PATH` | (unset) | Path to the ASR model directory (Whisper: `config.json` + `tokenizer.json` + `*.safetensors` + `mel_filters.safetensors`; SenseVoiceSmall: `model.onnx` or `model.int8.onnx` + `tokens.txt`; tract path also wants the `model.prepped.onnx` produced by `scripts/prep-sensevoice-onnx.py`) |
 | `NEURON_RERANK_MODEL_PATH` | (unset) | Path to the Rerank model directory (BGE/mxbai/jina; not used for cohere) |
-| `NEURON_EMBEDDING_MODEL_PATH` | (unset) | Path to the Embedding model directory (MiniLM BERT) |
+| `NEURON_EMBEDDING_MODEL_PATH` | (unset) | Path to the Embedding model directory (MiniLM BERT; EmbeddingGemma 2: `config.json` + `tokenizer.json` + `model.safetensors` — unset falls back to `<model root>/gemma2/embeddinggemma-2/`) |
 | `NEURON_VISION_MODEL_PATH` | (unset) | Path to the Vision model directory. The ONNX path reads `model.onnx` + `config.json` from it; `candle-yolo` reads `*.safetensors` from it (and refuses to run without a full-coverage checkpoint). |
 | `NEURON_CHRONOS2_DEFAULT_MODEL` | (unset) | Model id registered for the Chronos2 capability |
 
@@ -45,7 +45,8 @@ neuron reads its configuration from environment variables on startup. The full m
 | `NEURON_MAGE_VL_MODEL_ID` | `microsoft/Mage-VL` | Override the registered Mage-VL model id (HF repo id or local path string used for `engines.llm` keying) |
 | `NEURON_MAGE_VL_GATE_PATH` | (unset) | Path to the Mage-VL StreamMind gate model directory (used by `POST /v1/vision/gate/score`) |
 | `NEURON_MISTRALRS_ISQ` | `q4_0` | `q4_0` \| `q8_0` \| `none` — in-situ quantization applied by mistral.rs at load time |
-| `NEURON_EMBEDDING_RUNTIME` | (unset) | `candle` — which Embedding engine to load |
+| `NEURON_EMBEDDING_RUNTIME` | (unset) | `candle` (MiniLM BERT) \| `gemma2` (EmbeddingGemma 2, 768-d MRL embeddings) — which Embedding engine to load |
+| `NEURON_EMBEDDING_GEMMA2_MAX_SEQ` | `2048` | Right-truncation limit (tokens) for the EmbeddingGemma 2 runtime. The bidirectional attention mask costs `batch × seq² × 4 bytes`, so this caps it; the model itself accepts 8192. |
 | `NEURON_TTS_RUNTIME` | (unset) | `voxcpm` / `burn` (0.5B, requires `--features voxcpm`) \| `voxcpm2` (2B/48 kHz, same feature; loads upstream checkpoints directly, ~10 GB RAM) |
 | `NEURON_DEVICE` | `auto` | Device for the LLM and TTS engines: `auto` \| `cpu` \| `nvidia` (alias `cuda`) \| `apple` \| `vulkan`. The candle LLM path picks the GPU under `auto`; the **burn** TTS backend stays on the CPU because VoxCPM2's per-patch decode is latency-bound and measured ~6× slower on an RTX 3090 than on a 12-core CPU. With `--features voxcpm-cuda`, `nvidia` runs VoxCPM2 on the GPU (CubeCL kernels, f16). |
 | `NEURON_ASR_RUNTIME` | (unset) | `candle` (Whisper) \| `tract` (SenseVoiceSmall via neuron's own tract ONNX stack, requires `--features tract`) \| `sherpa` (SenseVoiceSmall via the official sherpa-onnx Rust binding, requires `--features sherpa`) |

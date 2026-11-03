@@ -21,6 +21,7 @@ neuron supports **3 ML frameworks** and **multiple impls per framework** to cove
 | Rerank | candle (BGE/mxbai/jina) | `candle` | ✅ | XLM-RoBERTa cross-encoders |
 | Rerank | cohere | `candle` (default) | — | Cohere `/v1/rerank` HTTP proxy |
 | Embedding | candle (MiniLM) | `candle` | ✅ | MiniLM BERT (batched via `BatchLongest` padding, base64 output) |
+| Embedding | gemma2 (EmbeddingGemma 2) | `gemma2` | ✅ | Vendored bidirectional Gemma tower with per-layer embeddings (PLE), dual RoPE, 768-d MRL output; OpenAI `dimensions` truncates + re-normalizes. See `docs/superpowers/specs/2026-11-02-embeddinggemma2.md`. |
 | Vision | ort (YOLOv8 / YOLO11 / RT-DETR / DETR / RF-DETR) | `ort` | — | ONNX session path; the executor is **tract** (pure Rust, `--features tract`). The `ort` Cargo feature does not change this path |
 | Vision | candle (YOLOv8 approximation) | `candle` | — | CSPDarknet approximation without the PAN-FPN neck; cannot consume Ultralytics exports and refuses to run on untrained weights — detection via the ONNX path above |
 | Chronos2 | candle | `chronos2` | — | ✅ landed 2026-07-19: vendored T5 encoder + decoder + linear output head, `CandleChronos2Runtime` (844 LOC, 19 tests) |
@@ -129,7 +130,8 @@ curl -X POST http://localhost:8083/v1/chat/completions \
 
 ### Embedding
 
-- **candle (MiniLM)** is the only engine. Use `all-MiniLM-L6-v2` (384-dim, Apache-2.0) for general-purpose embeddings. Swap to other MiniLM-family models via `NEURON_EMBEDDING_MODEL_PATH`.
+- **candle (MiniLM)**: 384-dim, Apache-2.0, for general-purpose embeddings. Swap to other MiniLM-family (BERT-architecture) models via `NEURON_EMBEDDING_MODEL_PATH`.
+- **gemma2 (EmbeddingGemma 2)**: Google's `google/embeddinggemma-2` (Apache-2.0, 2026-10) — 768-d multilingual MRL embeddings from a 24-layer bidirectional tower with per-layer embeddings (PLE). Loads the upstream HF layout directly; `dimensions` picks 768/512/256/128. Weights: `NEURON_EMBEDDING_MODEL_PATH` or `<model root>/gemma2/embeddinggemma-2/`.
 
 ### Vision
 

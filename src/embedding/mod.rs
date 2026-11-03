@@ -4,12 +4,20 @@
 //! Currently supports:
 //! - [`MiniLmL6V2EmbeddingRuntime`] - Candle-based
 //!   `sentence-transformers/all-MiniLM-L6-v2` (candle feature).
+//! - `gemma2::runtime::EmbeddingGemma2Runtime` - Candle-based
+//!   `google/embeddinggemma-2` (candle feature; the first non-BERT
+//!   embedding family: a bidirectional Gemma tower with per-layer
+//!   embeddings, serving 768-d MRL embeddings through the OpenAI
+//!   `dimensions` parameter).
 
 #[cfg(feature = "candle")]
 pub mod candle;
 
 #[cfg(feature = "candle")]
 pub use candle::MiniLmL6V2EmbeddingRuntime;
+
+#[cfg(feature = "candle")]
+pub mod gemma2;
 
 pub mod registry;
 pub use registry::EmbeddingRuntimeRegistry;
@@ -23,8 +31,14 @@ use crate::llm::{ChatResult, ModelInfo, NeuronError};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum EmbeddingImpl {
+    /// BERT-family checkpoints (MiniLM / BGE / E5 / GTE) via
+    /// `candle_transformers::models::bert`.
     #[cfg(feature = "candle")]
     Candle,
+    /// EmbeddingGemma 2 (`google/embeddinggemma-2`) via the vendored
+    /// bidirectional text tower in [`gemma2`].
+    #[cfg(feature = "candle")]
+    Gemma2,
 }
 
 impl EmbeddingImpl {
@@ -32,6 +46,8 @@ impl EmbeddingImpl {
         match self {
             #[cfg(feature = "candle")]
             Self::Candle => "candle",
+            #[cfg(feature = "candle")]
+            Self::Gemma2 => "gemma2",
         }
     }
 
@@ -39,6 +55,8 @@ impl EmbeddingImpl {
         match s {
             #[cfg(feature = "candle")]
             "candle" => Ok(Self::Candle),
+            #[cfg(feature = "candle")]
+            "gemma2" => Ok(Self::Gemma2),
             other => Err(format!("unknown EmbeddingImpl: {other}")),
         }
     }
@@ -72,6 +90,14 @@ pub struct EmbeddingRequest {
     pub user: Option<String>,
     #[serde(default)]
     pub encoding_format: Option<String>,
+    /// OpenAI `dimensions` parameter: request a shorter embedding.
+    /// Supported by the MRL-trained embedding models (embeddinggemma-2
+    /// truncates to the first `dimensions` components and
+    /// re-normalizes — the Matryoshka recipe; 512 / 256 / 128 are the
+    /// card-recommended sizes). Runtimes without MRL support ignore
+    /// the field.
+    #[serde(default)]
+    pub dimensions: Option<u32>,
 }
 
 /// One string or a batch of strings, matching the OpenAI spec.
@@ -123,6 +149,7 @@ impl EmbeddingRequest {
             input: input.into(),
             user: None,
             encoding_format: None,
+            dimensions: None,
         }
     }
 
@@ -441,6 +468,20 @@ mod tests {
         assert_eq!(EncodingFormat::parse("FLOAT").unwrap(), EncodingFormat::Float);
         assert_eq!(EncodingFormat::parse("base64").unwrap(), EncodingFormat::Base64);
         assert!(EncodingFormat::parse("hex").is_err());
+    }
+
+    #[test]
+    fn test_embedding_request_dimensions_wire() {
+        // OpenAI `dimensions` on the wire — optional, absent by default.
+        let v: EmbeddingRequest = serde_json::from_str(
+            r#"{"model": "embeddinggemma-2", "input": "hello", "dimensions": 256}"#,
+        )
+        .unwrap();
+        assert_eq!(v.dimensions, Some(256));
+        let v: EmbeddingRequest =
+            serde_json::from_str(r#"{"model": "embeddinggemma-2", "input": ["a", "b"]}"#)
+                .unwrap();
+        assert_eq!(v.dimensions, None, "absent dimensions must deserialize as None");
     }
 
     #[test]

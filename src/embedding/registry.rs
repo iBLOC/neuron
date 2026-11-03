@@ -11,6 +11,9 @@ use crate::llm::ModelInfo;
 #[cfg(feature = "candle")]
 use crate::embedding::candle::MiniLmL6V2EmbeddingRuntime;
 
+#[cfg(feature = "candle")]
+use crate::embedding::gemma2::runtime::EmbeddingGemma2Runtime;
+
 pub struct EmbeddingRuntimeRegistry {
     pub registered: Arc<Mutex<Vec<RegisteredEmbedding>>>,
     loaded: Arc<tokio::sync::Mutex<HashMap<EmbeddingRegistryKey, Arc<dyn EmbeddingRuntime>>>>,
@@ -95,6 +98,15 @@ impl EmbeddingRuntimeRegistry {
                     .await
                     .map_err(|e| {
                         NeuronError::new(format!("MiniLmL6V2EmbeddingRuntime load failed: {e}"))
+                    })?;
+                Arc::from(loaded)
+            }
+            #[cfg(feature = "candle")]
+            EmbeddingImpl::Gemma2 => {
+                let loaded: Box<dyn EmbeddingRuntime> = EmbeddingGemma2Runtime::load(&entry.model_id, &entry.device)
+                    .await
+                    .map_err(|e| {
+                        NeuronError::new(format!("EmbeddingGemma2Runtime load failed: {e}"))
                     })?;
                 Arc::from(loaded)
             }

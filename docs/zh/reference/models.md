@@ -86,6 +86,7 @@ loader)或 `llamacpp` + GGUF。
 |---|---|---|
 | all-minilm-l6-v2 | candle | 约 88 MB,批量前向,base64 输出 |
 | bge-base-en-v1.5 / e5-base-v2 / gte-base | candle | 仅支持 BERT 架构 checkpoint——XLM-R(bge-m3)与 decoder 式嵌入模型不支持 |
+| embeddinggemma-2 | gemma2 | `google/embeddinggemma-2`,Apache-2.0:双向 Gemma 塔 + PLE,768 维 MRL(`dimensions` 512/256/128),直接加载上游 HF 布局 |
 
 ### Vision(检测/定位)
 

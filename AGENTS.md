@@ -1,6 +1,6 @@
 # neuron (神经元) — AGENTS guide
 
-**Status:** READ-ONLY contributor reference. Updated 2026-10-31 (**the capability registries now share their state across clones** — `ServerState` clones each registry twice (handler `Arc` + registration lock) and `registered` was a plain `Vec`, so a runtime-registered model never reached the handler ("ModelNotRegistered"); all nine registries fixed and pinned by `src/imagegen/registry_sharing_test.rs`; **764 lib tests** default / **859 with `tract,voxcpm,ocr`**). Updated 2026-10-30 (**MOSS-Image text-to-image capability landed** — the first image-generation capability: `imagegen` + `POST /v1/images/generations`, serving OpenMOSS MOSS-Image natively on candle with the DiT, the Qwen3.5 hybrid-GDN text encoder and the FLUX.2 decoder all vendored; prior 2026-10-26: **VoxCPM2 GPU backend landed** — `--features voxcpm-cuda` + `NEURON_DEVICE=nvidia` runs the 2B model on an NVIDIA GPU through burn's CubeCL CUDA backend in f16; five latent dtype assumptions the f32 path hid were fixed; the CPU stays the default because VoxCPM2's per-patch decode measured ~6× *slower* on an RTX 3090 than on a 12-core CPU; **701 lib tests** default / **734 with `--features voxcpm`** / **735 with `--features voxcpm-cuda`** / **761 with `--features tract`** / **741 with `--features ort`** (all re-measured 2026-10-27 after the RustSec dependency patches); prior 2026-10-25: **TTS model-level streaming landed** — `POST /v1/audio/speech/stream`, VoxCPM2 decodes each latent patch as the model emits it; verified bit-comparable against the full decode on the real `audiovae.pth`; four real-checkpoint load bugs fixed — pth wrapper, VAE module-tree paths, burn-store contiguous index remapping, RoPE head dim — plus the TTS default-shortcut startup panic; prior 2026-10-15: **llama.cpp backend landed** — `NEURON_LLM_RUNTIME=llamacpp`, gated by the `llamacpp` Cargo feature, see the "Llama.cpp (loadable)" section; **681 lib tests** default as of 2026-10-15; prior 2026-10-09 baseline: post-OCR capability (PP-OCR), **679 lib tests** default / **739 with `--features tract`** / **715 with `--features ort`** / **750 with `tract,ort`**; prior 2026-09-27 baseline: post-candle 0.11 upgrade per `huggingface/candle.git#aebc405`; post-`f643c1c` LLM auto-registration + USERPROFILE fallback on Windows GUI processes; **VoxCPM2 (2B/48 kHz) local inference landed** — `NEURON_TTS_RUNTIME=voxcpm2`, direct checkpoint load, see the "VoxCPM2 (loadable)" section; **model scheduler landed** — bounded-memory LLM swap queue behind `/v1/chat/completions` + `/v1/messages`, see the "Model scheduler" bullet and `docs/superpowers/specs/2026-09-29-model-scheduler.md`; GitHub Pages CI now base-URL-configured + adds a `lychee` link-check job; prior 2026-09-25 baseline: post-rename `neure → neuron` per commit `e3d2c41` (2026-09-21); `AppState::register_engine` capability per `bccef7c`; earlier 2026-07-19 baseline: license switch + Shadow decoupling).
+**Status:** READ-ONLY contributor reference. Updated 2026-11-02 (**EmbeddingGemma 2 text-embedding capability landed** — the first non-BERT embedding family: `gemma2` engine + `NEURON_EMBEDDING_RUNTIME=gemma2` serves `google/embeddinggemma-2` (Apache-2.0, 768-d MRL) through a vendored bidirectional Gemma tower with per-layer embeddings, verified element-wise against the upstream transformers implementation at relative error 5.6e-7 (see the "EmbeddingGemma 2 (loadable)" section); prior 2026-10-31: **the capability registries now share their state across clones** — `ServerState` clones each registry twice (handler `Arc` + registration lock) and `registered` was a plain `Vec`, so a runtime-registered model never reached the handler ("ModelNotRegistered"); all nine registries fixed and pinned by `src/imagegen/registry_sharing_test.rs`; **764 lib tests** default / **859 with `tract,voxcpm,ocr`**). Updated 2026-10-30 (**MOSS-Image text-to-image capability landed** — the first image-generation capability: `imagegen` + `POST /v1/images/generations`, serving OpenMOSS MOSS-Image natively on candle with the DiT, the Qwen3.5 hybrid-GDN text encoder and the FLUX.2 decoder all vendored; prior 2026-10-26: **VoxCPM2 GPU backend landed** — `--features voxcpm-cuda` + `NEURON_DEVICE=nvidia` runs the 2B model on an NVIDIA GPU through burn's CubeCL CUDA backend in f16; five latent dtype assumptions the f32 path hid were fixed; the CPU stays the default because VoxCPM2's per-patch decode measured ~6× *slower* on an RTX 3090 than on a 12-core CPU; **701 lib tests** default / **734 with `--features voxcpm`** / **735 with `--features voxcpm-cuda`** / **761 with `--features tract`** / **741 with `--features ort`** (all re-measured 2026-10-27 after the RustSec dependency patches); prior 2026-10-25: **TTS model-level streaming landed** — `POST /v1/audio/speech/stream`, VoxCPM2 decodes each latent patch as the model emits it; verified bit-comparable against the full decode on the real `audiovae.pth`; four real-checkpoint load bugs fixed — pth wrapper, VAE module-tree paths, burn-store contiguous index remapping, RoPE head dim — plus the TTS default-shortcut startup panic; prior 2026-10-15: **llama.cpp backend landed** — `NEURON_LLM_RUNTIME=llamacpp`, gated by the `llamacpp` Cargo feature, see the "Llama.cpp (loadable)" section; **681 lib tests** default as of 2026-10-15; prior 2026-10-09 baseline: post-OCR capability (PP-OCR), **679 lib tests** default / **739 with `--features tract`** / **715 with `--features ort`** / **750 with `tract,ort`**; prior 2026-09-27 baseline: post-candle 0.11 upgrade per `huggingface/candle.git#aebc405`; post-`f643c1c` LLM auto-registration + USERPROFILE fallback on Windows GUI processes; **VoxCPM2 (2B/48 kHz) local inference landed** — `NEURON_TTS_RUNTIME=voxcpm2`, direct checkpoint load, see the "VoxCPM2 (loadable)" section; **model scheduler landed** — bounded-memory LLM swap queue behind `/v1/chat/completions` + `/v1/messages`, see the "Model scheduler" bullet and `docs/superpowers/specs/2026-09-29-model-scheduler.md`; GitHub Pages CI now base-URL-configured + adds a `lychee` link-check job; prior 2026-09-25 baseline: post-rename `neure → neuron` per commit `e3d2c41` (2026-09-21); `AppState::register_engine` capability per `bccef7c`; earlier 2026-07-19 baseline: license switch + Shadow decoupling).
 
 ## What neuron is
 
@@ -346,6 +346,77 @@ single-stream joint-sequence transformer (shared time modulation,
    catches a silent mistake: `linear_no_bias` where the checkpoint
    carries a bias leaves that bias unread and the model quietly wrong.
 
+### EmbeddingGemma 2 (loadable, 2026-11-02)
+
+`NEURON_EMBEDDING_RUNTIME=gemma2` registers Google's
+`google/embeddinggemma-2` (Apache-2.0, 2026-10) — the first non-BERT
+embedding family, served at `POST /v1/embeddings` with native MRL
+support. 744M params / ~1.49 GB bf16 in one unsharded safetensors;
+the upstream HF repo layout loads directly, no conversion. Weights:
+`NEURON_EMBEDDING_MODEL_PATH` or `<model root>/gemma2/embeddinggemma-2/`
+(ModelScope and HF both carry the repo; the catalog entry lists both
+sources). Text-only scope: the checkpoint's vision/audio towers are
+never loaded.
+
+Load-bearing points (full rationale in
+`docs/superpowers/specs/2026-11-02-embeddinggemma2.md`):
+
+1. **The architecture is NOT the candle `gemma4` module** despite
+   sitting on a Gemma-4-style tower — the checkpoint's text model is
+   an *encoder*: bidirectional attention on every layer (no KV cache),
+   per-layer embeddings (PLE — a 512→24×512 projection of the token
+   embeddings gating every decoder block, each block ending in a
+   trained `layer_scalar`), a bare RMSNorm on V (no weight tensor),
+   attention scaling 1.0 (the QK norm replaces 1/√d), two head shapes
+   (the four `full_attention` layers 5/11/17/23 use head_dim 512 /
+   1 KV head; the twenty `sliding_attention` layers use head_dim 256 /
+   2 KV heads), dual RoPE (θ=1e6 full / θ=1e4 sliding, `rope_type:
+   "default"`), no lm_head — the tower ends `norm →
+   embedding_projection` (Linear 512→768, no bias) and the runtime
+   applies the sentence-transformers steps (masked mean pool + L2).
+   Everything is vendored under `src/embedding/gemma2/`.
+2. **The bidirectional sliding-window rule is `|q − kv| <= window`
+   (inclusive)** — upstream `masking_utils`' bidirectional overlay,
+   NOT the causal overlay's `kv > q − window`. The additive mask uses
+   a finite large negative (-1e9), so a fully-blocked padded query row
+   produces uniform attention instead of NaN (the same trick as
+   upstream's `finfo.min`); the masked mean pool drops those rows.
+3. **The GQA KV expansion must be INTERLEAVED (`repeat_interleave`
+   semantics), not `Tensor::repeat`'s block form.** `Tensor::repeat`
+   pairs query head 2 with KV head 0 and query head 3 with KV head 1 —
+   semantically wrong but structurally valid, so shapes never catch it.
+   This was the layer-0 divergence (max_abs 4.6 on layer00 while embed
+   and PLE were exact) the parity probe isolated on 2026-11-02; the
+   fix is `unsqueeze + expand + contiguous + reshape` in
+   `repeat_kv_interleaved`. The mage_vl `repeat((0, rep, 1, 1))` fix
+   guards the same trap one level up — both fail silently, so the
+   parity test is the only net.
+4. **Verification chain** (all three run against the real 1.49 GB
+   checkpoint): `verify_egemma2_weight_paths` (recording `VarBuilder`
+   vs the safetensors header fetched over a Range request — 413/413
+   paths matched, zero missing, zero shape mismatches, and the strict
+   direction: all 413 `language_model.*` tensors are actually read);
+   `egemma2_parity` (element-wise vs upstream transformers ≥5.18 fp32
+   eager, fixture produced by `scripts/gen-egemma2-parity.py` —
+   measured rel 5.6e-7, fp32 summation order only); `real_weights_embed`
+   (semantic sanity cos(cat,cat-rug)=0.854 > cos(cat,quantum)=0.589,
+   MRL `dimensions=256` truncation + re-normalization, padded-batch
+   vs solo embedding cos 0.999999). The parity probe caught the GQA
+   bug; the semantic test alone would have passed both before and
+   after the fix (0.79/0.71 vs 0.85/0.59 — related beat unrelated
+   either way).
+5. **Compute dtype: f32 on CPU, bf16 on CUDA** (`compute_dtype`) —
+   the model card forbids f16. f32 CPU residency ≈ 1.1 GB (the text
+   tower is 270M params). Sequence truncation defaults to 2048 tokens
+   (`NEURON_EMBEDDING_GEMMA2_MAX_SEQ`) to bound the seq² mask.
+6. **`dimensions` is a wire-level field now** (`EmbeddingRequest`
+   + `EmbeddingHttpRequest`): MRL runtimes truncate + re-normalize;
+   the MiniLM runtime ignores it (documented, no behavior change).
+   The ST task prompts (`task: search result | query: `, `title: none
+   | text: `) are documented in the spec but NOT applied by v1 —
+   raw text is served; a `task` passthrough field is the obvious
+   follow-up.
+
 ### VoxCPM2 (loadable, 2026-09-27)
 
 The OpenBMB 2026-04 release of VoxCPM (2B params, 48 kHz AudioVAE V2, 30 languages, three cloning modes — Voice Design, Controllable Cloning, Ultimate Cloning) is now **loadable** via `NEURON_TTS_RUNTIME=voxcpm2` (feature `voxcpm`). The former P0 list is closed except model-level streaming:
@@ -675,7 +746,10 @@ points if you touch it:
 ## Conformance tests
 
 ```bash
-cargo test --lib                                  # 764 unit tests (src/**/mod.rs) — 0 failures (2026-10-31, after the MOSS-Image parity fixtures and the registry-sharing fix landed; +21 on the 2026-10-27 baseline of 743)
+cargo test --lib                                  # 788 unit tests (src/**/mod.rs) — 0 failures (2026-11-02, after the EmbeddingGemma 2 capability landed: +24 gemma2 suites on the 2026-10-31 baseline of 764)
+cargo test --lib verify_egemma2_weight_paths -- --ignored  # EmbeddingGemma 2: diff the vendored tower's requested tensor paths + shapes against the real checkpoint header (needs network; ~3 s)
+cargo test --lib egemma2_parity -- --ignored --nocapture   # EmbeddingGemma 2: element-wise parity against the upstream transformers fp32 forward on the real weights (needs the checkpoint + testdata fixture; prints the measured relative error)
+cargo test --lib real_weights_embed -- --ignored --nocapture  # EmbeddingGemma 2: end-to-end semantic sanity + MRL dimensions + padding invariance (needs the checkpoint)
 cargo test --lib --features voxcpm                # 734 unit tests — 0 failures (VoxCPM2 adds the weights/model/runtime/clone-audio/streaming suites; two pre-existing V1 audiovae roundtrip tests are slow, ~5 min, on ndarray)
 cargo test --lib --features voxcpm-cuda           # 735 unit tests — 0 failures (adds the f16 GPU stack test; needs an NVIDIA GPU + the CUDA toolkit's bin on PATH)
 cargo test --lib --features tract                 # 761 unit tests — 0 failures (tract adds the decision + vision-ONNX + sensevoice paths + the full PP-OCR pipeline suites: DB++ postprocess, CTC decode, preprocess, paddle runtime)
@@ -780,8 +854,9 @@ neuron has **no direct dependency** on any particular host — the integration c
 | `NEURON_LLAMA_CPP_FORCE_CHATML` | (unset) | When `1` / `true` / `TRUE`, skip the GGUF's embedded chat template and render every request through the ChatML fallback (`<|im_start|>` framing). Useful for testing model behaviour under a known prompt format. |
 | `NEURON_LLAMA_CPP_MMPROJ` | (unset) | Override path to a vision-projector GGUF (mmproj) for multimodal requests. Default auto-discovery searches `<text-gguf-dir>/mmproj-*.gguf` then `<dir>/model.mmproj.gguf` then `<dir>/mmproj.gguf`. When unset and no co-located mmproj is found, the runtime loads as text-only. |
 | `NEURON_MEDIA_FETCH_HOST_ALLOWLIST` | (unset) | Comma-separated host allowlist for `ImageSource::Url` http(s) fetches in the multimodal path. **Not yet implemented in v1** — declared for future use; v1 only accepts `data:` URIs via `ImageSource::Base64`. |
-| `NEURON_EMBEDDING_RUNTIME` | (unset) | `candle` — which Embedding engine to load |
-| `NEURON_EMBEDDING_MODEL_PATH` | (unset) | Path to the Embedding model directory (must contain `config.json` + `tokenizer.json` + `model.safetensors`) |
+| `NEURON_EMBEDDING_RUNTIME` | (unset) | `candle` (MiniLM BERT) \| `gemma2` (EmbeddingGemma 2) — which Embedding engine to load |
+| `NEURON_EMBEDDING_MODEL_PATH` | (unset) | Path to the Embedding model directory (must contain `config.json` + `tokenizer.json` + `model.safetensors`; EmbeddingGemma 2 falls back to `<model root>/gemma2/embeddinggemma-2/`) |
+| `NEURON_EMBEDDING_GEMMA2_MAX_SEQ` | `2048` | Right-truncation limit (tokens) for the EmbeddingGemma 2 runtime — caps the `batch × seq² × 4 bytes` bidirectional attention mask; the model itself accepts 8192 |
 | `NEURON_LLM_MODEL_PATH` | (unset) | Path to the LLM model directory (must contain `config.json` + `tokenizer.json` + `*.safetensors`) |
 | `NEURON_TTS_RUNTIME` | (unset) | `voxcpm` / `burn` (0.5B, requires `--features voxcpm`) \| `voxcpm2` (2B/48 kHz, same feature; loads upstream checkpoints directly, ~10 GB RAM) |
 | `NEURON_DEVICE` | `auto` | Device for the LLM and TTS engines: `auto` \| `cpu` \| `nvidia` (alias `cuda`) \| `apple` \| `vulkan`. `auto` picks the GPU for the candle LLM path; the **burn** TTS backend stays on the CPU because VoxCPM2's per-patch decode is latency-bound and measured ~6× slower on an RTX 3090 (see the "GPU backend" note in the VoxCPM2 section). `nvidia` puts VoxCPM2 on the GPU when built with `--features voxcpm-cuda`. |
@@ -870,7 +945,7 @@ Other catalog families — loadable by capability, by backend. ✓ = the model i
 | TTS | | ✓ (VoxCPM 0.5B + VoxCPM2) | | | | | | | | |
 | ASR | ✓ (Whisper) | | | | | ✓ | ✓ | | | |
 | Rerank | ✓ (BGE / mxbai / jina) | | | | | | | | | ✓ (hosted) |
-| Embedding | ✓ (MiniLM) | | | | | | | | | |
+| Embedding | ✓ (MiniLM; EmbeddingGemma 2 via its own `gemma2` engine) | | | | | | | | | |
 | Vision | ✓ (ONNX session path: YOLOv8 / YOLO11 / RT-DETR / DETR / RF-DETR) | | | | | | | ✓ (tract executor) | | |
 | Chronos2 | ✓ (needs `--features chronos2` + a checkpoint) | | | | | | | | | |
 | Decision | | | | | | | ✓ | ✓ (bit-exact path) | | |

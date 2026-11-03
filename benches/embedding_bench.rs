@@ -19,6 +19,7 @@ fn bench_embedding_request_single(c: &mut Criterion) {
                         input: EmbeddingInput::Single(text.clone()),
                         user: None,
                         encoding_format: None,
+                        dimensions: None,
                     };
                     black_box(req)
                 });
@@ -47,6 +48,7 @@ fn bench_embedding_request_batch(c: &mut Criterion) {
                         input: EmbeddingInput::Batch(texts.clone()),
                         user: None,
                         encoding_format: None,
+                        dimensions: None,
                     };
                     black_box(req)
                 });
@@ -65,6 +67,7 @@ fn bench_embedding_serialization(c: &mut Criterion) {
         input: EmbeddingInput::Single("test text".into()),
         user: None,
         encoding_format: None,
+        dimensions: None,
     };
     
     group.bench_function("serialize", |b| {

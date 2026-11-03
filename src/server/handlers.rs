@@ -867,6 +867,10 @@ pub struct EmbeddingHttpRequest {
     pub user: Option<String>,
     #[serde(default)]
     pub encoding_format: Option<String>,
+    /// OpenAI `dimensions`: request a shorter embedding. Consumed by
+    /// MRL-capable runtimes (embeddinggemma-2 truncates + re-normalizes).
+    #[serde(default)]
+    pub dimensions: Option<u32>,
 }
 
 pub async fn embedding_handler(
@@ -878,6 +882,7 @@ pub async fn embedding_handler(
         input: payload.input,
         user: payload.user,
         encoding_format: payload.encoding_format,
+        dimensions: payload.dimensions,
     };
 
     let rt = state

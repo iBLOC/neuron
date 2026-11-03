@@ -89,6 +89,7 @@ with an explicit error. Serve Qwen 3.5 with the `mistralrs` backend
 |---|---|---|
 | all-minilm-l6-v2 | candle | ~88 MB, batched forward, base64 output |
 | bge-base-en-v1.5 / e5-base-v2 / gte-base | candle | BERT-architecture checkpoints only — XLM-R (bge-m3) and decoder-based embedding models are not supported |
+| embeddinggemma-2 | gemma2 | `google/embeddinggemma-2`, Apache-2.0: bidirectional Gemma tower + PLE, 768-d MRL (`dimensions` 512/256/128), loads the upstream HF layout directly |
 
 ### Vision (detection / grounding)
 

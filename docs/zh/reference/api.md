@@ -230,6 +230,8 @@ curl http://localhost:8085/v1/embeddings \
 }
 ```
 
+支持 MRL 的嵌入模型(EmbeddingGemma 2)还接受 OpenAI 的 `dimensions` 参数——响应向量截断到前 `dimensions` 个分量后重新归一化(推荐 512 / 256 / 128;不支持 MRL 的运行时会忽略该字段)。
+
 ### `POST /v1/audio/speech`
 
 ```bash

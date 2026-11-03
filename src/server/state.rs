@@ -633,6 +633,23 @@ impl ServerState {
                 eprintln!("[neuron] NEURON_EMBEDDING_RUNTIME=candle but candle feature not enabled");
             }
         }
+        // EmbeddingGemma 2 (google/embeddinggemma-2, Apache-2.0): 24-layer
+        // bidirectional Gemma tower with per-layer embeddings, 768-d MRL
+        // embeddings (`dimensions` 512/256/128 supported). Weights load
+        // from the upstream HF layout — NEURON_EMBEDDING_MODEL_PATH or
+        // `<model root>/gemma2/embeddinggemma-2/`. f32 on CPU ≈ 1.1 GB.
+        if let Some("gemma2") = embedding_runtime_env.as_deref() {
+            #[cfg(feature = "candle")]
+            {
+                let _ = embedding_registry.register(
+                    "embeddinggemma-2".into(), crate::embedding::EmbeddingImpl::Gemma2, device, 1_700_000_000,
+                );
+            }
+            #[cfg(not(feature = "candle"))]
+            {
+                eprintln!("[neuron] NEURON_EMBEDDING_RUNTIME=gemma2 but candle feature not enabled");
+            }
+        }
 
         for reg in &config.registrations {
             if reg.capability == EngineType::Embedding {

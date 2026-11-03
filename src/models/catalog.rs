@@ -298,6 +298,29 @@ pub const SUPPORTED_CATALOG: &[SupportedModel] = &[
         source_id: "huggingface",
         families: &["bert", "gte"],
     },
+    // EmbeddingGemma 2 (Google, Apache-2.0, 2026-10): 744M-param
+    // multimodal embedding model on a Gemma-4-style tower. The
+    // upstream repo layout (config.json + tokenizer.json +
+    // model.safetensors, ~1.49 GB bf16) loads directly — no prep step.
+    // Served by the vendored bidirectional text tower
+    // (`src/embedding/gemma2/`, engine_impl "gemma2"); text-only
+    // inference ignores the vision/audio towers.
+    SupportedModel {
+        id: "embeddinggemma-2",
+        engine: EngineType::Embedding,
+        engine_impl: "gemma2",
+        default_repo: "modelscope:google/embeddinggemma-2",
+        source_id: "modelscope",
+        families: &["embeddinggemma2"],
+    },
+    SupportedModel {
+        id: "embeddinggemma-2",
+        engine: EngineType::Embedding,
+        engine_impl: "gemma2",
+        default_repo: "huggingface:google/embeddinggemma-2",
+        source_id: "huggingface",
+        families: &["embeddinggemma2"],
+    },
     // LiteRT-LM (`litert`) family.
     //
     // The `lit` CLI that `litert_lm` pins (LiteRT-LM v0.7.0) has a

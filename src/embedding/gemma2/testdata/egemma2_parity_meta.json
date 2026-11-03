@@ -1,0 +1,11 @@
+{
+  "texts": [
+    "The cat sat on the mat.",
+    "A much longer sentence that forces right padding onto the batch sibling, because BatchLongest pads every member to the longest input in the batch.",
+    "Embedding models map text into vectors used for retrieval."
+  ],
+  "model_dir": "C:\\Users\\87462\\.neuron\\models\\gemma2\\embeddinggemma-2",
+  "transformers_version": "5.22.1",
+  "dtype": "float32",
+  "attn_implementation": "eager"
+}

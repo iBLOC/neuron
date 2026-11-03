@@ -22,7 +22,9 @@ neuron 在启动时从环境变量读取配置。下表完整列出每一个 `NE
 | `NEURON_TTS_MODEL_PATH` | (未设置) | TTS 模型目录路径(VoxCpm:`config.json` + `tokenizer.json` + `model.mpk` + `audiovae.mpk`) |
 | `NEURON_ASR_MODEL_PATH` | (未设置) | ASR 模型目录路径(Whisper:`config.json` + `tokenizer.json` + `*.safetensors` + `mel_filters.safetensors`;SenseVoiceSmall:`model.onnx` 或 `model.int8.onnx` + `tokens.txt`;tract 路径还需要 `scripts/prep-sensevoice-onnx.py` 产出的 `model.prepped.onnx`) |
 | `NEURON_RERANK_MODEL_PATH` | (未设置) | Rerank 模型目录路径(BGE/mxbai/jina;cohere 不使用) |
-| `NEURON_EMBEDDING_MODEL_PATH` | (未设置) | Embedding 模型目录路径(MiniLM BERT) |
+| `NEURON_EMBEDDING_MODEL_PATH` | (未设置) | Embedding 模型目录路径(MiniLM BERT;EmbeddingGemma 2 需 `config.json` + `tokenizer.json` + `model.safetensors`——未设置时回落到 `<模型根目录>/gemma2/embeddinggemma-2/`) |
+| `NEURON_EMBEDDING_RUNTIME` | (未设置) | `candle`(MiniLM BERT)\| `gemma2`(EmbeddingGemma 2,768 维 MRL 嵌入)——加载哪个 Embedding 引擎 |
+| `NEURON_EMBEDDING_GEMMA2_MAX_SEQ` | `2048` | EmbeddingGemma 2 运行时的右截断上限(token)。双向注意力掩码开销为 `batch × seq² × 4 字节`,用它封顶;模型本身支持 8192。 |
 | `NEURON_VISION_MODEL_PATH` | (未设置) | Vision 模型目录路径。ONNX 路径从里面读 `model.onnx` + `config.json`；`candle-yolo` 从里面读 `*.safetensors`（且要求权重覆盖全部架构变量，否则拒绝运行）。 |
 | `NEURON_CHRONOS2_DEFAULT_MODEL` | (未设置) | Chronos2 能力注册的模型 id |
 
