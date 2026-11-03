@@ -2,6 +2,8 @@
 name = "neuron"
 version = "0.1.0"
 edition = "2024"
+# 平台地板：与海马体那条线对齐（lance 14 的 rust-version 是 1.94.0）。
+rust-version = "1.94"
 description = "Neuron - Neural Inference Runtime (LLM/TTS/ASR/Rerank/Embedding/Vision) — OpenAI- and Anthropic-compatible inference engine for embedding into Rust hosts"
 authors = ["Neuron Team"]
 license = "Apache-2.0"
