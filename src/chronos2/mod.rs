@@ -48,6 +48,7 @@ use thiserror::Error;
 
 use crate::config::{DeviceSelection, ResourceTracker};
 
+#[cfg(feature = "candle")]
 pub mod mask;
 pub mod metrics;
 pub mod registry;

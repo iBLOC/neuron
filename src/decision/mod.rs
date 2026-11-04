@@ -242,6 +242,7 @@ impl DecisionQuestion {
 
     /// Encode against a loaded tokenizer. `state` is shared across questions
     /// and `state_ids` lets the caller tokenize it once.
+#[cfg(any(feature = "candle", feature = "tract"))]
     pub fn encode(
         &self,
         tok: &tokenizers::Tokenizer,

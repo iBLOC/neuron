@@ -28,7 +28,7 @@ pub use dispatch::adapter_dispatch_at;
 pub use error::ServerError;
 pub use handlers::{
     audio_speech, audio_speech_stream, audio_transcriptions, chat_completions, decisions,
-    embedding_handler, forecast, gate_score, health_handler, images_generations, info_handler,
+    embedding_handler, forecast, health_handler, images_generations, info_handler,
     list_models, rerank, scheduler_evict,
     ocr_recognize, scheduler_status, vision_classify, vision_detect, vision_lora_list,
     vision_lora_register,
@@ -37,6 +37,7 @@ pub use handlers::{
     ModelList, RerankHttpRequest, SpeechRequest,
     SpeechStreamRequest, TranscriptionResponse,
 };
+pub use handlers::gate_score;
 pub use state::ServerState;
 
 use axum::{
@@ -530,6 +531,7 @@ mod tests {
 
     // -- Mage-VL StreamMind gate validation tests ----------------------------
 
+    #[cfg(feature = "candle")]
     #[tokio::test]
     async fn test_gate_score_empty_segments_returns_400() {
         let config = crate::config::NeuronConfig::default();
@@ -548,6 +550,7 @@ mod tests {
         assert!(err.1.contains("segments"));
     }
 
+    #[cfg(feature = "candle")]
     #[tokio::test]
     async fn test_gate_score_invalid_threshold_returns_400() {
         let config = crate::config::NeuronConfig::default();
@@ -571,6 +574,7 @@ mod tests {
         assert!(err.1.contains("threshold"));
     }
 
+    #[cfg(feature = "candle")]
     #[tokio::test]
     async fn test_gate_score_zero_dim_segment_returns_400() {
         let config = crate::config::NeuronConfig::default();
@@ -594,6 +598,7 @@ mod tests {
         assert!(err.1.contains("> 0"));
     }
 
+    #[cfg(feature = "candle")]
     #[tokio::test]
     async fn test_gate_score_token_length_mismatch_returns_400() {
         let config = crate::config::NeuronConfig::default();
@@ -617,6 +622,7 @@ mod tests {
         assert!(err.1.contains("tokens.len"));
     }
 
+    #[cfg(feature = "candle")]
     #[tokio::test]
     async fn test_gate_score_missing_weights_returns_503() {
         let config = crate::config::NeuronConfig::default();
@@ -638,5 +644,21 @@ mod tests {
         let err = resp.unwrap_err();
         assert_eq!(err.0, axum::http::StatusCode::SERVICE_UNAVAILABLE);
         assert!(err.1.contains("streammind_gate.safetensors"));
+    }
+
+    // -- candle-free stub ------------------------------------------------------
+
+    #[cfg(not(feature = "candle"))]
+    #[tokio::test]
+    async fn test_gate_score_stub_reports_candle_required() {
+        let config = crate::config::NeuronConfig::default();
+        let state = ServerState::new(config);
+        let resp = handlers::gate_score(
+            axum::extract::State(state),
+            axum::Json(serde_json::json!({ "segments": [] })),
+        ).await;
+        let err = resp.unwrap_err();
+        assert_eq!(err.0, axum::http::StatusCode::SERVICE_UNAVAILABLE);
+        assert!(err.1.contains("candle"));
     }
 }

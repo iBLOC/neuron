@@ -600,8 +600,21 @@ mod tests {
                         .unwrap_or_else(|e| panic!("ocr engine {model_id}: {e}"));
                 }
                 "gemma2" => {
-                    crate::embedding::EmbeddingImpl::parse("gemma2")
-                        .unwrap_or_else(|e| panic!("embedding engine {model_id}: {e}"));
+                    // ⚠️ Gemma2 变体**跟着 candle 一起门控** ⇒ ⇒ 判据要
+                    // **双向**：有 candle ⇒ 必须解析得出；没有 candle ⇒
+                    // 必须解析不出 ⇒ ⇒ 否则目录就在公布这个构建跑不了的
+                    // 引擎（「id 注册得上、每次请求都失败」那一族）。
+                    // ⇒ ⇒ 两边都红 = 谁把门控弄丢了。
+                    if cfg!(feature = "candle") {
+                        crate::embedding::EmbeddingImpl::parse("gemma2")
+                            .unwrap_or_else(|e| panic!("embedding engine {model_id}: {e}"));
+                    } else {
+                        assert!(
+                            crate::embedding::EmbeddingImpl::parse("gemma2").is_err(),
+                            "embedding engine {model_id}: gemma2 must NOT parse \
+                             without the candle feature"
+                        );
+                    }
                 }
                 "candle" | "burn" | "sherpa" | "tract" | "mistralrs" | "mage_vl"
                 | "litert" | "mxbai" | "jina" => {}

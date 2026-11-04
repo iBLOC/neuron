@@ -150,6 +150,7 @@ fn test_vision_registry_clone_shares_its_state() {
     assert!(registry.list_registered().contains(&"shared-test".to_string()));
 }
 
+#[cfg(feature = "candle")]
 #[test]
 fn test_imagegen_registry_clone_shares_its_state() {
     let registry = crate::imagegen::ImageGenRuntimeRegistry::new(Arc::new(NeuronConfig::default()));
@@ -167,6 +168,7 @@ fn test_imagegen_registry_clone_shares_its_state() {
 
 /// The end-to-end consequence: a model registered at runtime through
 /// the public API must be findable by the handler's registry.
+#[cfg(feature = "candle")]
 #[tokio::test]
 async fn test_dynamic_registration_reaches_the_handler_registry() {
     use crate::server::ServerState;
@@ -188,5 +190,34 @@ async fn test_dynamic_registration_reaches_the_handler_registry() {
             .list_registered()
             .contains(&"dynamic-test-model".to_string()),
         "the dynamically registered model must be visible to the handler's registry"
+    );
+}
+
+/// The candle-free build must **honestly refuse** the moss-image engine
+/// instead of accepting it and then failing on every request.
+///
+/// This is the two-sided twin of the test above: with the candle feature
+/// the registration must succeed, without it the registration must be
+/// rejected **and name the missing engine** -- so a silent acceptance
+/// (the "failure that looks like success" shape) cannot slip through.
+#[cfg(not(feature = "candle"))]
+#[tokio::test]
+async fn test_dynamic_registration_is_refused_without_candle() {
+    use crate::server::ServerState;
+
+    let state = ServerState::new(NeuronConfig::default());
+    let err = state
+        .register_model(
+            "imagegen",
+            "dynamic-test-model".to_string(),
+            "moss-image".to_string(),
+            DeviceSelection::Cpu,
+            1_000,
+        )
+        .await
+        .expect_err("moss-image must be refused without the candle feature");
+    assert!(
+        err.message.contains("unknown ImageGenImpl"),
+        "the refusal must name the missing engine, got: {err:?}"
     );
 }

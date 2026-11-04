@@ -59,12 +59,12 @@ llama-cpp-2 = { version = "0.1", optional = true, features = ["mtmd"] }
 
 burn = { version = "0.21", features = ["ndarray"], optional = true }
 burn-store = { version = "0.21", features = ["safetensors"], optional = true }
-hound = { version = "3.5", optional = true }
+hound = "3.5"
 symphonia = { version = "0.5", features = ["mp3", "flac", "vorbis", "pcm"], optional = true }
 rubato = { version = "3", optional = true }
 
-image = { version = "0.25", default-features = false, features = ["png", "jpeg"], optional = true }
-base64 = { version = "0.22", optional = true }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+base64 = "0.22"
 # Fast ONNX executor for the OCR pipeline (`ort` feature). rc.13 wraps
 # onnxruntime 1.28; the vitis.rs load-dynamic gating bug (#547) was rc.12.
 # load-dynamic (host supplies onnxruntime.dll via ORT_DYLIB_PATH or PATH) —
@@ -99,6 +99,9 @@ serde_json = { version = "1", features = ["preserve_order"] }
 [[bench]]
 name = "perf"
 harness = false
+# Drives the candle vision runtime directly (`vision::lora_weights`), so it
+# cannot compile in a candle-free build.
+required-features = ["candle"]
 
 [[bench]]
 name = "compare"
@@ -197,14 +200,39 @@ required-features = ["voxcpm"]
 name = "chronos2_load_probe"
 required-features = ["chronos2"]
 
+# -- Candle-only targets ------------------------------------------------------
+# These drive the candle runtimes directly (candle / candle-transformers /
+# tokenizers / `vision::candle_yolo` / `RerankImpl::Jina`), so they cannot
+# compile in a candle-free build. The router-only consumers -- telencephalon
+# and shadow-desktop -- depend on neuron with `default-features = false`, so
+# without these gates the whole crate stops being testable without candle.
+#
+# `chronos2_bench` and the three examples below are auto-discovered targets;
+# declaring them explicitly is the only way to attach `required-features`.
+[[bench]]
+name = "chronos2_bench"
+required-features = ["candle"]
+
+[[example]]
+name = "vision_api_comprehensive"
+required-features = ["candle"]
+
+[[example]]
+name = "mxbai_score_check"
+required-features = ["candle"]
+
+[[example]]
+name = "jina_score_check"
+required-features = ["candle"]
+
 [features]
 default = ["candle"]
-candle = ["dep:candle", "dep:candle-nn", "dep:candle-transformers", "dep:tokenizers", "dep:image", "dep:base64", "dep:safetensors", "dep:wide"]
+candle = ["dep:candle", "dep:candle-nn", "dep:candle-transformers", "dep:tokenizers", "dep:safetensors", "dep:wide"]
 flash-attn = ["candle-transformers/flash-attn", "dep:candle-flash-attn"]
 metal = ["candle/metal", "candle-nn/metal", "candle-transformers/metal"]
 cuda = ["candle/cuda", "candle-nn/cuda", "candle-transformers/cuda"]
 chronos2 = ["candle"]
-voxcpm = ["dep:burn", "dep:burn-store", "dep:hound", "dep:base64", "dep:tokenizers"]
+voxcpm = ["dep:burn", "dep:burn-store", "dep:tokenizers"]
 # Burn-side CUDA backend for the VoxCPM2 TTS runtime (CubeCL kernels).
 # Separate from the `cuda` feature above, which is candle's: pulling
 # burn/cuda in compiles the CubeCL stack, which is a heavy build. Combine
@@ -230,7 +258,7 @@ ndarray = ["dep:ndarray"]
 # gating bug is fixed).
 tract = ["dep:tract-onnx", "dep:ndarray", "dep:tokenizers", "dep:rustfft", "ocr"]
 ort = ["dep:ort", "ocr"]
-ocr = ["dep:image", "dep:base64"]
+ocr = []
 sherpa = ["dep:sherpa-onnx"]
 
 

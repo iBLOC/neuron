@@ -199,6 +199,7 @@ pub fn parse_size(size: &str) -> Option<(usize, usize)> {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "candle")]
     #[test]
     fn test_image_gen_impl_parse() {
         assert_eq!(

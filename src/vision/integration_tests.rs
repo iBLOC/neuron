@@ -13,6 +13,7 @@ use crate::vision::{BBox, Detection, VisionImpl, VisionTask};
 
 /// Test: full YOLOv8 detection pipeline uses the correct final
 /// detection shape (YOLOv8 uses anchor-based layout).
+#[cfg(feature = "candle")]
 #[test]
 fn test_yolov8_pipeline_uses_anchor_layout() {
     assert_eq!(VisionTask::Detect, Default::default());

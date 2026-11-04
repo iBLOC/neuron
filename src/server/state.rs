@@ -38,7 +38,7 @@ pub struct ServerState {
 
     // -- Runtime registration locks (for dynamic model loading) --
     // These wrap the registries above to allow &mut self registration at runtime.
-    // Cortex uses these via register_model() to dynamically load models.
+    // The 端脑 uses these via register_model() to dynamically load models.
     pub(crate) llm_registry_lock: Arc<Mutex<LlmRuntimeRegistry>>,
     pub(crate) tts_registry_lock: Arc<Mutex<crate::tts::TtsRuntimeRegistry>>,
     pub(crate) asr_registry_lock: Arc<Mutex<crate::asr::AsrRuntimeRegistry>>,
@@ -82,6 +82,7 @@ pub struct ServerState {
     pub catalog: Arc<crate::models::Catalog>,
 
     // -- Mage-VL StreamMind gate (lazy-loaded single instance) --
+    #[cfg(feature = "candle")]
     pub mage_vl_gate: Arc<crate::mage_vl::http::GateRuntime>,
 }
 
@@ -198,6 +199,7 @@ impl ServerState {
                     );
                 }
             }
+            #[cfg(feature = "candle")]
             Some("mage_vl") => {
                 let model_id = crate::config::env_var_result("MAGE_VL_MODEL_ID")
                     .unwrap_or_else(|_| "microsoft/Mage-VL".to_string());
@@ -996,6 +998,7 @@ impl ServerState {
             config,
             puller,
             catalog,
+            #[cfg(feature = "candle")]
             mage_vl_gate: Arc::new(crate::mage_vl::http::GateRuntime::new()),
         }
     }
@@ -1266,6 +1269,7 @@ mod tests {
     /// by the gated integration test in `mage_vl::runtime`.
     #[test]
     #[serial_test::serial]
+    #[cfg(feature = "candle")]
     fn mage_vl_runtime_registers_under_mage_vl_env_var() {
         // Snapshot and restore so the test doesn't leak into other
         // tests in the same process.

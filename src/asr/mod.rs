@@ -37,6 +37,8 @@ impl AsrImpl {
             Self::Tract => "tract",
             #[cfg(feature = "sherpa")]
             Self::Sherpa => "sherpa",
+            #[cfg(not(any(feature = "candle", feature = "tract", feature = "sherpa")))]
+            _ => "unavailable",
         }
     }
 

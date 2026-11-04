@@ -27,6 +27,7 @@
 use std::collections::BTreeMap;
 
 use serde_json::Value;
+#[cfg(any(feature = "candle", feature = "tract"))]
 use tokenizers::Tokenizer;
 
 use super::postprocess::QuestionType;
@@ -75,6 +76,7 @@ pub struct SpecialIds {
 
 impl SpecialIds {
     /// Look the three template tokens up in a loaded tokenizer.
+#[cfg(any(feature = "candle", feature = "tract"))]
     pub fn from_tokenizer(tok: &Tokenizer) -> Result<Self, String> {
         let get = |name: &str| -> Result<u32, String> {
             tok.token_to_id(name)
@@ -292,6 +294,7 @@ pub fn serialize_state(state: &Value) -> String {
 // --------------------------------------------------------------------------
 
 /// Tokenize a text span with no added special tokens.
+#[cfg(any(feature = "candle", feature = "tract"))]
 pub fn encode_text(tok: &Tokenizer, text: &str) -> Result<Vec<i64>, String> {
     let enc = tok.encode(text, false).map_err(|e| format!("tokenize: {e}"))?;
     Ok(enc.get_ids().iter().map(|&i| i as i64).collect())
@@ -304,6 +307,7 @@ pub fn encode_text(tok: &Tokenizer, text: &str) -> Result<Vec<i64>, String> {
 /// and reuse it across every question. `truncate_left` picks which end of the
 /// state is dropped when the total exceeds `max_len`.
 #[allow(clippy::too_many_arguments)]
+#[cfg(any(feature = "candle", feature = "tract"))]
 pub fn build_sequence(
     tok: &Tokenizer,
     specials: &SpecialIds,
@@ -424,6 +428,7 @@ pub fn build_sequence(
     })
 }
 
+#[cfg(any(feature = "candle", feature = "tract"))]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -719,6 +724,7 @@ mod tests {
 /// `serialize_state` and records what came back. Anything here that differs
 /// from those vectors means the port is not bit-exact and the model would be
 /// fed a template it was not trained on.
+#[cfg(any(feature = "candle", feature = "tract"))]
 #[cfg(test)]
 mod golden_tests {
     use super::*;

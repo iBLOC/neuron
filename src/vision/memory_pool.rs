@@ -65,6 +65,7 @@ impl TensorPool {
     }
 }
 
+#[cfg(feature = "candle")]
 #[cfg(test)]
 mod tests {
     use super::*;

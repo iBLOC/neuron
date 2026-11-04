@@ -189,6 +189,7 @@ pub trait RerankRuntime: Send + Sync {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "candle")]
     #[tokio::test]
     #[serial_test::serial]
     async fn test_candle_rerank_load_without_env_returns_useful_error() {
@@ -200,6 +201,7 @@ mod tests {
         assert!(err.message.contains("NEURON_RERANK_MODEL_PATH"));
     }
 
+    #[cfg(feature = "candle")]
     #[tokio::test]
     async fn test_candle_rerank_rerank_returns_not_initialized() {
         let runtime = super::candle::CandleRerankRuntime::new();
@@ -210,12 +212,14 @@ mod tests {
         assert_eq!(err.error_type, "not_initialized");
     }
 
+    #[cfg(feature = "candle")]
     #[test]
     fn test_candle_rerank_name() {
         let runtime = super::candle::CandleRerankRuntime::new();
         assert_eq!(runtime.name(), "candle-rerank");
     }
 
+    #[cfg(feature = "candle")]
     #[test]
     fn test_candle_rerank_list_models_returns_bge_reranker_base() {
         let runtime = super::candle::CandleRerankRuntime::new();

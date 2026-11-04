@@ -14,6 +14,7 @@ pub mod embedding;
 pub mod engine;
 pub mod imagegen;
 pub mod llm;
+#[cfg(feature = "candle")]
 pub mod mage_vl;
 pub mod metrics;
 pub mod models;
@@ -77,8 +78,10 @@ pub use rerank::candle::CandleRerankRuntime;
 pub use rerank::mxbai::MxbaiRerankRuntime;
 #[cfg(feature = "candle")]
 pub use rerank::jina::JinaRerankRuntime;
+#[cfg(feature = "candle")]
+pub use rerank::BgeRerankRuntime;
 pub use rerank::{
-    BgeRerankRuntime, RerankImpl, RerankRequest, RerankResponse, RerankResult, RerankRuntime,
+    RerankImpl, RerankRequest, RerankResponse, RerankResult, RerankRuntime,
     RerankRuntimeRegistry, RerankUsage,
 };
 pub use server::{

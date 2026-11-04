@@ -48,6 +48,8 @@ impl EmbeddingImpl {
             Self::Candle => "candle",
             #[cfg(feature = "candle")]
             Self::Gemma2 => "gemma2",
+            #[cfg(not(feature = "candle"))]
+            _ => "unavailable",
         }
     }
 

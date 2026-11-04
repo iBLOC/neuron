@@ -1020,4 +1020,22 @@ pub async fn forecast(
 }
 
 
+#[cfg(feature = "candle")]
 pub use crate::mage_vl::http::gate_score;
+
+/// `POST /v1/vision/gate/score` — stub for builds without `candle`.
+///
+/// The route stays registered in candle-free builds so the HTTP
+/// surface is identical either way: a client that calls it gets an
+/// explicit `503` instead of a `404` that would be ambiguous with
+/// a wrong path.
+#[cfg(not(feature = "candle"))]
+pub async fn gate_score(
+    State(_state): State<ServerState>,
+    Json(_req): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    Err((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "vision gate scoring requires the `candle` feature".to_string(),
+    ))
+}

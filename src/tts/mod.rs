@@ -21,7 +21,6 @@ pub mod voxcpm_burn;
 
 /// Voice-clone reference-audio decoding shared by the HTTP handler and the
 /// VoxCPM2 runtime.
-#[cfg(any(feature = "candle", feature = "voxcpm"))]
 pub mod clone_audio;
 
 pub mod registry;
