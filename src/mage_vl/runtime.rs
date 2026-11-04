@@ -2,7 +2,7 @@
 //! multimodal model. Hosts the same checkpoint as
 //! `MageVLModel::load_safetensors` but speaks the new
 //! `engine::LlmRuntime` trait (`execute` / `execute_stream` /
-//! `capabilities` / `name`) so cortex can dispatch chat requests
+//! `capabilities` / `name`) so the 端脑 can dispatch chat requests
 //! to it via `state.engines.llm`.
 //!
 //! Vision tower: mage_vl::vision::MageViT (our candle port) for
