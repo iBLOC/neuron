@@ -159,6 +159,12 @@ impl crate::engine::LlmRuntime for RemoteLlmEngine {
     fn name(&self) -> &str {
         "remote"
     }
+
+    /// 远端引擎 ⇒ **不占本机内存** ⇒ ⇒ 模型调度器不该把它当成本地权重
+    /// 收编成 resident（否则闲置回收会把它逐出 —— 见 `LlmRuntime::is_remote`）。
+    fn is_remote(&self) -> bool {
+        true
+    }
 }
 
 #[cfg(test)]

@@ -48,6 +48,19 @@ pub trait LlmRuntime: Send + Sync {
 
     fn capabilities(&self) -> &ModelCapabilities;
     fn name(&self) -> &str;
+
+    /// 这个引擎是不是**远端**的（HTTP 转发到别的机器/服务）。
+    ///
+    /// ⚠️ **为什么要有这条**（真机 2026-11-04 实证）：远端引擎**不占本机
+    /// 内存**（它只是一条 HTTP 转发）⇒ ⇒ 模型调度器（内存预算 / 闲置
+    /// 回收）**不该管它** ⇒ ⇒ 而一旦它进了调度器的 resident 表，闲置
+    /// `idle_evict_secs`（默认 120 秒）之后 reaper 会把它 `unregister`
+    /// 掉 ⇒ ⇒ 「手机借 PC 的模型」这条链**每闲置 2 分钟就断一次**
+    /// （实测：答完 9×9 闲置 150 秒，下一条立刻报
+    /// 「no engine registered for model 'llm/qwen2.5-0.5b'」）。
+    fn is_remote(&self) -> bool {
+        false
+    }
 }
 
 #[async_trait]

@@ -74,6 +74,21 @@ pub async fn adapter_dispatch_at(
     let scheduled = capability == Capability::Llm && state.llm_scheduler.enabled();
     let (engine, lease): (Arc<dyn AnyCapabilityEngine>, Option<ModelLease>) = if scheduled {
         let target = resolve_llm_target(&state, &model_id)?;
+        // ⚠️⚠️ **远端引擎不进调度器** —— 它**不占本机内存**（只是一条
+        // HTTP 转发）⇒ ⇒ 调度器的 resident / 内存预算语义对它没有意义
+        // ⇒ ⇒ 而一旦进去，闲置 `idle_evict_secs`（默认 120 秒）之后
+        // reaper 会 `unregister` 掉它 ⇒ ⇒ 「手机借 PC 的模型」这条链
+        // **每闲置 2 分钟就断一次**（真机 2026-11-04 实测：答完 9×9
+        // 闲置 150 秒，下一条立刻报「no engine registered」）。
+        let remote = state
+            .engines
+            .lookup(Capability::Llm, &target)
+            .map(|e| e.is_remote())
+            .unwrap_or(false);
+        if remote {
+            // 直接派发 —— 不申请 lease、不成为 resident ⇒ 不会被逐出。
+            (resolve_llm_engine_strict(&state, &target).await?, None)
+        } else {
         let lease = state
             .llm_scheduler
             .acquire(target.clone())
@@ -87,6 +102,7 @@ pub async fn adapter_dispatch_at(
                 state.llm_scheduler.mark_load_failed(&target);
                 return Err(err);
             }
+        }
         }
     } else {
         (resolve_engine_legacy(&state, capability, &model_id).await?, None)
@@ -245,6 +261,17 @@ async fn resolve_engine_legacy(
             Ok(rt) => return Ok(Arc::new(crate::engine::bridge::LlmRuntimeBridge::new(rt, model_id))),
             Err(e) => {
                 eprintln!("[neuron] llm fallback runtime_for({model_id:?}) failed: {e}");
+                // ⚠️ `llm/<name>` vs `<name>` —— 同一个模型的两套命名（见 `llm_bare_id`）。
+                if let Some(bare) = llm_bare_id(model_id) {
+                    if let Ok(rt) = state.llm_registry.runtime_for(bare).await {
+                        return Ok(Arc::new(crate::engine::bridge::LlmRuntimeBridge::new(rt, bare)));
+                    }
+                }
+                // ⚠️⚠️ 点名了不存在的模型 ⇒ 报错，不拿别的模型顶上（理由同
+                // `resolve_llm_target`）。
+                if !model_id.trim().is_empty() {
+                    return Err(ApiError::NoEngineForModel(model_id.to_string()));
+                }
                 let first = state.llm_registry.registered.lock().unwrap().first().cloned();
                 if let Some(entry) = first {
                     match state.llm_registry.runtime_for(&entry.model_id).await {
@@ -268,10 +295,33 @@ async fn resolve_engine_legacy(
     Err(ApiError::NoEngineForModel(model_id.to_string()))
 }
 
-/// Effective model id for a scheduler-admitted request: the requested
-/// id when it resolves to an engine, otherwise the first registered
-/// model (mirrors the legacy fallback so omitting/misspelling `model`
-/// keeps serving the platform default instead of erroring).
+/// The LLM model id **without** its `llm/` capability prefix.
+///
+/// The catalog publishes model ids as `<engine>/<name>` (see
+/// `models/catalog.rs`: `format!("{}/{}", engine.as_str(), id)`) while the
+/// **runtime registries** hold the bare name `<name>` — one model, two
+/// naming conventions.
+///
+/// ⇒ A request naming `llm/qwen2.5-0.5b` has to be able to find the
+/// engine registered as `qwen2.5-0.5b`. Without this, that request only
+/// works because of the "serve the first registered model" fallback —
+/// i.e. it works **by accident**, not **by name**.
+fn llm_bare_id(requested: &str) -> Option<&str> {
+    requested.strip_prefix("llm/")
+}
+
+/// Effective model id for a scheduler-admitted request.
+///
+/// ⚠️ **点名了哪个模型，就必须是哪个模型答。**
+///
+/// The old shape answered an unknown id with **the first registered
+/// model** ("so omitting/misspelling `model` keeps serving the platform
+/// default"), which merged two different situations into one:
+/// * **没点名**（model 字段是空的）⇒ 走平台默认 —— 这个保留；
+/// * **点了名但不存在** ⇒ 以前拿别的模型顶上 ⇒ ⇒ 实测（桌面端大脑，
+///   2026-11-04）：`llm/does-not-exist-xyz` ⇒ **HTTP 200 + 正常答案**
+///   ⇒ ⇒ 「换模型」看起来生效了，实际跑的是**另一个模型** —— 这类
+///   「失败长得像成功」让整条模型路由**没法验证**。
 fn resolve_llm_target(
     state: &crate::server::state::ServerState,
     requested: &str,
@@ -282,10 +332,23 @@ fn resolve_llm_target(
     if state.llm_registry.is_registered(requested) {
         return Ok(requested.to_string());
     }
+    // ⚠️ `llm/<name>` vs `<name>` —— 同一个模型的两套命名（见 `llm_bare_id`）。
+    if let Some(bare) = llm_bare_id(requested) {
+        if state.engines.lookup(Capability::Llm, bare).is_some()
+            || state.llm_registry.is_registered(bare)
+        {
+            return Ok(bare.to_string());
+        }
+    }
+    // ⚠️⚠️ **点名了一个不存在的模型 ⇒ 老实报错**（理由见上面的注释）。
+    if !requested.trim().is_empty() {
+        return Err(ApiError::NoEngineForModel(requested.to_string()));
+    }
+    // 没点名 ⇒ 平台默认（第一个已注册的）。
     let first_entry = state.llm_registry.registered.lock().unwrap().first().cloned();
     if let Some(first) = first_entry {
         eprintln!(
-            "[neuron] scheduler: model {requested:?} not registered, serving first registered {:?}",
+            "[neuron] scheduler: no model named, serving first registered {:?}",
             first.model_id
         );
         return Ok(first.model_id.clone());
@@ -437,6 +500,188 @@ mod tests {
         assert_eq!(st.residents.len(), 1, "mock-model resident");
         assert_eq!(st.residents[0].active_leases, 0);
         assert_eq!(st.stats.load_admissions, 1);
+    }
+
+    /// An engine that says **who it is** —— so a test can tell *which*
+    /// model actually answered.
+    struct NamedEngine {
+        id: &'static str,
+    }
+
+    #[async_trait]
+    impl crate::engine::LlmRuntime for NamedEngine {
+        async fn execute(
+            &self,
+            req: CanonicalLlmRequest,
+        ) -> crate::llm::ChatResult<CanonicalLlmResponse> {
+            let mut r = mock_response(&req);
+            r.content = vec![ContentBlock::Text(TextBlock { text: self.id.into() })];
+            Ok(r)
+        }
+        async fn execute_stream(
+            &self,
+            _req: CanonicalLlmRequest,
+        ) -> crate::llm::ChatResult<
+            futures_util::stream::BoxStream<'static, CanonicalLlmStreamEvent>,
+        > {
+            Ok(Box::pin(futures_util::stream::empty()))
+        }
+        fn capabilities(&self) -> &crate::capabilities::ModelCapabilities {
+            static CAPS: std::sync::OnceLock<crate::capabilities::ModelCapabilities> =
+                std::sync::OnceLock::new();
+            CAPS.get_or_init(crate::capabilities::ModelCapabilities::default)
+        }
+        fn name(&self) -> &str {
+            self.id
+        }
+    }
+
+    /// ⚠️⚠️ **点名了一个不存在的模型 ⇒ 必须报错，不许拿别的模型顶上。**
+    ///
+    /// **为什么**：以前这里是「拿第一个已注册的顶上」⇒ ⇒ 实测（桌面端大脑，
+    /// 2026-11-04）：`llm/does-not-exist-xyz` ⇒ **HTTP 200 + 正常答案**
+    /// ⇒ ⇒ 「换模型」看起来生效了，实际跑的是**另一个模型**。
+    ///
+    /// **它能不能被证伪**：能 —— 把「点名了不存在的 ⇒ 报错」那一条拿掉，
+    /// 这条立刻变绿（又变成 200）。
+    #[tokio::test]
+    async fn a_named_model_that_does_not_exist_is_not_answered_by_another_model() {
+        let state = crate::server::state::ServerState::new(crate::config::NeuronConfig::default());
+        state
+            .engines
+            .llm
+            .register("qwen2.5-0.5b".into(), Arc::new(NamedEngine { id: "qwen2.5-0.5b" }));
+
+        let err = adapter_dispatch_at(
+            State(state.clone()),
+            post_request(chat_body("llm/does-not-exist-xyz", false)),
+            "/v1/chat/completions",
+        )
+        .await
+        .expect_err("an unknown model id must not be served by another model");
+        assert!(
+            matches!(&err, ApiError::NoEngineForModel(m) if m.as_str() == "llm/does-not-exist-xyz"),
+            "expected no_engine_for_model, got {err:?}"
+        );
+    }
+
+    /// ⚠️ **前缀容错**：目录公布 `llm/qwen2.5-0.5b`，注册表存 `qwen2.5-0.5b`
+    /// ⇒ ⇒ 点名 `llm/qwen2.5-0.5b` 必须**按名字**找到那个引擎。
+    ///
+    /// ⚠️ **它为什么有分辨力**：这里**故意**先注册另一个引擎 `zzz-other`
+    /// ⇒ ⇒ 老代码（靠「拿第一个已注册的顶上」）会答 `zzz-other`，
+    /// 正确行为是答 `qwen2.5-0.5b` ⇒ ⇒ 关掉前缀容错，这一条立刻变红。
+    #[tokio::test]
+    async fn the_catalog_style_prefixed_id_finds_the_bare_registered_engine() {
+        let state = crate::server::state::ServerState::new(crate::config::NeuronConfig::default());
+        state
+            .engines
+            .llm
+            .register("zzz-other".into(), Arc::new(NamedEngine { id: "zzz-other" }));
+        state
+            .engines
+            .llm
+            .register("qwen2.5-0.5b".into(), Arc::new(NamedEngine { id: "qwen2.5-0.5b" }));
+
+        let resp = adapter_dispatch_at(
+            State(state.clone()),
+            post_request(chat_body("llm/qwen2.5-0.5b", false)),
+            "/v1/chat/completions",
+        )
+        .await
+        .expect("the prefixed id must resolve to the bare registered engine");
+        assert_eq!(resp.status(), 200);
+        let bytes = to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            json["choices"][0]["message"]["content"], "qwen2.5-0.5b",
+            "the model that was named must be the model that answered"
+        );
+    }
+
+    /// 一个**远端**引擎（`is_remote() == true`）—— 模拟程序化注册的云端
+    /// 供应商（端脑的 `neuron_embed::register_remote_llm` 走的就是这条）。
+    struct RemoteMockEngine;
+
+    #[async_trait]
+    impl crate::engine::LlmRuntime for RemoteMockEngine {
+        async fn execute(
+            &self,
+            req: CanonicalLlmRequest,
+        ) -> crate::llm::ChatResult<CanonicalLlmResponse> {
+            Ok(mock_response(&req))
+        }
+        async fn execute_stream(
+            &self,
+            _req: CanonicalLlmRequest,
+        ) -> crate::llm::ChatResult<
+            futures_util::stream::BoxStream<'static, CanonicalLlmStreamEvent>,
+        > {
+            Ok(Box::pin(futures_util::stream::empty()))
+        }
+        fn capabilities(&self) -> &crate::capabilities::ModelCapabilities {
+            static CAPS: std::sync::OnceLock<crate::capabilities::ModelCapabilities> =
+                std::sync::OnceLock::new();
+            CAPS.get_or_init(crate::capabilities::ModelCapabilities::default)
+        }
+        fn name(&self) -> &str {
+            "remote-mock"
+        }
+        /// 远端引擎 ⇒ **不占本机内存** ⇒ ⇒ 不该被调度器逐出。
+        fn is_remote(&self) -> bool {
+            true
+        }
+    }
+
+    /// ⚠️ **这条钉桩的形状**：远端引擎**不进 resident 表**，且**闲置回收
+    /// 跑完它还在** —— 没有它，手机借 PC 的模型会**每闲置 2 分钟断一次**
+    /// （真机 2026-11-04 实测：答完 9×9 闲置 150 秒，下一条立刻报
+    /// 「no engine registered for model 'llm/qwen2.5-0.5b'」）。
+    ///
+    /// ⚠️ **它能不能被证伪**：能 —— 把 `is_remote` 的分支去掉（或让远端
+    /// 引擎也走 `acquire`），远端引擎就会变成 resident ⇒ ⇒ 第一个断言
+    /// 「residents 为空」直接红 ⇒ ⇒ 修复与钉桩是**绑在一起**的。
+    #[tokio::test]
+    async fn a_remote_engine_is_never_a_resident_and_survives_the_idle_reaper() {
+        let mut config = crate::config::NeuronConfig::default();
+        // 闲置窗口设成 0 ⇒ reaper 随时可以回收（下面要证明它**没有**可回收的）。
+        config.scheduler.idle_evict_secs = 0;
+        let state = crate::server::state::ServerState::new(config);
+        state
+            .engines
+            .llm
+            .register("remote-model".into(), Arc::new(RemoteMockEngine));
+
+        // 走一遍真实派发路径（与手机上是同一条）。
+        let resp = adapter_dispatch_at(
+            State(state.clone()),
+            post_request(chat_body("remote-model", false)),
+            "/v1/chat/completions",
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp.status(), 200);
+        let bytes = to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["choices"][0]["message"]["content"], "mock says hi");
+
+        // ⚠️ **它不是 resident** —— 调度器压根没收编它（它不占本机内存）。
+        let st = state.llm_scheduler.status();
+        assert!(
+            st.residents.is_empty(),
+            "远端引擎不该进 resident 表：{:?}",
+            st.residents
+        );
+
+        // 闲置回收跑一轮 ⇒ 引擎**仍然在**。
+        state.llm_scheduler.evict_idle();
+        assert!(
+            state
+                .engines
+                .lookup(crate::capabilities::Capability::Llm, "remote-model")
+                .is_some(),
+            "远端引擎被闲置回收逐出了"
+        );
     }
 
     #[tokio::test]
