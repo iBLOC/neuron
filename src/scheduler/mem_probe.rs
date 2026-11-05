@@ -71,17 +71,25 @@ mod platform {
     use super::Snapshot;
 
     pub fn read(s: &mut Snapshot) {
-        use libc::{mach_msg_type_number_t, mach_task_self_, task_vm_info, TASK_VM_INFO};
+        // ⚠️ 用 `mach_task_basic_info`，不是 `task_vm_info`：后者
+        //    **任何已发布的 libc 都没有**（0.2.191 是最新，查无此符号）
+        //    ⇒ ⇒ 这段自 2026-09-29 进仓起就没在 macOS 上编译过（CI 只在
+        //    ubuntu 上编）⇒ ⇒ 桌面端发布流水线第一次真编 macOS 才炸：
+        //    E0432 unresolved imports `libc::task_vm_info`。
+        //    `mach_task_basic_info`（libc 有）带 `resident_size` —— 正是
+        //    这里的意图；交叉 check 过 aarch64-apple-darwin。
+        use libc::{
+            mach_msg_type_number_t, mach_task_basic_info, mach_task_self_,
+            MACH_TASK_BASIC_INFO, MACH_TASK_BASIC_INFO_COUNT,
+        };
         unsafe {
-            let mut info: task_vm_info = std::mem::zeroed();
-            let count =
-                (std::mem::size_of::<task_vm_info>() / std::mem::size_of::<libc::natural_t>())
-                    as mach_msg_type_number_t;
+            let mut info: mach_task_basic_info = std::mem::zeroed();
+            let mut count: mach_msg_type_number_t = MACH_TASK_BASIC_INFO_COUNT;
             let kr = libc::task_info(
                 mach_task_self_ as libc::task_t,
-                TASK_VM_INFO,
+                MACH_TASK_BASIC_INFO,
                 (&mut info as *mut _) as libc::task_info_t,
-                &count as *mut _ as *mut mach_msg_type_number_t,
+                &mut count,
             );
             if kr == libc::KERN_SUCCESS {
                 s.rss_bytes = info.resident_size as u64;
