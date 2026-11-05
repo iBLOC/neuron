@@ -552,6 +552,7 @@ pub async fn audio_transcriptions(
     mut multipart: Multipart,
 ) -> Result<Json<TranscriptionResponse>, ServerError> {
     let mut file_bytes: Option<Vec<u8>> = None;
+    let mut language: Option<String> = None;
 
     while let Some(field) = multipart
         .next_field()
@@ -567,6 +568,13 @@ pub async fn audio_transcriptions(
                     .map_err(|e| ServerError::BadRequest(format!("file read: {}", e)))?
                     .to_vec(),
             );
+        } else if name == "language" {
+            language = Some(
+                field
+                    .text()
+                    .await
+                    .map_err(|e| ServerError::BadRequest(format!("language read: {}", e)))?,
+            );
         }
     }
 
@@ -575,7 +583,7 @@ pub async fn audio_transcriptions(
 
     let transcription = state
         .asr
-        .transcribe(&bytes, None)
+        .transcribe(&bytes, language.as_deref())
         .await
         .map_err(|e| ServerError::Internal(e.to_string()))?;
 
