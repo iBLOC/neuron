@@ -477,7 +477,14 @@ impl ServerState {
                 }
             }
         }
-        let asr_shortcut = asr_registry.default_runtime();
+        // The shortcut must not load the weights here: `ServerState::new`
+        // runs inside the host's tokio runtime, where the registry's
+        // blocking load panics with "Cannot start a runtime from within a
+        // runtime" (measured 2026-11-05: an embedded neuron that had an ASR
+        // engine registered **died at boot**). The lazy proxy resolves the
+        // default model on the first request instead -- same shape as TTS.
+        let asr_registry = Arc::new(asr_registry);
+        let asr_shortcut = asr_registry.lazy_default_runtime();
 
         // ---- Rerank registry ----------------------------------------------
         let mut rerank_registry = crate::rerank::RerankRuntimeRegistry::new(config_arc.clone());
@@ -912,7 +919,7 @@ impl ServerState {
 
         let llm_registry_lock = Arc::new(Mutex::new(llm_registry.clone()));
         let tts_registry_lock = Arc::new(Mutex::new((*tts_registry).clone()));
-        let asr_registry_lock = Arc::new(Mutex::new(asr_registry.clone()));
+        let asr_registry_lock = Arc::new(Mutex::new((*asr_registry).clone()));
         let rerank_registry_lock = Arc::new(Mutex::new(rerank_registry.clone()));
         let embedding_registry_lock = Arc::new(Mutex::new(embedding_registry.clone()));
         let vision_registry_lock = Arc::new(Mutex::new(vision_registry.clone()));
@@ -957,7 +964,7 @@ impl ServerState {
         Self {
             llm_registry: llm_registry_arc,
             tts_registry,
-            asr_registry: Arc::new(asr_registry),
+            asr_registry,
             rerank_registry: Arc::new(rerank_registry),
             embedding_registry: Arc::new(embedding_registry),
             vision_registry: Arc::new(vision_registry),
