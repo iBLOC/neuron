@@ -213,6 +213,17 @@ required-features = ["chronos2"]
 name = "chronos2_bench"
 required-features = ["candle"]
 
+# The intent-contract probe drives the local model through the **candle**
+# LLM runtime (`LlmImpl::Candle`), and that enum variant only exists behind
+# the `candle` feature. Without this gate the *candle-free* build
+# (`cargo check --no-default-features --all-targets`) cannot compile this
+# test target at all -> E0599 -> the router-only consumers (telencephalon /
+# shadow-desktop) lose the whole crate as a testable dependency.
+# Same rationale as the candle-only bench/examples below.
+[[test]]
+name = "llm_intent_contract_probe"
+required-features = ["candle"]
+
 [[example]]
 name = "vision_api_comprehensive"
 required-features = ["candle"]
