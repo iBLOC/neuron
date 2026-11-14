@@ -61,27 +61,78 @@ impl HuggingFaceSource {
         }
     }
 
-    /// True when the configured CLI binary exists on disk (no
-    /// PATH lookup — we honour the exact path the caller gave us).
+    /// True when a usable CLI binary exists on disk.
     fn cli_is_available(&self) -> bool {
-        // An absolute or relative-to-cwd path that resolves to a file.
+        self.resolve_cli().is_some()
+    }
+
+    /// The CLI binary to spawn: prefer the new `hf` CLI, then the
+    /// configured path as-is.
+    ///
+    /// ⚠️ `hf` comes first on purpose: since huggingface_hub 1.x the
+    /// legacy `huggingface-cli` is a **deprecated shim that no longer
+    /// works** — it prints a usage banner and exits instead of
+    /// downloading (verified on a real install, 2026-11-14). Machines
+    /// with only the old hub have no `hf` on PATH and fall through to
+    /// the configured path, which still works there.
+    fn resolve_cli(&self) -> Option<PathBuf> {
+        let hf = std::ffi::OsStr::new("hf");
+        // A configured path that names the new CLI directly wins.
+        if self.cli_path.is_file()
+            && self.cli_path.file_name().map(|n| n == hf).unwrap_or(false)
+        {
+            return Some(self.cli_path.clone());
+        }
+        if let Some(found) = find_cli_on_path(hf) {
+            return Some(found);
+        }
+        // An absolute / relative-to-cwd configured path.
         if self.cli_path.is_file() {
-            return true;
+            return Some(self.cli_path.clone());
         }
         // A bare command name — search PATH manually. This mirrors
         // the `which` semantics the model-scope source already uses.
         if let Some(file_name) = self.cli_path.file_name()
             && file_name == self.cli_path.as_os_str()
-                && let Ok(path) = std::env::var("PATH") {
-                    for dir in path.split(':') {
-                        let candidate = PathBuf::from(dir).join(file_name);
-                        if candidate.is_file() {
-                            return true;
-                        }
-                    }
-                }
-        false
+        {
+            return find_cli_on_path(file_name);
+        }
+        None
     }
+}
+
+/// Search `PATH` for a bare command name, honouring the platform
+/// separator via `std::env::split_paths` and the Windows PATHEXT
+/// convention — `huggingface-cli` installs as `huggingface-cli.exe`,
+/// so the bare name only resolves if we also try the `.exe` suffix.
+///
+/// ⚠️ The previous implementation did `path.split(':')` — the Unix
+/// separator — so on Windows the search never found anything and
+/// every Windows machine silently fell back to the raw HTTP
+/// downloader even with `huggingface-cli` installed (resumable,
+/// token-aware) sitting right there on PATH.
+fn find_cli_on_path(file_name: &std::ffi::OsStr) -> Option<PathBuf> {
+    let path_var = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path_var) {
+        let candidate = dir.join(file_name);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+        // Bare name without extension → also try the `.exe` form.
+        // Harmless on Unix (that file just won't exist) and keeps the
+        // helper testable on both platforms.
+        let has_no_extension = file_name
+            .to_str()
+            .map(|n| Path::new(n).extension().is_none())
+            .unwrap_or(false);
+        if has_no_extension {
+            let exe = dir.join(format!("{}.exe", file_name.to_string_lossy()));
+            if exe.is_file() {
+                return Some(exe);
+            }
+        }
+    }
+    None
 }
 
 #[async_trait]
@@ -125,7 +176,10 @@ impl HuggingFaceSource {
         dest_dir: &Path,
         progress_tx: UnboundedSender<DownloadProgress>,
     ) -> Result<(), String> {
-        let mut cmd = tokio::process::Command::new(&self.cli_path);
+        let cli = self
+            .resolve_cli()
+            .ok_or("no usable HuggingFace CLI found (looked for `hf`, then the configured path)")?;
+        let mut cmd = tokio::process::Command::new(&cli);
         cmd.arg("download")
             .arg(&reference.model_id)
             .arg("--local-dir").arg(dest_dir)
@@ -139,8 +193,9 @@ impl HuggingFaceSource {
             cmd.env("HF_ENDPOINT", endpoint);
         }
 
-        let mut child = cmd.spawn()
-            .map_err(|e| format!("failed to spawn {}: {e}", self.cli_path.display()))?;
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| format!("failed to spawn {}: {e}", cli.display()))?;
         let stdout = child.stdout.take()
             .ok_or("no stdout captured from huggingface-cli")?;
 
@@ -230,16 +285,32 @@ impl HuggingFaceSource {
             .build()
             .map_err(|e| format!("failed to build HTTP client: {e}"))?;
 
-        // List the repo tree via the HF REST API.
+        // List the repo tree via the HF REST API. A couple of quick
+        // retries — the tree call is small but sits on the same flaky
+        // link as the blobs, and dying here fails the whole job
+        // before a single byte lands.
         let tree_url = format!(
             "{}/models/{}/tree/{}?recursive=false",
             api_base, model_id, revision,
         );
-        let resp = client.get(&tree_url)
-            .header("Accept", "application/json")
-            .send()
-            .await
-            .map_err(|e| format!("failed to fetch tree: {e}"))?;
+        let resp = {
+            const TREE_ATTEMPTS: u32 = 3;
+            let mut last_err: Option<String> = None;
+            let mut resp = None;
+            for attempt in 1..=TREE_ATTEMPTS {
+                if attempt > 1 {
+                    tokio::time::sleep(std::time::Duration::from_secs(attempt as u64)).await;
+                }
+                match client.get(&tree_url).header("Accept", "application/json").send().await {
+                    Ok(r) => {
+                        resp = Some(r);
+                        break;
+                    }
+                    Err(e) => last_err = Some(format!("failed to fetch tree: {e}")),
+                }
+            }
+            resp.ok_or_else(|| last_err.unwrap_or_else(|| "failed to fetch tree".to_string()))?
+        };
 
         if !resp.status().is_success() {
             return Err(format!(
@@ -288,65 +359,15 @@ impl HuggingFaceSource {
                 current_file: path.to_string(),
             });
 
-            let file_resp = client.get(&download_url)
-                .send()
-                .await
-                .map_err(|e| format!("download failed for {path}: {e}"))?;
-
-            if !file_resp.status().is_success() {
-                return Err(format!(
-                    "download failed for {path}: HTTP {} — gated repos require `huggingface-cli` for auth",
-                    file_resp.status(),
-                ));
-            }
-
-            // Stream the response body to disk in 64 KiB chunks.
-            // The previous implementation called `resp.bytes().await`
-            // which buffered the entire file in memory — fine for a
-            // 30 MB config but fatal for an 8 GB model.safetensors.
-            // Streaming keeps peak memory bounded to one chunk and
-            // pushes intermediate progress updates so the UI
-            // progress bar actually moves.
-            let expected_size = file_resp.content_length();
-            let mut file = tokio::fs::File::create(&dest_path).await
-                .map_err(|e| format!("create {path} failed: {e}"))?;
-            let mut downloaded_in_file: u64 = 0;
-            let mut last_published_at: u64 = 0;
-            const PROGRESS_PUBLISH_BYTES: u64 = 1 << 20; // 1 MiB
-
-            let mut stream = file_resp.bytes_stream();
-            use futures_util::StreamExt;
-            use tokio::io::AsyncWriteExt;
-            while let Some(chunk) = stream.next().await {
-                let chunk = chunk
-                    .map_err(|e| format!("read body failed: {e}"))?;
-                file.write_all(&chunk).await
-                    .map_err(|e| format!("write {path} failed: {e}"))?;
-                downloaded_in_file += chunk.len() as u64;
-                // Throttle progress publishes — the `UnboundedSender`
-                // is non-blocking, but the consumer still walks a
-                // mutex on every send, so 1 MiB granularity keeps the
-                // log + UI responsive without losing detail.
-                if downloaded_in_file - last_published_at >= PROGRESS_PUBLISH_BYTES {
-                    last_published_at = downloaded_in_file;
-                    let total_so_far = bytes_downloaded + downloaded_in_file;
-                    let total_for_job = match (expected_size, bytes_downloaded) {
-                        (Some(es), 0) => Some(es),
-                        // Best-effort: when we know this file's size
-                        // we can show the running total for *this*
-                        // job; once we move to the next file we
-                        // stop reporting a global total to avoid
-                        // confusing the user with a decreasing
-                        // total_bytes number.
-                        _ => None,
-                    };
-                    let _ = progress_tx.send(DownloadProgress {
-                        bytes_downloaded: total_so_far,
-                        total_bytes: total_for_job,
-                        current_file: path.to_string(),
-                    });
-                }
-            }
+            let downloaded_in_file = Self::fetch_file_resumable(
+                &client,
+                &download_url,
+                &dest_path,
+                path,
+                bytes_downloaded,
+                &progress_tx,
+            )
+            .await?;
 
             bytes_downloaded += downloaded_in_file;
         }
@@ -358,6 +379,174 @@ impl HuggingFaceSource {
         });
 
         Ok(())
+    }
+
+    /// Download one repo file with **resume + retry**. On any
+    /// mid-stream failure (reset, stall, decode error) the next
+    /// attempt re-issues the GET with a `Range: bytes=<n>-` header
+    /// and appends to the same file handle, so a flaky link keeps
+    /// making forward progress instead of restarting from zero.
+    ///
+    /// The failure this exists for: the first connection serves a
+    /// few tens of MB and then dies (`read body failed: error
+    /// decoding response body`). Without resume every retry started
+    /// from byte 0 and died the same way — multi-GB models could
+    /// never complete on an unstable link.
+    ///
+    /// Retry budget: attempts that make **zero** progress are capped
+    /// (`MAX_STALLED_ATTEMPTS`); any attempt that moved the cursor
+    /// resets that counter. Total attempts are also capped so a
+    /// 1-byte-per-30s trickle cannot loop forever. A 30 s idle
+    /// timeout converts a hung stream into a normal retry, and
+    /// backoff grows 1s→30s, resetting whenever bytes flow again.
+    ///
+    /// `total_bytes` progress reporting is best-effort `None` here —
+    /// the queue UI renders MB counts without it; a correct total
+    /// would need re-deriving after every resume (206 content-length
+    /// is the *remaining* bytes) and lies more often than it helps.
+    async fn fetch_file_resumable(
+        client: &reqwest::Client,
+        url: &str,
+        dest_path: &Path,
+        display_name: &str,
+        bytes_before_file: u64,
+        progress_tx: &UnboundedSender<DownloadProgress>,
+    ) -> Result<u64, String> {
+        use futures_util::StreamExt;
+        use tokio::io::AsyncWriteExt;
+        use std::time::Duration;
+
+        const MAX_STALLED_ATTEMPTS: u32 = 8;
+        const MAX_TOTAL_ATTEMPTS: u32 = 100;
+        /// No chunk for 30 s = the stream is hung; convert to a retry.
+        const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+        const PROGRESS_PUBLISH_BYTES: u64 = 1 << 20; // 1 MiB
+
+        let mut offset: u64 = 0;
+        let mut stalled_attempts: u32 = 0;
+        let mut total_attempts: u32 = 0;
+        let mut backoff_secs: u64 = 1;
+        // One handle across attempts: a resume keeps appending in
+        // place (the write cursor sits exactly at `offset`), a
+        // forced restart recreates (and thus truncates) the file.
+        let mut file: Option<tokio::fs::File> = None;
+
+        loop {
+            total_attempts += 1;
+            if stalled_attempts >= MAX_STALLED_ATTEMPTS || total_attempts > MAX_TOTAL_ATTEMPTS {
+                return Err(format!(
+                    "download failed for {display_name}: gave up after {total_attempts} attempts (last position: byte {offset})"
+                ));
+            }
+            if total_attempts > 1 {
+                tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
+                backoff_secs = (backoff_secs * 2).min(30);
+            }
+
+            let mut req = client.get(url);
+            if offset > 0 {
+                req = req.header(reqwest::header::RANGE, format!("bytes={offset}-"));
+            }
+            let file_resp = match req.send().await {
+                Ok(r) => r,
+                Err(e) => {
+                    stalled_attempts += 1;
+                    eprintln!(
+                        "[neuron/hf] {display_name}: request failed ({e}); retrying from byte {offset}"
+                    );
+                    continue;
+                }
+            };
+
+            // 416 after a resume means the previous attempt died
+            // after writing the final byte — the file is complete.
+            if offset > 0 && file_resp.status() == reqwest::StatusCode::RANGE_NOT_SATISFIABLE {
+                break;
+            }
+            let status = file_resp.status();
+            if !status.is_success() {
+                // Transient upstream failures (5xx / 429) are worth a
+                // resume-retry; hard 4xx (401/403 gated) are not.
+                if status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                    stalled_attempts += 1;
+                    eprintln!(
+                        "[neuron/hf] {display_name}: HTTP {status}; retrying from byte {offset}"
+                    );
+                    continue;
+                }
+                return Err(format!(
+                    "download failed for {display_name}: HTTP {status} — gated repos require `huggingface-cli` for auth"
+                ));
+            }
+
+            // A 200 after we asked for a Range means the server
+            // ignored it — restart from the top (truncate).
+            if offset > 0 && status == reqwest::StatusCode::OK {
+                offset = 0;
+                file = None;
+            }
+
+            if file.is_none() {
+                file = Some(
+                    tokio::fs::File::create(dest_path)
+                        .await
+                        .map_err(|e| format!("create {display_name} failed: {e}"))?,
+                );
+            }
+            let file = file.as_mut().expect("file handle just created");
+
+            let mut stream = file_resp.bytes_stream();
+            let mut last_published_at: u64 = offset;
+            let mut finished = false;
+            while !finished {
+                let next = tokio::time::timeout(STREAM_IDLE_TIMEOUT, stream.next()).await;
+                match next {
+                    // Stream ended cleanly — this file is complete.
+                    Ok(None) => finished = true,
+                    // Read error mid-body (reset / decode failure) —
+                    // fall through to a resume retry.
+                    Ok(Some(Err(e))) => {
+                        stalled_attempts += 1;
+                        eprintln!(
+                            "[neuron/hf] {display_name}: read body failed at byte {offset} ({e}); retrying with resume"
+                        );
+                        break;
+                    }
+                    // No chunk within the idle timeout — the stream
+                    // is hung; treat it like a reset.
+                    Err(_elapsed) => {
+                        stalled_attempts += 1;
+                        eprintln!(
+                            "[neuron/hf] {display_name}: stream idle >{STREAM_IDLE_TIMEOUT:?} at byte {offset}; retrying with resume"
+                        );
+                        break;
+                    }
+                    Ok(Some(Ok(chunk))) => {
+                        file.write_all(&chunk)
+                            .await
+                            .map_err(|e| format!("write {display_name} failed: {e}"))?;
+                        offset += chunk.len() as u64;
+                        // Forward progress — both retry counters and
+                        // the backoff reset.
+                        stalled_attempts = 0;
+                        backoff_secs = 1;
+                        if offset - last_published_at >= PROGRESS_PUBLISH_BYTES {
+                            last_published_at = offset;
+                            let _ = progress_tx.send(DownloadProgress {
+                                bytes_downloaded: bytes_before_file + offset,
+                                total_bytes: None,
+                                current_file: display_name.to_string(),
+                            });
+                        }
+                    }
+                }
+            }
+            if finished {
+                break;
+            }
+        }
+
+        Ok(offset)
     }
 }
 
@@ -627,5 +816,373 @@ mod tests {
         assert_eq!(parse_size("1GiB").unwrap(), 1u64 << 30);
         // Longest-suffix match: "MiB" wins over trailing "B".
         assert_eq!(parse_size("4MiB").unwrap(), 4 * (1u64 << 20));
+    }
+
+    // -- PATH search (find_cli_on_path) --
+
+    #[serial_test::serial]
+    #[test]
+    fn test_find_cli_on_path_resolves_exe_suffix() {
+        // Windows installs `huggingface-cli` as `huggingface-cli.exe`;
+        // the bare name must resolve through the `.exe` fallback.
+        // (The old implementation split PATH on ':' — the Unix
+        // separator — so this lookup never succeeded on Windows.)
+        let tmp = tempfile::tempdir().unwrap();
+        let exe = tmp.path().join("huggingface-cli.exe");
+        std::fs::write(&exe, b"stub").unwrap();
+
+        let old_path = std::env::var_os("PATH");
+        // SAFETY: PATH mutation under the serial lock (no other test
+        // reads PATH concurrently).
+        unsafe {
+            std::env::set_var("PATH", tmp.path());
+        }
+        let found = find_cli_on_path(std::ffi::OsStr::new("huggingface-cli"));
+        if let Some(p) = &old_path {
+            // SAFETY: same serial-locked restore.
+            unsafe {
+                std::env::set_var("PATH", p);
+            }
+        }
+
+        let found = found.expect("exe-suffixed CLI must be found on PATH");
+        assert_eq!(found, exe);
+    }
+
+    #[serial_test::serial]
+    #[test]
+    fn test_find_cli_on_path_honors_platform_separator() {
+        // Two directories joined with the *platform* separator must
+        // both be searched (the old split(':') missed every dir on
+        // Windows and, conversely, would mis-split on Unix paths
+        // containing ':'-free separators).
+        let tmp_a = tempfile::tempdir().unwrap();
+        let tmp_b = tempfile::tempdir().unwrap();
+        let cli = tmp_b.path().join("my-cli-stub");
+        std::fs::write(&cli, b"stub").unwrap();
+
+        let joined = if cfg!(windows) {
+            format!("{};{}", tmp_a.path().display(), tmp_b.path().display())
+        } else {
+            format!("{}:{}", tmp_a.path().display(), tmp_b.path().display())
+        };
+
+        let old_path = std::env::var_os("PATH");
+        // SAFETY: PATH mutation under the serial lock.
+        unsafe {
+            std::env::set_var("PATH", joined);
+        }
+        let found = find_cli_on_path(std::ffi::OsStr::new("my-cli-stub"));
+        if let Some(p) = &old_path {
+            // SAFETY: same serial-locked restore.
+            unsafe {
+                std::env::set_var("PATH", p);
+            }
+        }
+
+        assert_eq!(found.expect("second PATH dir must be searched"), cli);
+    }
+
+    #[serial_test::serial]
+    #[test]
+    fn test_resolve_cli_prefers_new_hf_cli() {
+        // hub ≥ 1.x ships a working `hf` binary alongside a broken
+        // `huggingface-cli` deprecation shim; the resolver must pick
+        // `hf` or downloads die on the shim's usage banner.
+        let tmp_hf = tempfile::tempdir().unwrap();
+        let tmp_old = tempfile::tempdir().unwrap();
+        let hf_bin = tmp_hf.path().join(if cfg!(windows) { "hf.exe" } else { "hf" });
+        let old_bin = tmp_old
+            .path()
+            .join(if cfg!(windows) { "huggingface-cli.exe" } else { "huggingface-cli" });
+        std::fs::write(&hf_bin, b"stub").unwrap();
+        std::fs::write(&old_bin, b"stub").unwrap();
+
+        let joined = if cfg!(windows) {
+            format!("{};{}", tmp_hf.path().display(), tmp_old.path().display())
+        } else {
+            format!("{}:{}", tmp_hf.path().display(), tmp_old.path().display())
+        };
+        let old_path = std::env::var_os("PATH");
+        // SAFETY: PATH mutation under the serial lock.
+        unsafe {
+            std::env::set_var("PATH", &joined);
+        }
+        let src = HuggingFaceSource::new(PathBuf::from("huggingface-cli"));
+        let resolved = src.resolve_cli();
+        // SAFETY: same serial-locked restore.
+        unsafe {
+            if let Some(p) = &old_path {
+                std::env::set_var("PATH", p);
+            }
+        }
+        assert_eq!(resolved.expect("hf must resolve"), hf_bin);
+    }
+
+    #[serial_test::serial]
+    #[test]
+    fn test_resolve_cli_falls_back_to_legacy_cli() {
+        // Old hub installs have no `hf`; the legacy binary must still
+        // be picked up (it works there).
+        let tmp_old = tempfile::tempdir().unwrap();
+        let old_bin = tmp_old
+            .path()
+            .join(if cfg!(windows) { "huggingface-cli.exe" } else { "huggingface-cli" });
+        std::fs::write(&old_bin, b"stub").unwrap();
+
+        let old_path = std::env::var_os("PATH");
+        // SAFETY: PATH mutation under the serial lock.
+        unsafe {
+            std::env::set_var("PATH", tmp_old.path());
+        }
+        let src = HuggingFaceSource::new(PathBuf::from("huggingface-cli"));
+        let resolved = src.resolve_cli();
+        // SAFETY: same serial-locked restore.
+        unsafe {
+            if let Some(p) = &old_path {
+                std::env::set_var("PATH", p);
+            }
+        }
+        assert_eq!(resolved.expect("legacy CLI must resolve"), old_bin);
+    }
+
+    // -- resume + retry (fetch_file_resumable / download_via_http) --
+
+    use std::sync::Arc;
+
+    /// A raw-socket HF-shaped flaky server. **Raw on purpose**: the
+    /// real failure this simulates is a mid-body TCP cut (proxy/GFW
+    /// closing the stream), and a hyper-based harness aborts the
+    /// whole response — headers included — when a body stream errors,
+    /// which the client then sees as `IncompleteMessage` instead of
+    /// "got some bytes, then the connection died".
+    ///
+    /// Behaviour:
+    /// - `GET /api/models/<id>/tree/...` → static JSON array (never cut).
+    /// - First non-Range GET → `200` with the **full** Content-Length,
+    ///   `cut_at` bytes written, then the socket drops (the cut).
+    /// - `Range: bytes=N-` GET → `206` with the tail (or, when
+    ///   `ignore_range`, a full `200` — the "server ignored our Range"
+    ///   negative control).
+    async fn spawn_flaky_server(
+        payload: Arc<Vec<u8>>,
+        cut_at: usize,
+        ignore_range: bool,
+    ) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let (mut sock, _) = match listener.accept().await {
+                    Ok(x) => x,
+                    Err(_) => continue,
+                };
+                let payload = payload.clone();
+                tokio::spawn(async move {
+                    // Read until end of request headers.
+                    let mut buf = [0u8; 8192];
+                    let mut req = String::new();
+                    loop {
+                        let n = match sock.read(&mut buf).await {
+                            Ok(n) => n,
+                            Err(_) => return,
+                        };
+                        if n == 0 {
+                            return;
+                        }
+                        req.push_str(&String::from_utf8_lossy(&buf[..n]));
+                        if req.contains("\r\n\r\n") {
+                            break;
+                        }
+                    }
+
+                    let is_tree = req
+                        .lines()
+                        .next()
+                        .map(|l| l.contains("/api/models/") && l.contains("/tree/"))
+                        .unwrap_or(false);
+                    let range_offset: Option<usize> = req
+                        .lines()
+                        .find(|l| l.to_ascii_lowercase().starts_with("range:"))
+                        .and_then(|l| l.split_once(':'))
+                        .and_then(|(_, v)| v.trim().strip_prefix("bytes="))
+                        .and_then(|v| v.split('-').next())
+                        .and_then(|v| v.parse().ok());
+
+                    // Tree request → static JSON, complete response.
+                    if is_tree {
+                        let tree = r#"[{"path":"weights.bin","type":"file"}]"#;
+                        let resp = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            tree.len(),
+                            tree,
+                        );
+                        let _ = sock.write_all(resp.as_bytes()).await;
+                        return;
+                    }
+
+                    // Resume request → 206 tail (or ignored → full 200).
+                    if let Some(offset) = range_offset
+                        && offset < payload.len()
+                    {
+                        if ignore_range {
+                            let resp = format!(
+                                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                payload.len(),
+                            );
+                            let _ = sock.write_all(resp.as_bytes()).await;
+                            let _ = sock.write_all(&payload).await;
+                        } else {
+                            let tail = &payload[offset..];
+                            let resp = format!(
+                                "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes {offset}-{}/*\r\nConnection: close\r\n\r\n",
+                                tail.len(),
+                                payload.len() - 1,
+                            );
+                            let _ = sock.write_all(resp.as_bytes()).await;
+                            let _ = sock.write_all(tail).await;
+                        }
+                        return;
+                    }
+
+                    // First full request → full Content-Length, partial
+                    // body, then the socket drops: the mid-stream cut.
+                    let head = &payload[..cut_at.min(payload.len())];
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/octet-stream\r\nConnection: close\r\n\r\n",
+                        payload.len(),
+                    );
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                    let _ = sock.write_all(head).await;
+                    drop(sock);
+                });
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    fn test_payload(len: usize) -> Vec<u8> {
+        (0..len).map(|i| (i % 251) as u8).collect()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_fetch_file_resumable_recovers_from_mid_stream_cut() {
+        // Payload must exceed the 1 MiB progress-publish granularity
+        // so the progress assertion can actually observe flow past the
+        // cut point.
+        let payload = Arc::new(test_payload(4 * 1024 * 1024));
+        let base = spawn_flaky_server(payload.clone(), 1024 * 1024, false).await;
+
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let dest = tmp.path().join("model.bin");
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let got = HuggingFaceSource::fetch_file_resumable(
+            &client,
+            &format!("{base}/model.bin"),
+            &dest,
+            "model.bin",
+            0,
+            &tx,
+        )
+        .await
+        .expect("download must survive the mid-stream cut");
+
+        assert_eq!(got as usize, payload.len());
+        let written = std::fs::read(&dest).unwrap();
+        assert_eq!(written, *payload);
+
+        // Progress kept flowing across the resume.
+        let mut progress_max = 0u64;
+        while let Ok(p) = rx.try_recv() {
+            progress_max = progress_max.max(p.bytes_downloaded);
+        }
+        assert!(progress_max >= 1024 * 1024, "progress must pass the cut point");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_fetch_file_resumable_restarts_when_server_ignores_range() {
+        let payload = Arc::new(test_payload(64 * 1024));
+        let base = spawn_flaky_server(payload.clone(), 8 * 1024, true).await;
+
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let dest = tmp.path().join("model.bin");
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let got = HuggingFaceSource::fetch_file_resumable(
+            &client,
+            &format!("{base}/model.bin"),
+            &dest,
+            "model.bin",
+            0,
+            &tx,
+        )
+        .await
+        .expect("a 200 after Range must trigger a clean restart");
+
+        assert_eq!(got as usize, payload.len());
+        let written = std::fs::read(&dest).unwrap();
+        assert_eq!(written, *payload);
+    }
+
+    #[serial_test::serial]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_download_via_http_completes_through_a_flaky_link() {
+        // Full-source integration: tree fetch → per-file resume, with
+        // proxy env vars cleared and PATH blanked so the loopback
+        // request can't be hijacked by a developer machine's proxy
+        // settings and the *HTTP fallback* is the path under test
+        // (a real `hf` on the developer's PATH would otherwise take
+        // over and hit the real Hub).
+        let payload = Arc::new(test_payload(128 * 1024));
+        let base = spawn_flaky_server(payload.clone(), 32 * 1024, false).await;
+
+        let empty_path = tempfile::tempdir().unwrap();
+        let saved_vars: Vec<(&str, Option<std::ffi::OsString>)> = [
+            "HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "PATH",
+        ]
+        .iter()
+        .map(|k| (*k, std::env::var_os(k)))
+        .collect();
+        // SAFETY: env mutation under the serial lock; the loopback
+        // client would otherwise be routed through the proxy, and a
+        // real CLI on PATH would shadow the fallback under test.
+        unsafe {
+            for (k, _) in &saved_vars {
+                std::env::remove_var(k);
+            }
+            std::env::set_var("PATH", empty_path.path());
+        }
+
+        let src = HuggingFaceSource::with_endpoint(
+            PathBuf::from("no-such-huggingface-cli-stub"),
+            Some(base.clone()),
+        );
+        let parsed = src.parse_reference("test/model").unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let dest = tmp.path().join("model");
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let result = src.download(&parsed, &dest, tx).await;
+
+        // SAFETY: same serial-locked restore.
+        unsafe {
+            for (k, v) in &saved_vars {
+                match v {
+                    Some(val) => std::env::set_var(k, val),
+                    None => std::env::remove_var(k),
+                }
+            }
+        }
+
+        result.expect("full download_via_http must survive a flaky link");
+        let written = std::fs::read(dest.join("weights.bin")).unwrap();
+        assert_eq!(written, *payload);
+        // Progress stream was alive.
+        assert!(rx.try_recv().is_ok());
     }
 }
