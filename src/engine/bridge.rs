@@ -29,10 +29,20 @@ pub struct LlmRuntimeBridge {
 
 impl LlmRuntimeBridge {
     pub fn new(inner: std::sync::Arc<dyn ChatLlmRuntime>, model_id: &str) -> Self {
+        // The bridge can only promise what the wrapped runtime can do.
+        // A text-only inner keeps the bridge text-only; a multimodal
+        // inner (mistralrs, llama.cpp with an mmproj) gets image input
+        // advertised — otherwise the capability surface would deny
+        // exactly what the bridge forwards.
+        let mut input_modalities = std::collections::BTreeSet::new();
+        input_modalities.insert(crate::capabilities::Modality::TextInput);
+        if inner.supports_media() {
+            input_modalities.insert(crate::capabilities::Modality::ImageInput);
+        }
         let capabilities = ModelCapabilities {
             engine_impl: "bridge".into(),
             model_id: model_id.into(),
-            input_modalities: [crate::capabilities::Modality::TextInput].into_iter().collect(),
+            input_modalities,
             output_modalities: [crate::capabilities::Modality::TextOutput].into_iter().collect(),
             api_styles: [crate::capabilities::ApiStyle::openai_chat()].into_iter().collect(),
             supports_streaming: true,
@@ -76,6 +86,46 @@ impl LlmRuntime for LlmRuntimeBridge {
         })))
     }
 
+    /// Multimodal execute — forwards the decoded attachments to the
+    /// wrapped runtime's `chat_with_media`.
+    ///
+    /// The dispatcher hands us the decoded media; the translator
+    /// re-derives the very same set from the request. Use ONE of them —
+    /// concatenating would feed every image to the model twice.
+    async fn execute_with_media(
+        &self,
+        req: CanonicalLlmRequest,
+        media: Vec<crate::canonical::MediaAttachment>,
+    ) -> crate::llm::ChatResult<CanonicalLlmResponse> {
+        let (chat_req, translated) = translators::canonical_to_chat_request_with_media(&req)
+            .map_err(|e| crate::llm::NeuronError::new(format!("bridge canonical→chat (media): {e}")))?;
+        let media = if media.is_empty() { translated } else { media };
+        let chat_resp = self.inner.chat_with_media(chat_req, media).await?;
+        Ok(translators::chat_response_to_canonical(&req.model, chat_resp))
+    }
+
+    /// Streaming variant of `execute_with_media`.
+    async fn execute_with_media_stream(
+        &self,
+        req: CanonicalLlmRequest,
+        media: Vec<crate::canonical::MediaAttachment>,
+    ) -> crate::llm::ChatResult<BoxStream<'static, CanonicalLlmStreamEvent>> {
+        use futures_util::StreamExt;
+        let (chat_req, translated) = translators::canonical_to_chat_request_with_media(&req)
+            .map_err(|e| crate::llm::NeuronError::new(format!("bridge stream (media): {e}")))?;
+        let media = if media.is_empty() { translated } else { media };
+        let stream = self.inner.chat_with_media_stream(chat_req, media).await?;
+        Ok(Box::pin(stream.filter_map(|chunk| async move {
+            let text = chunk.choices.into_iter().next()
+                .and_then(|c| c.delta.content)
+                .filter(|s| !s.is_empty());
+            text.map(|t| CanonicalLlmStreamEvent::ContentBlockDelta {
+                index: 0,
+                delta: crate::canonical::ContentDelta::TextDelta(t),
+            })
+        })))
+    }
+
     fn capabilities(&self) -> &ModelCapabilities { &self.capabilities }
 
     fn name(&self) -> &str { &self.name }
@@ -86,10 +136,15 @@ mod tests {
     use super::*;
     use crate::canonical::{
         CanonicalLlmRequest, CanonicalMessage,
-        ContentBlock, MessageRole, TextBlock, SystemBlock,
+        ContentBlock, ImageBlock, ImageSource, MediaAttachment, MessageRole, TextBlock, SystemBlock,
     };
     use std::sync::Arc;
     use crate::llm::{ChatMessage, ChatRequest, Choice, DeltaMessage, NeuronError, Usage};
+
+    /// 1×1 transparent PNG (base64) — the same fixture the canonical
+    /// translator's test uses.
+    const PNG_1X1_B64: &str =
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
 
     struct MockChatRuntime;
 
@@ -153,6 +208,118 @@ mod tests {
         fn name(&self) -> &str {
             "mock"
         }
+    }
+
+    /// A runtime that *does* take images. The bridge must forward
+    /// the attachments to it and advertise image input — a bridge that
+    /// forwards media but denies it in its capability surface is the
+    /// "listed but unreachable" failure mode.
+    struct MockMediaRuntime {
+        seen: Arc<std::sync::Mutex<Vec<(String, usize)>>>,
+    }
+
+    #[async_trait]
+    impl crate::llm::ChatLlmRuntime for MockMediaRuntime {
+        async fn load(
+            _model: &str,
+            _device: &crate::config::DeviceSelection,
+        ) -> crate::llm::ChatResult<Box<dyn crate::llm::ChatLlmRuntime>> {
+            Ok(Box::new(MockMediaRuntime {
+                seen: Arc::new(std::sync::Mutex::new(Vec::new())),
+            }))
+        }
+
+        async fn chat(&self, _req: ChatRequest) -> crate::llm::ChatResult<crate::llm::ChatResponse> {
+            Ok(crate::llm::ChatResponse {
+                id: "mock-media-chat".into(),
+                object: "chat.completion".into(),
+                created: 0,
+                model: "test-model".into(),
+                choices: vec![Choice {
+                    index: 0,
+                    message: ChatMessage {
+                        role: "assistant".into(),
+                        content: "saw the image".into(),
+                    },
+                    finish_reason: Some("stop".into()),
+                }],
+                usage: Some(Usage {
+                    prompt_tokens: 1,
+                    completion_tokens: 1,
+                    total_tokens: 2,
+                }),
+            })
+        }
+
+        async fn chat_stream(
+            &self,
+            _req: ChatRequest,
+        ) -> crate::llm::ChatResult<BoxStream<'static, crate::llm::ChatChunk>> {
+            use futures_util::StreamExt;
+            Ok(futures_util::stream::iter(vec![crate::llm::ChatChunk {
+                id: "mock-media-chunk".into(),
+                object: "chat.completion.chunk".into(),
+                created: 0,
+                model: "test-model".into(),
+                choices: vec![crate::llm::ChunkChoice {
+                    index: 0,
+                    delta: DeltaMessage {
+                        role: Some("assistant".into()),
+                        content: Some("saw the image".into()),
+                    },
+                    finish_reason: None,
+                }],
+            }])
+            .boxed())
+        }
+
+        async fn chat_with_media(
+            &self,
+            req: ChatRequest,
+            media: Vec<MediaAttachment>,
+        ) -> crate::llm::ChatResult<crate::llm::ChatResponse> {
+            let prompt = req
+                .messages
+                .iter()
+                .map(|m| m.content.clone())
+                .collect::<Vec<_>>()
+                .join("|");
+            self.seen.lock().expect("lock").push((prompt, media.len()));
+            self.chat(req).await
+        }
+
+        fn supports_media(&self) -> bool {
+            true
+        }
+
+        fn list_models(&self) -> Vec<crate::llm::ModelInfo> {
+            vec![]
+        }
+
+        fn name(&self) -> &str {
+            "mock-media"
+        }
+    }
+
+    fn make_media_bridge(
+        seen: Arc<std::sync::Mutex<Vec<(String, usize)>>>,
+    ) -> LlmRuntimeBridge {
+        LlmRuntimeBridge::new(
+            Arc::new(MockMediaRuntime { seen }),
+            "test-model",
+        )
+    }
+
+    fn canonical_request_with_image() -> CanonicalLlmRequest {
+        let mut req = minimal_canonical_request();
+        req.messages[0].content.push(ContentBlock::Image(ImageBlock {
+            source: ImageSource::Base64 {
+                media_type: "image/png".into(),
+                data: PNG_1X1_B64.into(),
+            },
+            detail: Some("high".into()),
+        }));
+        req
     }
 
     fn make_bridge() -> LlmRuntimeBridge {
@@ -236,10 +403,60 @@ mod tests {
         assert_eq!(bridge.name(), "bridge");
     }
 
+    /// The bridge's input modalities follow the *inner* runtime: a
+    /// text-only inner stays text-only.
     #[test]
     fn test_bridge_rejects_canonical_with_image_input() {
         let bridge = make_bridge();
         let caps = bridge.capabilities();
         assert!(!caps.input_modalities.contains(&crate::capabilities::Modality::ImageInput));
+    }
+
+    /// A media-capable inner flips the bridge to image input — the
+    /// capability surface must not deny what the bridge forwards.
+    #[test]
+    fn test_bridge_advertises_image_input_when_the_inner_takes_images() {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let bridge = make_media_bridge(seen);
+        let caps = bridge.capabilities();
+        assert!(caps.input_modalities.contains(&crate::capabilities::Modality::ImageInput));
+    }
+
+    /// The bridge must hand the decoded attachment to the inner
+    /// runtime, with the prompt still carrying its media marker.
+    #[tokio::test]
+    async fn test_bridge_forwards_media_to_the_inner_runtime() {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let bridge = make_media_bridge(Arc::clone(&seen));
+        let req = canonical_request_with_image();
+        let media = vec![MediaAttachment {
+            bytes: vec![0x89, 0x50, 0x4e, 0x47],
+            mime_type: "image/png".into(),
+            detail: Some("high".into()),
+        }];
+
+        let resp = bridge
+            .execute_with_media(req, media)
+            .await
+            .expect("execute_with_media");
+
+        let seen = seen.lock().expect("lock");
+        assert_eq!(seen.len(), 1, "the inner runtime must be called once");
+        assert_eq!(
+            seen[0].1, 1,
+            "exactly one attachment must reach the inner runtime (not zero, not two)"
+        );
+        assert!(
+            seen[0].0.contains(crate::canonical::mtmd_marker()),
+            "the prompt must keep its media marker: {}",
+            seen[0].0
+        );
+        drop(seen);
+
+        let text = match &resp.content[0] {
+            ContentBlock::Text(t) => t.text.clone(),
+            _ => panic!("expected Text block"),
+        };
+        assert_eq!(text, "saw the image");
     }
 }

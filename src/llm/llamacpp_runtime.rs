@@ -823,6 +823,14 @@ impl LlmRuntime for LlamaCppLlmRuntime {
         Ok(Box::pin(adapted))
     }
 
+    fn supports_media(&self) -> bool {
+        // Only when a vision-projector GGUF was loaded next to the
+        // text model. Without it `chat_with_media` fails with
+        // `not_implemented`, so advertising image input would be a
+        // promise this backend cannot keep.
+        self.mtmd.is_some()
+    }
+
     fn list_models(&self) -> Vec<ModelInfo> {
         vec![ModelInfo::new(&self.model_id, "llamacpp")]
     }

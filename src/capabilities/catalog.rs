@@ -316,6 +316,33 @@ pub fn default_capabilities() -> Vec<ModelCapabilities> {
         cap("mistralrs", "Qwen/Qwen3.5-4B", &[TextInput], &[TextOutput],
             &[ApiStyle::openai_chat(), ApiStyle::anthropic_messages()],
             true, false, false, false),
+        // Tencent WeVisOne-VL (WeChat Vision, Apache-2.0) — a
+        // perception VLM whose `config.json` is Qwen3-VL's
+        // (`architectures: ["Qwen3VLForConditionalGeneration"]`,
+        // `model_type: "qwen3_vl"`), in a 2B and a 4B size.
+        //
+        // The candle backend does not know `qwen3_vl`; mistral.rs
+        // v0.8.22 ships a first-class `Qwen3VLLoader`, and neuron's
+        // mistralrs leg now carries image attachments end to end
+        // (marker → attachment pairing is checked, never guessed).
+        //
+        // ⚠️ **Only the object-level half is served.** Detection,
+        // referring expression, counting, pointing and OCR are
+        // structured next-token predictions over coordinate tokens
+        // (`<0>`..`<1000>`, `<OBJ>`) and need only the Qwen3-VL
+        // backbone. The pixel-level half — segmentation and alpha
+        // matting — lives in a separate `mask_decoder.pt` (a
+        // PyTorch file with no neuron runtime), so it is NOT
+        // supported here and must not be advertised. The output
+        // modality stays `TextOutput`: the boxes come back as
+        // coordinate tokens inside the text, not as a structured
+        // detection field.
+        cap("mistralrs", "tencent/WeVisOne-VL-2B", &[TextInput, ImageInput], &[TextOutput],
+            &[ApiStyle::openai_chat(), ApiStyle::anthropic_messages()],
+            true, false, false, false),
+        cap("mistralrs", "tencent/WeVisOne-VL-4B", &[TextInput, ImageInput], &[TextOutput],
+            &[ApiStyle::openai_chat(), ApiStyle::anthropic_messages()],
+            true, false, false, false),
     ]
 }
 
@@ -524,6 +551,36 @@ mod tests {
         assert!(yolov8n.input_modalities.contains(&Modality::ImageInput));
         assert!(yolov8n.output_modalities.contains(&Modality::BoundingBox));
         assert!(yolov8n.api_styles.contains(&ApiStyle::openai_vision()));
+    }
+
+    /// WeVisOne-VL (Tencent / WeChat Vision) is a perception VLM on the
+    /// mistralrs backend. The catalog must advertise image input for it —
+    /// and must NOT advertise a structured detection output, because the
+    /// boxes come back as coordinate tokens inside the text (the
+    /// pixel-level half needs a PyTorch `mask_decoder.pt` that neuron
+    /// cannot run).
+    #[test]
+    fn test_wevisone_vl_advertised_as_a_multimodal_mistralrs_model() {
+        let cat = CapabilityCatalog::with_defaults();
+        for id in ["tencent/WeVisOne-VL-2B", "tencent/WeVisOne-VL-4B"] {
+            let caps = cat
+                .lookup(id)
+                .unwrap_or_else(|| panic!("{id} must be in the default catalog"));
+            assert_eq!(caps.engine_impl, "mistralrs", "{id} must ride the mistralrs backend");
+            assert!(caps.input_modalities.contains(&Modality::TextInput));
+            assert!(
+                caps.input_modalities.contains(&Modality::ImageInput),
+                "{id} is a vision-language model — image input must be advertised"
+            );
+            assert!(caps.output_modalities.contains(&Modality::TextOutput));
+            assert!(
+                !caps.output_modalities.contains(&Modality::BoundingBox),
+                "{id} returns boxes as coordinate tokens inside the text, \
+                 not as a structured detection field"
+            );
+            assert!(caps.api_styles.contains(&ApiStyle::openai_chat()));
+            assert!(caps.supports_streaming);
+        }
     }
 
     /// The capability catalog (`/v1/models` capability metadata) and the

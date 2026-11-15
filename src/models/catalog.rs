@@ -538,7 +538,7 @@ pub const SUPPORTED_CATALOG: &[SupportedModel] = &[
     // Qwen 3.5 on the mistralrs runtime. The candle backend rejects
     // Qwen 3.5 (nested `text_config` + hybrid linear/full attention),
     // but mistral.rs v0.8.22 ships the Qwen3_5 loader. Text chat only —
-    // neuron's mistralrs runtime does not send image attachments.
+    // this checkpoint has no vision tower, so it takes no images.
     SupportedModel {
         id: "Qwen/Qwen3.5-4B",
         engine: EngineType::Llm,
@@ -546,6 +546,34 @@ pub const SUPPORTED_CATALOG: &[SupportedModel] = &[
         default_repo: "huggingface:Qwen/Qwen3.5-4B",
         source_id: "huggingface",
         families: &["qwen3_5"],
+    },
+    // Tencent WeVisOne-VL (WeChat Vision, Apache-2.0) — a perception VLM
+    // whose backbone is Qwen3-VL (`model_type: "qwen3_vl"`). The candle
+    // backend cannot load that architecture; mistral.rs v0.8.22 ships a
+    // first-class `Qwen3VLLoader` and neuron's mistralrs leg now sends
+    // image attachments with the request.
+    //
+    // ⚠️ The repos also carry a separate `mask_decoder.pt` (the
+    // pixel-level head for segmentation / alpha matting). It is a
+    // PyTorch file with no neuron runtime, so the pixel-level half of
+    // WeVisOne-VL is NOT served — only the object-level half
+    // (detection / referring / counting / pointing / OCR), which is
+    // plain next-token prediction over the Qwen3-VL backbone.
+    SupportedModel {
+        id: "tencent/WeVisOne-VL-2B",
+        engine: EngineType::Llm,
+        engine_impl: "mistralrs",
+        default_repo: "huggingface:tencent/WeVisOne-VL-2B",
+        source_id: "huggingface",
+        families: &["qwen3-vl"],
+    },
+    SupportedModel {
+        id: "tencent/WeVisOne-VL-4B",
+        engine: EngineType::Llm,
+        engine_impl: "mistralrs",
+        default_repo: "huggingface:tencent/WeVisOne-VL-4B",
+        source_id: "huggingface",
+        families: &["qwen3-vl"],
     },
 ];
 

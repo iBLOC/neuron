@@ -308,6 +308,21 @@ pub trait ChatLlmRuntime: Send + Sync {
         ))
     }
 
+    /// Does this runtime actually accept image / audio attachments?
+    ///
+    /// `crate::engine::bridge::LlmRuntimeBridge` wraps a legacy
+    /// runtime and has to advertise *its* input modalities to the
+    /// capability surface. It cannot probe the inner runtime at
+    /// request time, so this is the one bit it needs: `true` only
+    /// when `chat_with_media` is really implemented.
+    ///
+    /// Default `false`. A text-only backend must not be advertised
+    /// as taking pictures — "listed but unreachable" is worse than an
+    /// honest "text only".
+    fn supports_media(&self) -> bool {
+        false
+    }
+
     fn list_models(&self) -> Vec<ModelInfo>;
 
     fn name(&self) -> &str;
