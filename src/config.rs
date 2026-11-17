@@ -200,6 +200,23 @@ impl NeuronConfig {
         self
     }
 
+    /// **Replace** the whole model-directory list — the embedded /
+    /// mobile path uses this to point the library at a writable
+    /// host-provided directory.
+    ///
+    /// ⚠️ 语义与 [`Self::with_model_dir`]（追加）相反：这里整体替换，
+    /// 因为 `Registry::root()`（pull 落盘、删除的基准）**取第一个**
+    /// 目录 —— 若在默认目录之后追加，宿主给的目录永远排第二，
+    /// 下载仍会落进 `~/.neuron/models`（Android 上那是一条不可写的
+    /// 死路：进程无 `$HOME`，工作目录是 `/`）。空列表被忽略（保留
+    /// 默认），`root()` 永远有得指。
+    pub fn with_model_dirs(mut self, dirs: Vec<PathBuf>) -> Self {
+        if !dirs.is_empty() {
+            self.model_dirs = dirs;
+        }
+        self
+    }
+
     /// Set the default source id (used when no per-engine or
     /// per-model override is set).
     pub fn with_default_source(mut self, source_id: impl Into<String>) -> Self {

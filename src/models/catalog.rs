@@ -55,6 +55,31 @@ pub struct SupportedModel {
     pub families: &'static [&'static str],
 }
 
+/// 被新一代顶掉的**老模型** —— 仍然可下载（历史支持模型库），但
+/// 不再出现在推荐档里（`CatalogEntry::recommended == false`）。
+///
+/// 口径（2026-11-18 用户逐字：「像 qwen2.5 这类的老模型不再推荐
+/// 下载 用户可以在历史支持模型库中选择下载」）：**被更新的世代
+/// 取代的模型**进历史库 —— qwen2.5 被 qwen3 取代、phi-3 被 phi-4
+/// 取代、yolov8 被 yolo11 取代；llama-3 / chatglm3 / mistral-7b
+/// 是上一代权重。没有后继者的模型（whisper、bge、detr 族等）不进。
+pub const LEGACY_MODEL_IDS: &[&str] = &[
+    "qwen2.5-0.5b",
+    "qwen2.5-1.5b",
+    "llama-3-8b",
+    "phi-3-mini",
+    "chatglm-3-6b",
+    "mistral-7b",
+    "yolov8n",
+    "yolov8s",
+];
+
+/// Whether a catalog model id belongs in the historical library
+/// (downloadable but not recommended).
+pub fn is_legacy_model(id: &str) -> bool {
+    LEGACY_MODEL_IDS.contains(&id)
+}
+
 /// The full list of models neuron currently knows how to serve.
 /// Single static slice so it can be referenced from tests and
 /// from the `/v1/models` handler without rebuilding.
@@ -600,6 +625,8 @@ pub struct CatalogEntry {
     pub id: String,
     pub engine: String,
     pub engine_impl: &'static str,
+    /// `false` = 历史支持模型库（老模型，仍可下载但不再推荐）。
+    pub recommended: bool,
     pub capabilities: Vec<String>,
     pub available: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -686,6 +713,7 @@ impl Catalog {
                 id: format!("{}/{}", engine_str, id_str),
                 engine: engine_str.clone(),
                 engine_impl: s.engine_impl,
+                recommended: !is_legacy_model(s.id),
                 capabilities: vec![engine_str.clone()],
                 available: on_disk.is_some(),
                 path: on_disk
@@ -707,6 +735,28 @@ impl Catalog {
             }
         }
 
+        // ⚠️ 源排序 = 国内可达性默认（2026-11-18 用户逐字：「国内模型
+        // 从魔搭社区下载 如果社区有的话」）：同一个 (engine, id) 有多
+        // 份仓库时，**ModelScope 排第一**（default_repo 跟着变），客户
+        // 端拿 `default_repo` 发起 pull 就落在魔搭上；hf-mirror（也是
+        // 国内可达的镜像）次之，HuggingFace 兜底。稳定排序 ⇒ 没有魔搭
+        // 镜像的模型保持原有顺序。历史清单里同 id 双源的行（qwen2.5/
+        // qwen3/whisper/bge/minicpm5/voxcpm/moss-image/embeddinggemma）
+        // 从此默认走魔搭。
+        for entry in groups.values_mut() {
+            const SOURCE_PRIORITY: &[&str] = &["modelscope", "hf-mirror", "huggingface"];
+            entry.sources.sort_by_key(|s| {
+                SOURCE_PRIORITY
+                    .iter()
+                    .position(|p| *p == s.id)
+                    .unwrap_or(SOURCE_PRIORITY.len())
+            });
+            if let Some(first) = entry.sources.first() {
+                entry.default_repo = Some(first.reference.clone());
+                entry.source = first.id.clone();
+            }
+        }
+
         // Also surface on-disk models that have no catalog entry.
         let mut seen_ids: std::collections::HashSet<(String, String)> =
             groups.keys().cloned().collect();
@@ -719,6 +769,7 @@ impl Catalog {
                         id: format!("{}/{}", m.engine.as_str(), m.id),
                         engine: m.engine.as_str().to_string(),
                         engine_impl: "",
+                        recommended: !is_legacy_model(&m.id),
                         capabilities: vec![m.engine.as_str().to_string()],
                         available: true,
                         path: Some(m.path.to_string_lossy().to_string()),
@@ -925,5 +976,95 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// 国内默认源：同一个 (engine, id) 有多份仓库时，ModelScope 必须
+    /// 排第一（default_repo 跟着指向魔搭）。qwen3-0.6b 在清单里
+    /// HuggingFace 行在前、ModelScope 行在后 —— 若排序不生效，合并后
+    /// 的第一源仍是 huggingface，国内用户拿 default_repo 发起 pull
+    /// 就会撞被墙的 hf.co。
+    #[test]
+    fn test_catalog_modelscope_is_primary_source_when_present() {
+        let tmp = TempDir::new().unwrap();
+        let registry = Registry::new(tmp.path().to_path_buf());
+        let sources = Arc::new(SourceRegistry::with_defaults());
+        let cfg = CatalogConfig::default();
+        let catalog = Catalog::new(registry, sources, cfg);
+        let entries = catalog.entries();
+
+        let qwen3 = entries
+            .iter()
+            .find(|e| e.id == "llm/qwen3-0.6b")
+            .expect("qwen3-0.6b must be in the catalog");
+        assert_eq!(
+            qwen3.sources.first().map(|s| s.id.as_str()),
+            Some("modelscope"),
+            "ModelScope must sort first when the model has a ModelScope mirror"
+        );
+        assert!(
+            qwen3
+                .default_repo
+                .as_deref()
+                .unwrap_or("")
+                .starts_with("modelscope:"),
+            "default_repo must follow the primary source, got {:?}",
+            qwen3.default_repo
+        );
+
+        // 负控：没有魔搭镜像的模型不换主源（whisper-small 只有
+        // huggingface 一份）。
+        let whisper = entries
+            .iter()
+            .find(|e| e.id == "asr/whisper-small")
+            .expect("whisper-small must be in the catalog");
+        assert_eq!(
+            whisper.sources.first().map(|s| s.id.as_str()),
+            Some("huggingface"),
+            "models without a ModelScope mirror keep their primary source"
+        );
+    }
+
+    /// 老模型进历史库：LEGACY 清单里的 id `recommended == false`，
+    /// 其余（当前世代）为 true；且清单里每个 id 都真实存在于目录
+    /// （清单打错字 ⇒ 永远不生效 ⇒ 尺子自己骗自己）。
+    #[test]
+    fn test_legacy_models_are_not_recommended() {
+        let tmp = TempDir::new().unwrap();
+        let registry = Registry::new(tmp.path().to_path_buf());
+        let sources = Arc::new(SourceRegistry::with_defaults());
+        let catalog = Catalog::new(registry, sources, CatalogConfig::default());
+        let entries = catalog.entries();
+
+        let qwen25 = entries
+            .iter()
+            .find(|e| e.id == "llm/qwen2.5-0.5b")
+            .expect("qwen2.5-0.5b must be in the catalog");
+        assert!(!qwen25.recommended, "qwen2.5 must land in the legacy library");
+
+        let qwen3 = entries
+            .iter()
+            .find(|e| e.id == "llm/qwen3-0.6b")
+            .expect("qwen3-0.6b must be in the catalog");
+        assert!(qwen3.recommended, "qwen3 is the current generation");
+
+        // 每个历史 id 都得在目录里真实存在（含 engine 前缀形状）。
+        let all_ids: std::collections::HashSet<&str> =
+            entries.iter().map(|e| e.id.as_str()).collect();
+        for legacy in LEGACY_MODEL_IDS {
+            let matched = all_ids.iter().any(|id| {
+                id.split_once('/').map(|(_, rest)| rest) == Some(*legacy)
+            });
+            assert!(
+                matched,
+                "LEGACY_MODEL_IDS contains {legacy:?} but no catalog entry carries it — a typo would silently disable the flag"
+            );
+        }
+    }
+
+    #[test]
+    fn test_is_legacy_model_membership() {
+        assert!(is_legacy_model("qwen2.5-0.5b"));
+        assert!(!is_legacy_model("qwen3-0.6b"));
+        assert!(!is_legacy_model("whisper-base"));
     }
 }

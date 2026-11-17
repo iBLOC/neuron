@@ -75,6 +75,7 @@ pub async fn list_models(
                 "owned_by": "neuron",
                 "engine": e.engine,
                 "engine_impl": e.engine_impl,
+                "recommended": e.recommended,
                 "capabilities": e.capabilities,
                 "available": e.available,
                 "path": e.path,

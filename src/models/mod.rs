@@ -10,6 +10,7 @@ pub mod modelscope;
 pub mod job;
 pub mod puller;
 pub mod registry;
+pub mod resumable;
 pub mod source;
 
 pub mod catalog;

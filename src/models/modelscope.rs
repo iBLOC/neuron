@@ -215,18 +215,37 @@ impl ModelScopeSource {
                 current_file: filename.to_string(),
             });
 
-            let resp = client.get(&download_url)
-                .send()
-                .await
-                .map_err(|e| format!("failed to download {}: {e}", filename))?;
+            // Byte-exact skip: partials survive a failed pull (the
+            // puller no longer deletes the destination), so files
+            // that are already complete are skipped instead of
+            // re-downloaded on a retry.
+            if size > 0
+                && let Ok(meta) = tokio::fs::metadata(&dest_path).await
+                && meta.len() == size
+            {
+                bytes_downloaded += size;
+                continue;
+            }
 
-            let bytes = resp.bytes().await
-                .map_err(|e| format!("failed to read response: {e}"))?;
-
-            tokio::fs::write(&dest_path, &bytes).await
-                .map_err(|e| format!("failed to write file: {e}"))?;
-
-            bytes_downloaded += size;
+            // Resumable per-file download — shared with the
+            // HuggingFace source (streams to disk in chunks, resumes
+            // from the partial file with a Range request, handles
+            // ModelScope's 200+Content-Range resume shape). Before
+            // this, the whole file was buffered in memory
+            // (`resp.bytes()` + one `fs::write`): multi-GB models
+            // could never survive an unstable link, and every retry
+            // restarted from byte 0.
+            let written = crate::models::resumable::fetch_file_resumable(
+                &client,
+                &download_url,
+                &dest_path,
+                filename,
+                bytes_downloaded,
+                &progress_tx,
+                "neuron/ms",
+            )
+            .await?;
+            bytes_downloaded += written;
         }
 
         let _ = progress_tx.send(DownloadProgress {

@@ -381,11 +381,13 @@ impl HuggingFaceSource {
         Ok(())
     }
 
-    /// Download one repo file with **resume + retry**. On any
-    /// mid-stream failure (reset, stall, decode error) the next
-    /// attempt re-issues the GET with a `Range: bytes=<n>-` header
-    /// and appends to the same file handle, so a flaky link keeps
-    /// making forward progress instead of restarting from zero.
+    /// Download one repo file with **resume + retry** — thin wrapper:
+    /// the implementation lives in [`crate::models::resumable`] and
+    /// is shared with the ModelScope source. On any mid-stream
+    /// failure (reset, stall, decode error) the next attempt
+    /// re-issues the GET with a `Range: bytes=<n>-` header and
+    /// appends to the same file handle, so a flaky link keeps making
+    /// forward progress instead of restarting from zero.
     ///
     /// The failure this exists for: the first connection serves a
     /// few tens of MB and then dies (`read body failed: error
@@ -412,141 +414,22 @@ impl HuggingFaceSource {
         bytes_before_file: u64,
         progress_tx: &UnboundedSender<DownloadProgress>,
     ) -> Result<u64, String> {
-        use futures_util::StreamExt;
-        use tokio::io::AsyncWriteExt;
-        use std::time::Duration;
-
-        const MAX_STALLED_ATTEMPTS: u32 = 8;
-        const MAX_TOTAL_ATTEMPTS: u32 = 100;
-        /// No chunk for 30 s = the stream is hung; convert to a retry.
-        const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
-        const PROGRESS_PUBLISH_BYTES: u64 = 1 << 20; // 1 MiB
-
-        let mut offset: u64 = 0;
-        let mut stalled_attempts: u32 = 0;
-        let mut total_attempts: u32 = 0;
-        let mut backoff_secs: u64 = 1;
-        // One handle across attempts: a resume keeps appending in
-        // place (the write cursor sits exactly at `offset`), a
-        // forced restart recreates (and thus truncates) the file.
-        let mut file: Option<tokio::fs::File> = None;
-
-        loop {
-            total_attempts += 1;
-            if stalled_attempts >= MAX_STALLED_ATTEMPTS || total_attempts > MAX_TOTAL_ATTEMPTS {
-                return Err(format!(
-                    "download failed for {display_name}: gave up after {total_attempts} attempts (last position: byte {offset})"
-                ));
-            }
-            if total_attempts > 1 {
-                tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
-                backoff_secs = (backoff_secs * 2).min(30);
-            }
-
-            let mut req = client.get(url);
-            if offset > 0 {
-                req = req.header(reqwest::header::RANGE, format!("bytes={offset}-"));
-            }
-            let file_resp = match req.send().await {
-                Ok(r) => r,
-                Err(e) => {
-                    stalled_attempts += 1;
-                    eprintln!(
-                        "[neuron/hf] {display_name}: request failed ({e}); retrying from byte {offset}"
-                    );
-                    continue;
-                }
-            };
-
-            // 416 after a resume means the previous attempt died
-            // after writing the final byte — the file is complete.
-            if offset > 0 && file_resp.status() == reqwest::StatusCode::RANGE_NOT_SATISFIABLE {
-                break;
-            }
-            let status = file_resp.status();
-            if !status.is_success() {
-                // Transient upstream failures (5xx / 429) are worth a
-                // resume-retry; hard 4xx (401/403 gated) are not.
-                if status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-                    stalled_attempts += 1;
-                    eprintln!(
-                        "[neuron/hf] {display_name}: HTTP {status}; retrying from byte {offset}"
-                    );
-                    continue;
-                }
-                return Err(format!(
-                    "download failed for {display_name}: HTTP {status} — gated repos require `huggingface-cli` for auth"
-                ));
-            }
-
-            // A 200 after we asked for a Range means the server
-            // ignored it — restart from the top (truncate).
-            if offset > 0 && status == reqwest::StatusCode::OK {
-                offset = 0;
-                file = None;
-            }
-
-            if file.is_none() {
-                file = Some(
-                    tokio::fs::File::create(dest_path)
-                        .await
-                        .map_err(|e| format!("create {display_name} failed: {e}"))?,
-                );
-            }
-            let file = file.as_mut().expect("file handle just created");
-
-            let mut stream = file_resp.bytes_stream();
-            let mut last_published_at: u64 = offset;
-            let mut finished = false;
-            while !finished {
-                let next = tokio::time::timeout(STREAM_IDLE_TIMEOUT, stream.next()).await;
-                match next {
-                    // Stream ended cleanly — this file is complete.
-                    Ok(None) => finished = true,
-                    // Read error mid-body (reset / decode failure) —
-                    // fall through to a resume retry.
-                    Ok(Some(Err(e))) => {
-                        stalled_attempts += 1;
-                        eprintln!(
-                            "[neuron/hf] {display_name}: read body failed at byte {offset} ({e}); retrying with resume"
-                        );
-                        break;
-                    }
-                    // No chunk within the idle timeout — the stream
-                    // is hung; treat it like a reset.
-                    Err(_elapsed) => {
-                        stalled_attempts += 1;
-                        eprintln!(
-                            "[neuron/hf] {display_name}: stream idle >{STREAM_IDLE_TIMEOUT:?} at byte {offset}; retrying with resume"
-                        );
-                        break;
-                    }
-                    Ok(Some(Ok(chunk))) => {
-                        file.write_all(&chunk)
-                            .await
-                            .map_err(|e| format!("write {display_name} failed: {e}"))?;
-                        offset += chunk.len() as u64;
-                        // Forward progress — both retry counters and
-                        // the backoff reset.
-                        stalled_attempts = 0;
-                        backoff_secs = 1;
-                        if offset - last_published_at >= PROGRESS_PUBLISH_BYTES {
-                            last_published_at = offset;
-                            let _ = progress_tx.send(DownloadProgress {
-                                bytes_downloaded: bytes_before_file + offset,
-                                total_bytes: None,
-                                current_file: display_name.to_string(),
-                            });
-                        }
-                    }
-                }
-            }
-            if finished {
-                break;
-            }
-        }
-
-        Ok(offset)
+        // The implementation moved to `models::resumable` (shared
+        // with the ModelScope source) and gained one branch: a `200`
+        // WITH a `Content-Range` header is treated as sliced — that
+        // is ModelScope's CDN resume shape (probed 2026-11-18), and
+        // plain HuggingFace answers proper `206`s, which the shared
+        // helper handles identically.
+        super::resumable::fetch_file_resumable(
+            client,
+            url,
+            dest_path,
+            display_name,
+            bytes_before_file,
+            progress_tx,
+            "neuron/hf",
+        )
+        .await
     }
 }
 

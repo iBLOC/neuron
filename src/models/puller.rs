@@ -105,14 +105,18 @@ impl Puller {
             // Stage cleanup state in locals — touching `jobs`
             // across an `.await` would hold the std::sync::Mutex
             // guard across the await point and break `Send`.
-            let (new_status, new_error, should_cleanup) = match result {
-                Ok(()) => (JobStatus::Completed, None, false),
-                Err(e) => (JobStatus::Failed, Some(e), true),
+            let (new_status, new_error) = match result {
+                Ok(()) => (JobStatus::Completed, None),
+                Err(e) => (JobStatus::Failed, Some(e)),
             };
 
-            if should_cleanup {
-                let _ = tokio::fs::remove_dir_all(&dest_dir).await;
-            }
+            // ⚠️ 失败**不删**落盘现场 —— 与 cancel 同一条纪律。断点
+            // （整文件跳过 ＋ Range 续传）都靠「盘上还留着上一次的
+            // 进度」才成立；此前失败整目录 `remove_dir_all` ⇒ 每一次
+            // 重试都从字节 0 重新开始 ⇒ 不稳定链路上大模型永远下不完。
+            // 半成品目录对 registry 无害：`available` 的判定要的是
+            // 能加载的文件形状（model.safetensors / config.json 等），
+            // 残缺目录不会被当成已下载模型展示成绿色。
 
             if let Some(j) = jobs.lock().unwrap().get_mut(&id_for_task) {
                 j.finished_at = Some(Utc::now());
@@ -301,6 +305,67 @@ mod tests {
         let job = puller.status(job_id).unwrap();
         assert_eq!(job.status, JobStatus::Failed);
         assert!(job.error.is_some());
+    }
+
+    /// A source that writes a partial file, then fails — the shape of
+    /// a real download dying mid-repo. The puller must **keep** the
+    /// partial on disk (same discipline as cancel): the resumable
+    /// download and the byte-exact file skip both work off "the last
+    /// attempt's bytes are still there". The old behavior deleted the
+    /// whole destination on failure, which forced every retry to
+    /// restart from byte 0.
+    struct PartialThenFailSource;
+
+    #[async_trait]
+    impl Source for PartialThenFailSource {
+        fn id(&self) -> &str { "partial-fail" }
+        fn name(&self) -> &str { "PartialThenFail" }
+        fn parse_reference(&self, r: &str) -> Result<ParsedReference, String> {
+            Ok(ParsedReference { model_id: r.to_string(), revision: None })
+        }
+        async fn download(
+            &self,
+            _r: &ParsedReference,
+            dest_dir: &Path,
+            _p: mpsc::UnboundedSender<DownloadProgress>,
+        ) -> Result<(), String> {
+            std::fs::create_dir_all(dest_dir).ok();
+            std::fs::write(dest_dir.join("model.safetensors"), b"partial-bytes").ok();
+            Err("connection reset mid-repo".to_string())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_puller_failure_keeps_partials_on_disk() {
+        let mut registry = SourceRegistry::new();
+        registry.register(Arc::new(PartialThenFailSource));
+        let puller = Puller::new(registry);
+        let tmp = TempDir::new().unwrap();
+        let dest_dir = tmp.path().to_path_buf();
+
+        let req = PullRequest {
+            reference: "partial-fail:big-model".to_string(),
+            engine: EngineType::Llm,
+            id: "big-model".to_string(),
+            revision: None,
+            dest_dir: dest_dir.clone(),
+            source_override: None,
+        };
+        let job_id = puller.pull(req).await.unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        let job = puller.status(job_id).unwrap();
+        assert_eq!(job.status, JobStatus::Failed);
+
+        // The partial survives the failure — a retry resumes from it
+        // instead of starting at byte 0.
+        let partial = dest_dir.join("model.safetensors");
+        assert!(
+            partial.exists(),
+            "failure must keep partials on disk (resume depends on them)"
+        );
+        assert_eq!(std::fs::read(&partial).unwrap(), b"partial-bytes");
     }
 
     #[tokio::test]
