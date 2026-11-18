@@ -180,6 +180,12 @@ required-features = ["chronos2"]
 name = "ocr_smoke"
 required-features = ["ocr"]
 
+# Real-weights smoke for Tencent WeVisOne-VL on the mistralrs leg: loads a
+# local snapshot and asks the model to detect objects in a picture.
+[[example]]
+name = "wevisone_vl_smoke"
+required-features = ["mistralrs"]
+
 # Real-weights verification that StreamingVaeDecoder reproduces the full
 # AudioVaeV2::decode on the shipped audiovae.pth — the gate for wiring
 # model-level streaming into TtsRuntime::synthesize_stream. Needs the
@@ -241,7 +247,14 @@ default = ["candle"]
 candle = ["dep:candle", "dep:candle-nn", "dep:candle-transformers", "dep:tokenizers", "dep:safetensors", "dep:wide"]
 flash-attn = ["candle-transformers/flash-attn", "dep:candle-flash-attn"]
 metal = ["candle/metal", "candle-nn/metal", "candle-transformers/metal"]
-cuda = ["candle/cuda", "candle-nn/cuda", "candle-transformers/cuda"]
+# The `?` in `mistralrs?/cuda` is load-bearing: it turns the
+# mistralrs backend's CUDA support on **only when that backend is already
+# enabled** — without it, a `--features cuda` build would drag the whole
+# mistralrs stack in through the optional dependency. Without the entry at
+# all, `--features mistralrs,cuda` compiles the CUDA kernels for candle but
+# leaves `mistralrs-core` without its `cuda` feature ⇒ ⇒ the mistralrs leg
+# silently runs on the CPU even though the user asked for the GPU.
+cuda = ["candle/cuda", "candle-nn/cuda", "candle-transformers/cuda", "mistralrs?/cuda"]
 chronos2 = ["candle"]
 voxcpm = ["dep:burn", "dep:burn-store", "dep:tokenizers"]
 # Burn-side CUDA backend for the VoxCPM2 TTS runtime (CubeCL kernels).

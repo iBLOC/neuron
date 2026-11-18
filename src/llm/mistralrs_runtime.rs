@@ -25,8 +25,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use futures_util::stream::BoxStream;
 use mistralrs::{
-    ChatCompletionResponse, IsqBits, Model, ModelBuilder, MultimodalMessages, RequestLike,
-    Response, TextMessageRole, TextMessages,
+    ChatCompletionResponse, IsqBits, Model, ModelBuilder, ModelDType, MultimodalMessages,
+    RequestLike, Response, TextMessageRole, TextMessages,
 };
 use tracing::{info, warn};
 
@@ -57,10 +57,91 @@ impl MistralRsLlmRuntime {
     /// architecture, applies ISQ, and prepares KV cache.
     pub async fn load(
         model_id: &str,
-        _device: &DeviceSelection,
+        device: &DeviceSelection,
     ) -> ChatResult<Box<dyn LlmRuntime>> {
         let id = model_id.to_string();
-        let builder = ModelBuilder::new(&id).with_logging();
+
+        // Config-shape adaptation. A checkpoint published in the
+        // transformers-v5 shape (the RoPE settings nested under
+        // `text_config.rope_parameters`) cannot be read by mistral.rs
+        // v0.8.22's Qwen3-VL loader — it fails with `missing field
+        // rope_theta`. The adapter writes a normalized copy into a shadow
+        // directory next to the weights and points the backend at that;
+        // the checkpoint's own config.json is never modified.
+        //
+        // A repo id (not a local directory) passes through unchanged —
+        // there is nothing to adapt before the weights are fetched.
+        let prepared = backend_model_dir(&id)?;
+        if prepared != id {
+            info!(
+                model_id = %id,
+                shadow_dir = %prepared,
+                "mistralrs: adapted the checkpoint config into a shadow dir"
+            );
+        }
+        let builder = ModelBuilder::new(&prepared).with_logging();
+
+        // Device: neuron's `DeviceSelection` used to be ignored here — the
+        // model id went to mistral.rs and it picked the device itself. That
+        // made `NEURON_DEVICE=cpu` a no-op on this backend (mistral.rs still
+        // took the GPU when the build had one) and `NEURON_DEVICE=nvidia`
+        // meaningless when the build had no CUDA support at all. mistral.rs
+        // v0.8.22 exposes `with_force_cpu` / `with_device`, so the caller's
+        // choice can be honoured here.
+        let builder = match device_choice(*device) {
+            DeviceChoice::Auto => builder,
+            DeviceChoice::Cpu => builder.with_force_cpu(),
+            DeviceChoice::Cuda(index) => {
+                #[cfg(feature = "cuda")]
+                {
+                    builder.with_device(candle::Device::Cuda(index))
+                }
+                #[cfg(not(feature = "cuda"))]
+                {
+                    warn!(
+                        "mistralrs: the NVIDIA device was requested but this build has no \
+                         CUDA support (build with --features mistralrs,cuda) — falling back \
+                         to mistral.rs's own device detection"
+                    );
+                    builder
+                }
+            }
+        };
+
+        // Precision. The backend's own `Auto` is the default on purpose:
+        // on a CPU-only build it picks F32 because candle's CPU matmul has
+        // NO BF16 kernel (measured: `unsupported dtype BF16 for op
+        // matmul`), and on a CUDA build it picks BF16 on cc>=8.0 by
+        // itself. Forcing the checkpoint's declared precision would break
+        // the CPU path, so the declaration is only used to WARN that the
+        // CPU path casts a half-precision checkpoint up to F32 (twice the
+        // RAM) — and `NEURON_MISTRALRS_DTYPE` is the explicit override.
+        let declared = declared_dtype_of(&prepared);
+        let explicit = crate::config::env_var("MISTRALRS_DTYPE");
+        let dtype = resolve_dtype(explicit.as_deref());
+        let device = device_choice(*device);
+        if bf16_requested_on_cpu(dtype, device) {
+            warn!(
+                model_id = %id,
+                "mistralrs: BF16 was requested on the CPU path — candle's CPU matmul has no \
+                 BF16 kernel and the request fails with `unsupported dtype BF16 for op \
+                 matmul`; build with --features mistralrs,cuda to run on an NVIDIA GPU"
+            );
+        } else if casts_bf16_up_to_f32(declared, dtype, device) {
+            warn!(
+                model_id = %id,
+                "mistralrs: the checkpoint declares bfloat16 but the CPU path loads it as \
+                 F32 — twice the resident memory (candle's CPU matmul has no BF16 kernel); \
+                 build with --features mistralrs,cuda to keep the weights in BF16"
+            );
+        }
+        let builder = match dtype {
+            Some(d) => {
+                info!(model_id = %id, ?d, "mistralrs: loading the weights at the chosen precision");
+                builder.with_dtype(d)
+            }
+            None => builder,
+        };
 
         // ISQ resolution: NEURON_MISTRALRS_ISQ env var overrides default Q4.
         let builder = match crate::config::env_var("MISTRALRS_ISQ").as_deref() {
@@ -277,6 +358,96 @@ impl crate::engine::LlmRuntime for MistralRsLlmRuntime {
     }
 
     fn name(&self) -> &str { "mistralrs" }
+}
+
+/// How the mistralrs leg should pick its device.
+///
+/// `Auto` hands the decision to mistral.rs (its own auto-detection);
+/// `Cpu` forces the CPU; `Cuda(n)` pins the n-th CUDA device.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeviceChoice {
+    Auto,
+    Cpu,
+    Cuda(usize),
+}
+
+/// Map neuron's `DeviceSelection` onto mistral.rs's device knobs.
+///
+/// `Apple` and `Vulkan` have no mistral.rs v0.8.22 equivalent (its Metal
+/// support is a separate build), so they fall back to mistral.rs's own
+/// detection instead of pretending the request was honoured.
+fn device_choice(sel: DeviceSelection) -> DeviceChoice {
+    match sel {
+        DeviceSelection::Cpu => DeviceChoice::Cpu,
+        DeviceSelection::Nvidia => DeviceChoice::Cuda(0),
+        DeviceSelection::Auto | DeviceSelection::Apple | DeviceSelection::Vulkan => {
+            DeviceChoice::Auto
+        }
+    }
+}
+
+/// The directory the backend should load from.
+///
+/// A checkpoint whose config.json is in the transformers-v5 shape needs a
+/// normalized copy before mistral.rs's Qwen3-VL loader can read it; the
+/// adapter writes that copy into a shadow directory next to the weights
+/// and returns its path. Everything else (a repo id, an already-flat
+/// config) is passed through unchanged.
+fn backend_model_dir(model_id: &str) -> ChatResult<String> {
+    crate::llm::config_shape::prepare_mistralrs_model_dir(model_id).map_err(|e| {
+        NeuronError::not_initialized(format!(
+            "mistralrs config adaptation failed for model '{model_id}': {e}"
+        ))
+    })
+}
+
+/// Read the precision a checkpoint's config declares, if any.
+///
+/// A repo id (not a local directory) has no local config to read ⇒ ⇒
+/// `None`, which leaves the backend's own default in place.
+fn declared_dtype_of(model_dir: &str) -> Option<crate::llm::config_shape::DeclaredDtype> {
+    let raw = std::fs::read_to_string(std::path::Path::new(model_dir).join("config.json")).ok()?;
+    crate::llm::config_shape::declared_dtype(&raw)
+}
+
+/// Decide which precision the weights are loaded at.
+///
+/// `None` means "keep the backend's own default", which is the right
+/// answer in the common case: the backend already picks BF16 on a CUDA
+/// build with cc>=8.0, and F32 on a CPU-only build — where BF16 is not
+/// even an option (candle's CPU matmul rejects it).
+///
+/// An unknown value is treated as "auto" rather than guessed: a typo in
+/// the env var must not silently pick a precision.
+fn resolve_dtype(explicit: Option<&str>) -> Option<ModelDType> {
+    let name = explicit?.to_ascii_lowercase();
+    match name.as_str() {
+        "bf16" | "bfloat16" => Some(ModelDType::BF16),
+        "f16" | "float16" => Some(ModelDType::F16),
+        "f32" | "float32" => Some(ModelDType::F32),
+        _ => None,
+    }
+}
+
+/// True when BF16 was asked for on the CPU path, where it cannot work.
+fn bf16_requested_on_cpu(dtype: Option<ModelDType>, device: DeviceChoice) -> bool {
+    matches!(device, DeviceChoice::Cpu) && dtype == Some(ModelDType::BF16)
+}
+
+/// True when the CPU path will cast a half-precision checkpoint up to F32.
+///
+/// The checkpoint says bf16, the CPU path has no BF16 matmul kernel, so
+/// the weights land in RAM as F32 — twice their size. The operator should
+/// hear that from the log, not discover it as an out-of-memory kill.
+fn casts_bf16_up_to_f32(
+    declared: Option<crate::llm::config_shape::DeclaredDtype>,
+    dtype: Option<ModelDType>,
+    device: DeviceChoice,
+) -> bool {
+    use crate::llm::config_shape::DeclaredDtype;
+    matches!(device, DeviceChoice::Cpu)
+        && declared == Some(DeclaredDtype::BF16)
+        && dtype != Some(ModelDType::BF16)
 }
 
 /// Map an OpenAI-style role string onto mistral.rs's role enum.
@@ -602,6 +773,141 @@ mod tests {
             role: role.into(),
             content,
         }
+    }
+
+    #[test]
+    fn test_device_choice_maps_neuron_selection_to_mistralrs_knobs() {
+        assert_eq!(device_choice(DeviceSelection::Cpu), DeviceChoice::Cpu);
+        assert_eq!(device_choice(DeviceSelection::Nvidia), DeviceChoice::Cuda(0));
+        assert_eq!(device_choice(DeviceSelection::Auto), DeviceChoice::Auto);
+        // mistral.rs v0.8.22 has no knob for these two — they fall back to
+        // the upstream auto-detection instead of silently pretending.
+        assert_eq!(device_choice(DeviceSelection::Apple), DeviceChoice::Auto);
+        assert_eq!(device_choice(DeviceSelection::Vulkan), DeviceChoice::Auto);
+    }
+
+    /// The load path must really go through the config adapter.
+    ///
+    /// The judge is behavioural, not a grep: an unparseable config.json
+    /// makes the adapter fail with its own error, long before mistral.rs
+    /// would try to open the weights. If the adapter call were dropped
+    /// from `load()`, mistral.rs would be handed the broken config
+    /// instead and the error would say something else entirely.
+    #[tokio::test]
+    async fn test_load_goes_through_the_config_adapter() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path().join("model");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        std::fs::write(dir.join("config.json"), "{ not json").expect("write config");
+
+        let err = match MistralRsLlmRuntime::load(dir.to_str().unwrap(), &DeviceSelection::Auto).await
+        {
+            Ok(_) => panic!("an unparseable config must not load"),
+            Err(e) => e,
+        };
+        assert!(
+            err.message.contains("config adaptation failed"),
+            "the load path must go through the config adapter (got: {})",
+            err.message
+        );
+    }
+
+    #[test]
+    fn test_the_backend_loads_from_the_adapted_shadow_dir() {
+        // A transformers-v5 config (RoPE nested under
+        // `text_config.rope_parameters`) must not reach mistral.rs as-is:
+        // its Qwen3-VL loader would fail with `missing field rope_theta`.
+        let v5 = r#"{
+          "architectures": ["Qwen3VLForConditionalGeneration"],
+          "model_type": "qwen3_vl",
+          "text_config": {
+            "head_dim": 128,
+            "rope_parameters": {
+              "mrope_interleaved": true,
+              "mrope_section": [24, 20, 20],
+              "rope_theta": 5000000,
+              "rope_type": "default"
+            }
+          }
+        }"#;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path().join("model");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        std::fs::write(dir.join("config.json"), v5).expect("write config");
+
+        let prepared = backend_model_dir(dir.to_str().unwrap()).expect("backend dir");
+        assert_ne!(
+            prepared,
+            dir.to_str().unwrap(),
+            "the backend must be pointed at the adapted shadow dir"
+        );
+
+        // The shadow carries the flattened fields ...
+        let raw = std::fs::read_to_string(std::path::Path::new(&prepared).join("config.json"))
+            .expect("read shadow config");
+        let v: serde_json::Value = serde_json::from_str(&raw).expect("valid json");
+        assert_eq!(v["text_config"]["rope_theta"], 5000000);
+        assert_eq!(
+            v["text_config"]["rope_scaling"]["mrope_section"],
+            serde_json::json!([24, 20, 20])
+        );
+
+        // ... and the checkpoint's own config is untouched.
+        let original =
+            std::fs::read_to_string(dir.join("config.json")).expect("read original");
+        let orig: serde_json::Value = serde_json::from_str(&original).expect("valid json");
+        assert!(orig["text_config"].get("rope_theta").is_none());
+        assert!(orig["text_config"].get("rope_scaling").is_none());
+    }
+
+    #[test]
+    fn test_resolve_dtype_only_follows_an_explicit_request() {
+        // Unset ⇒ keep the backend's own default (F32 on CPU, BF16 on a
+        // CUDA build with cc>=8.0). Forcing the checkpoint's declared
+        // precision here would break the CPU path.
+        assert_eq!(resolve_dtype(None), None);
+        assert_eq!(resolve_dtype(Some("auto")), None);
+        // An unknown value must not guess a precision.
+        assert_eq!(resolve_dtype(Some("int4")), None);
+        assert_eq!(resolve_dtype(Some("bf16")), Some(ModelDType::BF16));
+        assert_eq!(resolve_dtype(Some("BF16")), Some(ModelDType::BF16));
+        assert_eq!(resolve_dtype(Some("f16")), Some(ModelDType::F16));
+        assert_eq!(resolve_dtype(Some("f32")), Some(ModelDType::F32));
+    }
+
+    #[test]
+    fn test_bf16_on_cpu_is_flagged_instead_of_being_silently_attempted() {
+        use crate::llm::config_shape::DeclaredDtype;
+        // Asking for BF16 on the CPU path cannot work.
+        assert!(bf16_requested_on_cpu(
+            Some(ModelDType::BF16),
+            DeviceChoice::Cpu
+        ));
+        assert!(!bf16_requested_on_cpu(
+            Some(ModelDType::BF16),
+            DeviceChoice::Cuda(0)
+        ));
+        assert!(!bf16_requested_on_cpu(None, DeviceChoice::Cpu));
+
+        // A bf16 checkpoint on the CPU path is cast up to F32 — twice the
+        // RAM — and the operator must be told.
+        assert!(casts_bf16_up_to_f32(
+            Some(DeclaredDtype::BF16),
+            None,
+            DeviceChoice::Cpu
+        ));
+        // On a GPU build the backend picks BF16 by itself ⇒ no cast-up.
+        assert!(!casts_bf16_up_to_f32(
+            Some(DeclaredDtype::BF16),
+            None,
+            DeviceChoice::Cuda(0)
+        ));
+        // An fp32 checkpoint is not a cast-up.
+        assert!(!casts_bf16_up_to_f32(
+            Some(DeclaredDtype::F32),
+            None,
+            DeviceChoice::Cpu
+        ));
     }
 
     #[test]

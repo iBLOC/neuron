@@ -20,6 +20,7 @@ pub mod litert_runtime;
 #[cfg(feature = "litert")]
 pub use litert_runtime::LitertLlmRuntime;
 
+pub mod config_shape;
 pub mod translators;
 
 #[cfg(feature = "mistralrs")]
@@ -333,6 +334,61 @@ pub trait ChatLlmRuntime: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The `cuda` feature must reach the **mistralrs** backend, not only
+    /// the candle one.
+    ///
+    /// Without it, `--features mistralrs,cuda` compiles the CUDA kernels
+    /// for candle but leaves `mistralrs-core` without its `cuda` feature
+    /// ⇒ ⇒ the mistralrs leg silently runs on the CPU even though the
+    /// user asked for the GPU and the machine has one — "asked for the GPU
+    /// and got the CPU" is the same family as "listed but unreachable".
+    ///
+    /// The `?` is part of the contract: `mistralrs?/cuda` enables the
+    /// backend's CUDA support **only when that backend is already
+    /// enabled**, so turning `cuda` on never drags the whole mistralrs
+    /// stack into a build that did not ask for it.
+    #[test]
+    fn test_cuda_feature_reaches_the_mistralrs_backend() {
+        let manifest = include_str!("../../Cargo.toml");
+        let cuda_line = manifest
+            .lines()
+            .find(|l| l.trim_start().starts_with("cuda = ["))
+            .expect("Cargo.toml must declare a `cuda` feature");
+        assert!(
+            cuda_line.contains("mistralrs?/cuda"),
+            "the `cuda` feature must reach the mistralrs backend with the \
+             optional-dep-safe `?` form (got: {cuda_line})"
+        );
+        assert!(
+            !cuda_line.contains("\"mistralrs/cuda\""),
+            "the strong `mistralrs/cuda` form would drag the whole optional \
+             mistralrs stack into every `--features cuda` build (got: {cuda_line})"
+        );
+
+        // The weak form only means something if the dependency really is
+        // optional ...
+        let dep_line = manifest
+            .lines()
+            .find(|l| l.trim_start().starts_with("mistralrs = {"))
+            .expect("Cargo.toml must declare the mistralrs dependency");
+        assert!(
+            dep_line.contains("optional = true"),
+            "the mistralrs dependency must be optional (got: {dep_line})"
+        );
+
+        // ... and if the backend feature actually activates it, which is
+        // what makes `mistralrs?/cuda` fire when the user asks for both.
+        let feature_line = manifest
+            .lines()
+            .find(|l| l.trim_start().starts_with("mistralrs = ["))
+            .expect("Cargo.toml must declare a `mistralrs` feature");
+        assert!(
+            feature_line.contains("dep:mistralrs"),
+            "the `mistralrs` feature must activate the optional dependency \
+             (got: {feature_line})"
+        );
+    }
 
     #[test]
     fn test_chat_request_serialize_minimal() {
