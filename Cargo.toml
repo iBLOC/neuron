@@ -41,13 +41,39 @@ chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 fastrand = "2"
 
-candle = { git = "https://github.com/huggingface/candle.git", rev = "aebc405d2b4bf42808387e0ca597bf7dad9b565f", optional = true, package = "candle-core" }
-candle-nn = { git = "https://github.com/huggingface/candle.git", rev = "aebc405d2b4bf42808387e0ca597bf7dad9b565f", optional = true }
-candle-transformers = { git = "https://github.com/huggingface/candle.git", rev = "aebc405d2b4bf42808387e0ca597bf7dad9b565f", optional = true }
-candle-flash-attn = { git = "https://github.com/huggingface/candle.git", rev = "aebc405d2b4bf42808387e0ca597bf7dad9b565f", optional = true }
+# ⚠️ 2026-11-19（依赖升级那一刀）：**candle 的 rev 与 mistral.rs v0.9.5 对齐**
+# ⇒ ⇒ （同一个 rev **66a8cf1**）⇒ ⇒ 起因：mistral.rs v0.9.5 把 candle 钉在
+# ⇒ ⇒ `rev = 66a8cf1`，neuron 自己钉的是 `rev = aebc405d` ⇒ ⇒ **同一个 candle
+# ⇒ ⇒（都是 0.11.0）被编了两份** ⇒ ⇒ candle-core/nn/transformers/kernels
+# ⇒ ⇒ **编译两遍、体积两倍** ⇒ ⇒ 统一到一个 rev ⇒ ⇒ 只编一次。
+# ⇒ ⇒ ⚠️ 两版 candle **都是 0.11.0** ⇒ ⇒ 版本要求对得上（mistral.rs 要
+# ⇒ ⇒ `version = "0.11.0"`）⇒ ⇒ 统一是合法的。
+# ⇒ ⇒ ⚠️ `[patch]` 那条路走不通：cargo 明确拒绝「patch 指向同一个源」
+# ⇒ ⇒ （逐字：「patches must point to different sources」；连 URL 少写
+# ⇒ ⇒ `.git` 也一样——它会规范化）⇒ ⇒ 只能让两边 **pin 同一个 rev**。
+# ⇒ ⇒ ⚠️ 选 66a8cf1 的代价与补救：**candle-kernels@66a8cf1 的 build.rs 少了
+# ⇒ ⇒ CUDA 13 需要的 `/Zc:preprocessor`**（aebc405d 那份有：CUDA 13 的 CCCL
+# ⇒ ⇒ 在 MSVC 传统预处理器下 `#error C1189` 硬报错 ⇒ ⇒ nvcc 直接死 ⇒ ⇒
+# ⇒ ⇒ **报错是空的**，看不出来）⇒ ⇒ 用 `scripts\cuda-build.bat` 里的
+# ⇒ ⇒ `NVCC_PREPEND_FLAGS` 补（实测有效），**上游修法＝给 candle-kernels 的
+# ⇒ ⇒ build.rs 加回那两行**（aebc405d 已有，可作参照）。
+candle = { git = "https://github.com/huggingface/candle.git", rev = "66a8cf184a5a519671454066b1b9efd446ec9f5c", optional = true, package = "candle-core" }
+candle-nn = { git = "https://github.com/huggingface/candle.git", rev = "66a8cf184a5a519671454066b1b9efd446ec9f5c", optional = true }
+candle-transformers = { git = "https://github.com/huggingface/candle.git", rev = "66a8cf184a5a519671454066b1b9efd446ec9f5c", optional = true }
+candle-flash-attn = { git = "https://github.com/huggingface/candle.git", rev = "66a8cf184a5a519671454066b1b9efd446ec9f5c", optional = true }
 tokenizers = { version = "0.22", optional = true }
 litert-lm = { version = "0.1", optional = true }
-mistralrs = { git = "https://github.com/EricLBuehler/mistral.rs", rev = "v0.8.22", optional = true }
+# ⚠️ 2026-11-19（依赖升级那一刀）：mistralrs **v0.8.22 → v0.9.5**。
+# ⇒ ⇒ **为什么这一刀值**：v0.9.0 起 mistral.rs 把 candle 从 **0.10.2** 换成
+# ⇒ ⇒ **0.11.0**（`candle-core = { git=…, version="0.11.0", rev="66a8cf1" }`），
+# ⇒ ⇒ 而 **v0.8.22 带进来的是 candle 0.10.2**（rev e020e8a）⇒ ⇒ 旧锁里**同时**
+# ⇒ ⇒ 有 candle 0.11.0（neuron 自己的 pin）与 candle 0.10.2（mistralrs 带进来的）
+# ⇒ ⇒ ⇒ ⇒ 台账 U+37F2 条④ 那道「CUDA 13.4 × candle-kernels 0.10.2 ⇒ afq.cu
+# ⇒ ⇒ ⇒ ⇒ nvcc 空报错死」**就是被后两份害的** ⇒ ⇒ 升上去能把它们赶出图。
+# ⇒ ⇒ **这一条也是「GPU 读数」那格欠着的唯一一道锁**（此前 3090 全闲、只有 CPU/F32）。
+# ⇒ ⇒ ⚠️ v0.8→v0.9 是**破坏性大版本** ⇒ ⇒ 我们只用到一个文件
+# ⇒ ⇒ （`src/llm/mistralrs_runtime.rs` ＋ `examples/_probe_raw_tokens.rs`）⇒ ⇒ 口径很窄。
+mistralrs = { git = "https://github.com/EricLBuehler/mistral.rs", rev = "v0.9.5", optional = true }
 # llama.cpp backend — safe Rust binding (llama-cpp-2 / utilityai/llama-cpp-rs).
 # Default features include OpenMP + `common` + `mtmd` (multimodal: vision
 # projector + audio). The first time you turn on the `llamacpp` feature,
@@ -169,6 +195,14 @@ harness = false
 name = "model_bench"
 harness = false
 
+# Same-model × backend matrix: one row per (model, backend, device) so
+# the *same weights* can be compared across the backends that can serve
+# them (candle / mistralrs / …), and so a backend's refusal to serve a
+# model shows up as a measured row instead of a footnote.
+[[bench]]
+name = "backend_matrix"
+harness = false
+
 # Chronos2 integration tests need the `chronos2` feature — the runtime
 # they drive (`CandleChronos2Runtime`) lives behind it, so without the
 # feature the test target does not compile.
@@ -184,6 +218,16 @@ required-features = ["ocr"]
 # local snapshot and asks the model to detect objects in a picture.
 [[example]]
 name = "wevisone_vl_smoke"
+required-features = ["mistralrs"]
+
+# Real-weights smoke for the Qwen3.8-27B family: the mistralrs leg loads an
+# HF-format snapshot through the Qwen3_5 loader (27B inherits the Qwen3.5
+# verdict — point it at Qwen3.5-4B when the 54 GB bf16 checkpoint doesn't
+# fit the disk); the optional llamacpp leg loads the unsloth 27B GGUF
+# (arch qwen35) directly. Both answer the same question; think-block
+# passthrough is asserted, not assumed.
+[[example]]
+name = "qwen3_8_27b_smoke"
 required-features = ["mistralrs"]
 
 # Real-weights verification that StreamingVaeDecoder reproduces the full
@@ -242,6 +286,10 @@ required-features = ["candle"]
 name = "jina_score_check"
 required-features = ["candle"]
 
+[[example]]
+name = "ming3_smoke"
+required-features = ["ming3"]
+
 [features]
 default = ["candle"]
 candle = ["dep:candle", "dep:candle-nn", "dep:candle-transformers", "dep:tokenizers", "dep:safetensors", "dep:wide"]
@@ -257,6 +305,10 @@ metal = ["candle/metal", "candle-nn/metal", "candle-transformers/metal"]
 cuda = ["candle/cuda", "candle-nn/cuda", "candle-transformers/cuda", "mistralrs?/cuda"]
 chronos2 = ["candle"]
 voxcpm = ["dep:burn", "dep:burn-store", "dep:tokenizers"]
+# Ming-3.0-tts (inclusionAI dense 0.5B): contract/tasks/config layers plus
+# the burn model stack (backbone via minicpm4, DiT flow head, CFM sampler).
+# The AudioVAE + runtime wiring arrive with the runtime knife.
+ming3 = ["dep:tokenizers", "dep:burn", "dep:burn-store"]
 # Burn-side CUDA backend for the VoxCPM2 TTS runtime (CubeCL kernels).
 # Separate from the `cuda` feature above, which is candle's: pulling
 # burn/cuda in compiles the CubeCL stack, which is a heavy build. Combine
@@ -284,5 +336,3 @@ tract = ["dep:tract-onnx", "dep:ndarray", "dep:tokenizers", "dep:rustfft", "ocr"
 ort = ["dep:ort", "ocr"]
 ocr = []
 sherpa = ["dep:sherpa-onnx"]
-
-

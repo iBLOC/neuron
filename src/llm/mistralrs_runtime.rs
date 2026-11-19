@@ -620,8 +620,16 @@ fn stream_chat<R: RequestLike + Send + 'static>(
                 Response::Chunk(c) => {
                     if let Some(choice) = c.choices.into_iter().next() {
                         let text = choice.delta.content;
+                        // mistral.rs splits the model's chain-of-thought
+                        // into its own delta field — it arrives BEFORE
+                        // the content deltas (the thinking happens first).
+                        // Dropping it here would discard the reasoning
+                        // entirely: the probe measured completion=210
+                        // tokens with content="7" because of exactly
+                        // this drop.
+                        let reasoning = choice.delta.reasoning_content;
                         let finish = choice.finish_reason;
-                        if text.is_none() && finish.is_none() {
+                        if text.is_none() && reasoning.is_none() && finish.is_none() {
                             continue; // empty delta (e.g. role-only announcement)
                         }
                         let chunk = ChatChunk {
@@ -634,8 +642,10 @@ fn stream_chat<R: RequestLike + Send + 'static>(
                                 delta: DeltaMessage {
                                     role: if first_token {
                                         first_token = false;
-                                        // Mirror OpenAI: emit role only on the first chunk with content
-                                        if text.is_some() {
+                                        // Mirror OpenAI: emit role on the first
+                                        // chunk with any payload (reasoning counts —
+                                        // it is the model's first output).
+                                        if text.is_some() || reasoning.is_some() {
                                             Some("assistant".to_string())
                                         } else {
                                             None
@@ -644,6 +654,7 @@ fn stream_chat<R: RequestLike + Send + 'static>(
                                         None
                                     },
                                     content: text,
+                                    reasoning_content: reasoning,
                                 },
                                 finish_reason: finish,
                             }],
@@ -662,7 +673,7 @@ fn stream_chat<R: RequestLike + Send + 'static>(
                         model: model_id.clone(),
                         choices: vec![ChunkChoice {
                             index: 0,
-                            delta: DeltaMessage { role: None, content: None },
+                            delta: DeltaMessage { role: None, content: None, reasoning_content: None },
                             finish_reason: Some("stop".to_string()),
                         }],
                     };
@@ -678,7 +689,7 @@ fn stream_chat<R: RequestLike + Send + 'static>(
                         model: model_id.clone(),
                         choices: vec![ChunkChoice {
                             index: 0,
-                            delta: DeltaMessage { role: None, content: None },
+                            delta: DeltaMessage { role: None, content: None, reasoning_content: None },
                             finish_reason: Some("stop".to_string()),
                         }],
                     };
@@ -722,6 +733,12 @@ fn chat_completion_to_response(
             message: ChatMessage {
                 role: "assistant".to_string(),
                 content: choice.message.content.unwrap_or_default(),
+                // mistral.rs splits the model's `<think>…</think>` into
+                // this separate field ("chain-of-thought reasoning not
+                // intended for end users"). neuron's contract is the
+                // opposite — the caller owns what to do with the
+                // reasoning — so it must reach the caller, not vanish.
+                reasoning_content: choice.message.reasoning_content,
             },
             finish_reason: Some(choice.finish_reason),
         }],
@@ -772,7 +789,98 @@ mod tests {
         ChatMessage {
             role: role.into(),
             content,
+            reasoning_content: None,
         }
+    }
+
+    /// A real-shaped mistral.rs `ChatCompletionResponse` whose message
+    /// carries a split reasoning field — the exact shape the real-weights
+    /// probe measured (completion=210 tokens, content="7"): the model
+    /// thought, and mistral.rs handed the chain-of-thought over in its
+    /// own field. neuron's mapping must forward it, not drop it.
+    fn mistralrs_response(reasoning: Option<String>) -> ChatCompletionResponse {
+        ChatCompletionResponse {
+            id: "chatcmpl-fixture".to_string(),
+            object: "chat.completion".to_string(),
+            created: 0,
+            model: "Qwen/Qwen3.5-4B".to_string(),
+            system_fingerprint: String::new(),
+            choices: vec![mistralrs::Choice {
+                index: 0,
+                finish_reason: "stop".to_string(),
+                message: mistralrs::ResponseMessage {
+                    content: Some("7".to_string()),
+                    role: "assistant".to_string(),
+                    tool_calls: None,
+                    reasoning_content: reasoning,
+                },
+                logprobs: None,
+                // ⚠️ mistralrs **v0.9.5** 新增的字段（v0.8.22 没有）⇒ ⇒ 编译器
+                // ⇒ ⇒ 用 E0063 逐字指出来的 ⇒ ⇒ 非 LoRA 响应 ⇒ ⇒ None。
+                stop_sequence: None,
+            }],
+            usage: mistralrs::Usage {
+                prompt_tokens: 27,
+                completion_tokens: 210,
+                total_tokens: 237,
+                avg_tok_per_sec: 0.0,
+                avg_prompt_tok_per_sec: 0.0,
+                avg_compl_tok_per_sec: 0.0,
+                total_time_sec: 0.0,
+                total_prompt_time_sec: 0.0,
+                total_completion_time_sec: 0.0,
+                // ⚠️ 同上：v0.9.5 新增（prefix cache 的命中明细）⇒ ⇒ 这条夹具
+                // ⇒ ⇒ 没有 prefix cache ⇒ ⇒ None。
+                prompt_tokens_details: None,
+            },
+            // ⚠️ 同上：v0.9.5 新增（本次响应用的那枚 LoRA generation）⇒ ⇒ 非 LoRA ⇒ ⇒ None。
+            adapter_generation: None,
+            agentic_tool_calls: None,
+            files: None,
+            session_id: None,
+        }
+    }
+
+    fn fixture_request() -> ChatRequest {
+        ChatRequest {
+            model: "Qwen/Qwen3.5-4B".to_string(),
+            messages: vec![msg("user", "smallest prime greater than 5".into())],
+            temperature: Some(0.0),
+            max_tokens: Some(512),
+            top_p: None,
+            top_k: None,
+            stream: false,
+            stop: None,
+        }
+    }
+
+    #[test]
+    fn the_split_reasoning_reaches_neurons_response() {
+        let resp = chat_completion_to_response(
+            &fixture_request(),
+            mistralrs_response(Some("5 is not greater than 5; 6 is not prime; so 7.".into())),
+        )
+        .expect("map ok");
+        let message = &resp.choices[0].message;
+        assert_eq!(message.content, "7");
+        assert_eq!(
+            message.reasoning_content.as_deref(),
+            Some("5 is not greater than 5; 6 is not prime; so 7."),
+            "the chain-of-thought must reach neuron's response — dropping it \
+             here is what made extended thinking invisible to every caller"
+        );
+    }
+
+    #[test]
+    fn a_model_that_did_not_think_keeps_the_old_shape() {
+        let resp = chat_completion_to_response(&fixture_request(), mistralrs_response(None))
+            .expect("map ok");
+        assert_eq!(resp.choices[0].message.content, "7");
+        assert!(
+            resp.choices[0].message.reasoning_content.is_none(),
+            "no reasoning from the backend must mean no reasoning on the \
+             response — never an empty string, never fabricated"
+        );
     }
 
     #[test]

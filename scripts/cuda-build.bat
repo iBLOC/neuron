@@ -31,5 +31,28 @@ if errorlevel 1 (
   exit /b 1
 )
 
+REM ---------------------------------------------------------------------------
+REM NOTE: keep this file ASCII-only. A .bat is parsed as GBK on a zh-CN
+REM Windows, and non-ASCII bytes in a REM block shift the parser: the
+REM lines get executed as commands and the MSVC env never reaches nvcc
+REM (symptom: "nvcc fatal : Cannot find compiler 'cl.exe' in PATH").
+REM
+REM 2026-11-19: two upstream kernel bugs break under CUDA 13.x, so we
+REM inject one extra flag for each. nvcc reads NVCC_PREPEND_FLAGS itself,
+REM so it applies to every nvcc invocation.
+REM   1) "-Xcompiler /Zc:preprocessor"
+REM      candle-kernels' build.rs (rev 66a8cf1) is missing it. CUDA 13's
+REM      CCCL headers hard-error (#error C1189) under MSVC's traditional
+REM      preprocessor, so nvcc dies and the error text is EMPTY.
+REM      candle's other rev (aebc405d) already has these two lines.
+REM   2) "-include string"
+REM      mistral.rs' own kernels (mistralrs-quant/kernels/marlin/**) call
+REM      std::to_string without including <string>; CUDA 13.x no longer
+REM      includes it transitively.
+REM Both are upstream bugs; this is the local workaround.
+if not defined NVCC_PREPEND_FLAGS (
+  set "NVCC_PREPEND_FLAGS=-include string -Xcompiler /Zc:preprocessor"
+)
+
 %*
 exit /b %ERRORLEVEL%
