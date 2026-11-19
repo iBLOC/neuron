@@ -387,6 +387,21 @@ impl ServerState {
                     eprintln!("[neuron] NEURON_TTS_RUNTIME=voxcpm2 but voxcpm feature not enabled");
                 }
             }
+            Some("ming3") => {
+                #[cfg(feature = "ming3")]
+                {
+                    // Ming-3.0-tts-0.5B: ≈1.48B params (backbone + DiT +
+                    // AudioVAE + aggregator) materialized as f32 ≈ 6 GB +
+                    // activations.
+                    let _ = tts_registry.register(
+                        "ming3".into(), crate::tts::TtsImpl::Burn, device.clone(), 7_000_000_000,
+                    );
+                }
+                #[cfg(not(feature = "ming3"))]
+                {
+                    eprintln!("[neuron] NEURON_TTS_RUNTIME=ming3 but ming3 feature not enabled");
+                }
+            }
             _ => {}
         }
 
@@ -773,7 +788,7 @@ impl ServerState {
         // rather than failing boot. The candle port of the T5-style
         // architecture is a follow-up commit; this block exists so
         // /v1/forecast can route through the registry end-to-end.
-        let mut chronos2_reg = crate::chronos2::Chronos2Registry::new();
+        let chronos2_reg = crate::chronos2::Chronos2Registry::new();
         if let Some((model_id, _path)) = crate::chronos2::env_discovery() {
             let _ = chronos2_reg.register(
                 model_id,
@@ -1204,7 +1219,7 @@ impl ServerState {
                 reg.register(model_id, impl_id, device, required_memory_bytes)?;
             }
             "chronos2" => {
-                let mut reg = self.chronos2_registry_lock.lock().await;
+                let reg = self.chronos2_registry_lock.lock().await;
                 reg.register(model_id, device, required_memory_bytes)?;
             }
             "decision" => {

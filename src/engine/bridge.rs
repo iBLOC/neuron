@@ -75,14 +75,34 @@ impl LlmRuntime for LlmRuntimeBridge {
         let chat_req = translators::canonical_to_chat_request(&req)
             .map_err(|e| crate::llm::NeuronError::new(format!("bridge stream: {e}")))?;
         let stream = self.inner.chat_stream(chat_req).await?;
-        Ok(Box::pin(stream.filter_map(|chunk| async move {
-            let text = chunk.choices.into_iter().next()
-                .and_then(|c| c.delta.content)
-                .filter(|s| !s.is_empty());
-            text.map(|t| CanonicalLlmStreamEvent::ContentBlockDelta {
-                index: 0,
-                delta: crate::canonical::ContentDelta::TextDelta(t),
-            })
+        Ok(Box::pin(stream.flat_map(|chunk| {
+            // Reasoning deltas precede the answer text (the model thinks
+            // first) — they must reach the canonical stream as
+            // ReasoningDelta, not vanish here. A chunk carrying both
+            // yields the reasoning event before the text event.
+            let events: Vec<CanonicalLlmStreamEvent> = chunk
+                .choices
+                .into_iter()
+                .next()
+                .map(|c| c.delta)
+                .map(|d| {
+                    let mut evs = Vec::new();
+                    if let Some(r) = d.reasoning_content.filter(|s| !s.is_empty()) {
+                        evs.push(CanonicalLlmStreamEvent::ContentBlockDelta {
+                            index: 0,
+                            delta: crate::canonical::ContentDelta::ReasoningDelta(r),
+                        });
+                    }
+                    if let Some(t) = d.content.filter(|s| !s.is_empty()) {
+                        evs.push(CanonicalLlmStreamEvent::ContentBlockDelta {
+                            index: 0,
+                            delta: crate::canonical::ContentDelta::TextDelta(t),
+                        });
+                    }
+                    evs
+                })
+                .unwrap_or_default();
+            futures_util::stream::iter(events)
         })))
     }
 
@@ -115,14 +135,34 @@ impl LlmRuntime for LlmRuntimeBridge {
             .map_err(|e| crate::llm::NeuronError::new(format!("bridge stream (media): {e}")))?;
         let media = if media.is_empty() { translated } else { media };
         let stream = self.inner.chat_with_media_stream(chat_req, media).await?;
-        Ok(Box::pin(stream.filter_map(|chunk| async move {
-            let text = chunk.choices.into_iter().next()
-                .and_then(|c| c.delta.content)
-                .filter(|s| !s.is_empty());
-            text.map(|t| CanonicalLlmStreamEvent::ContentBlockDelta {
-                index: 0,
-                delta: crate::canonical::ContentDelta::TextDelta(t),
-            })
+        Ok(Box::pin(stream.flat_map(|chunk| {
+            // Reasoning deltas precede the answer text (the model thinks
+            // first) — they must reach the canonical stream as
+            // ReasoningDelta, not vanish here. A chunk carrying both
+            // yields the reasoning event before the text event.
+            let events: Vec<CanonicalLlmStreamEvent> = chunk
+                .choices
+                .into_iter()
+                .next()
+                .map(|c| c.delta)
+                .map(|d| {
+                    let mut evs = Vec::new();
+                    if let Some(r) = d.reasoning_content.filter(|s| !s.is_empty()) {
+                        evs.push(CanonicalLlmStreamEvent::ContentBlockDelta {
+                            index: 0,
+                            delta: crate::canonical::ContentDelta::ReasoningDelta(r),
+                        });
+                    }
+                    if let Some(t) = d.content.filter(|s| !s.is_empty()) {
+                        evs.push(CanonicalLlmStreamEvent::ContentBlockDelta {
+                            index: 0,
+                            delta: crate::canonical::ContentDelta::TextDelta(t),
+                        });
+                    }
+                    evs
+                })
+                .unwrap_or_default();
+            futures_util::stream::iter(events)
         })))
     }
 
@@ -168,6 +208,7 @@ mod tests {
                     message: ChatMessage {
                         role: "assistant".into(),
                         content: "Hello from mock!".into(),
+                        reasoning_content: None,
                     },
                     finish_reason: Some("stop".into()),
                 }],
@@ -194,6 +235,7 @@ mod tests {
                     delta: DeltaMessage {
                         role: Some("assistant".into()),
                         content: Some("Hello from mock!".into()),
+                        reasoning_content: None,
                     },
                     finish_reason: None,
                 }],
@@ -240,6 +282,7 @@ mod tests {
                     message: ChatMessage {
                         role: "assistant".into(),
                         content: "saw the image".into(),
+                        reasoning_content: None,
                     },
                     finish_reason: Some("stop".into()),
                 }],
@@ -266,6 +309,7 @@ mod tests {
                     delta: DeltaMessage {
                         role: Some("assistant".into()),
                         content: Some("saw the image".into()),
+                        reasoning_content: None,
                     },
                     finish_reason: None,
                 }],
@@ -384,6 +428,132 @@ mod tests {
         ));
         assert!(has_text_delta, "expected at least one TextDelta event");
     }
+
+    /// A runtime whose backend splits the chain-of-thought into its own
+    /// delta field (mistral.rs shape). The bridge must surface it as a
+    /// canonical ReasoningDelta BEFORE the text deltas — the model
+    /// thought first, and dropping it here would hide the reasoning
+    /// from every wire face downstream.
+    struct ReasoningMockRuntime;
+
+    #[async_trait]
+    impl crate::llm::ChatLlmRuntime for ReasoningMockRuntime {
+        async fn load(
+            _model: &str,
+            _device: &crate::config::DeviceSelection,
+        ) -> crate::llm::ChatResult<Box<dyn crate::llm::ChatLlmRuntime>> {
+            Ok(Box::new(ReasoningMockRuntime))
+        }
+
+        async fn chat(&self, _req: ChatRequest) -> crate::llm::ChatResult<crate::llm::ChatResponse> {
+            Ok(crate::llm::ChatResponse {
+                id: "mock-reasoning".into(),
+                object: "chat.completion".into(),
+                created: 0,
+                model: "test-model".into(),
+                choices: vec![Choice {
+                    index: 0,
+                    message: ChatMessage {
+                        role: "assistant".into(),
+                        content: "7".into(),
+                        reasoning_content: Some("6 is not prime; 7 is.".into()),
+                    },
+                    finish_reason: Some("stop".into()),
+                }],
+                usage: None,
+            })
+        }
+
+        async fn chat_stream(
+            &self,
+            _req: ChatRequest,
+        ) -> crate::llm::ChatResult<BoxStream<'static, crate::llm::ChatChunk>> {
+            use futures_util::StreamExt;
+            let chunk = |reasoning: Option<&str>, content: Option<&str>| crate::llm::ChatChunk {
+                id: "mock-reasoning-chunk".into(),
+                object: "chat.completion.chunk".into(),
+                created: 0,
+                model: "test-model".into(),
+                choices: vec![crate::llm::ChunkChoice {
+                    index: 0,
+                    delta: DeltaMessage {
+                        role: None,
+                        content: content.map(|s| s.to_string()),
+                        reasoning_content: reasoning.map(|s| s.to_string()),
+                    },
+                    finish_reason: None,
+                }],
+            };
+            Ok(futures_util::stream::iter(vec![
+                chunk(Some("6 is not"), None),
+                chunk(Some(" prime; 7 is."), None),
+                chunk(None, Some("7")),
+            ])
+                .boxed())
+        }
+
+        fn list_models(&self) -> Vec<crate::llm::ModelInfo> {
+            vec![]
+        }
+
+        fn name(&self) -> &str {
+            "mock-reasoning"
+        }
+    }
+
+    #[tokio::test]
+    async fn test_bridge_stream_surfaces_reasoning_before_the_text() {
+        let bridge = LlmRuntimeBridge::new(Arc::new(ReasoningMockRuntime), "test-model");
+        let mut req = minimal_canonical_request();
+        req.stream = true;
+        let stream = bridge.execute_stream(req).await.expect("execute_stream");
+        use futures_util::StreamExt;
+        let events: Vec<CanonicalLlmStreamEvent> = stream.collect::<Vec<_>>().await;
+        let reasoning: Vec<&String> = events.iter().filter_map(|e| match e {
+            CanonicalLlmStreamEvent::ContentBlockDelta {
+                delta: crate::canonical::ContentDelta::ReasoningDelta(r),
+                ..
+            } => Some(r),
+            _ => None,
+        }).collect();
+        let text: Vec<&String> = events.iter().filter_map(|e| match e {
+            CanonicalLlmStreamEvent::ContentBlockDelta {
+                delta: crate::canonical::ContentDelta::TextDelta(t),
+                ..
+            } => Some(t),
+            _ => None,
+        }).collect();
+        assert_eq!(
+            reasoning.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(""),
+            "6 is not prime; 7 is.",
+            "both reasoning deltas must arrive"
+        );
+        assert_eq!(text.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(""), "7");
+        // Order matters: every reasoning event precedes every text event.
+        let first_text = events.iter().position(|e| matches!(e,
+            CanonicalLlmStreamEvent::ContentBlockDelta { delta: crate::canonical::ContentDelta::TextDelta(_), .. }
+        )).expect("a text event exists");
+        let last_reasoning = events.iter().rposition(|e| matches!(e,
+            CanonicalLlmStreamEvent::ContentBlockDelta { delta: crate::canonical::ContentDelta::ReasoningDelta(_), .. }
+        )).expect("a reasoning event exists");
+        assert!(
+            last_reasoning < first_text,
+            "reasoning must precede the answer text in the canonical stream"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_bridge_execute_produces_a_reasoning_block() {
+        let bridge = LlmRuntimeBridge::new(Arc::new(ReasoningMockRuntime), "test-model");
+        let resp = bridge.execute(minimal_canonical_request()).await.expect("execute");
+        assert_eq!(resp.content.len(), 2, "reasoning block + text block");
+        assert!(
+            matches!(&resp.content[0], ContentBlock::Reasoning(r) if r.text == "6 is not prime; 7 is."),
+            "the split reasoning must become a first-class canonical Reasoning block"
+        );
+        assert!(matches!(&resp.content[1], ContentBlock::Text(t) if t.text == "7"));
+    }
+
 
     #[test]
     fn test_bridge_capabilities_advertise_openai_chat() {

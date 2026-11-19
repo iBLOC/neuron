@@ -67,6 +67,15 @@ impl ModelInfo {
 pub struct ChatMessage {
     pub role: String,
     pub content: String,
+    /// The model's chain-of-thought, when the backend hands it over
+    /// separately (mistral.rs splits `<think>…</think>` into its
+    /// `reasoning_content` field). Never fabricated here: `None` means
+    /// the backend sent no separate reasoning — either the model did
+    /// not think, or the reasoning is already inline in `content`
+    /// (llama.cpp emits the raw `<think>` stream). Serialized only
+    /// when present, so wire consumers see no new field otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -134,6 +143,11 @@ pub struct DeltaMessage {
     pub role: Option<String>,
     #[serde(default)]
     pub content: Option<String>,
+    /// Incremental chain-of-thought (mistral.rs reasoning deltas —
+    /// reasoning arrives BEFORE the content deltas; mirror of the
+    /// non-streaming `ChatMessage::reasoning_content`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
 }
 
 pub type ChatResult<T> = Result<T, NeuronError>;
@@ -397,6 +411,7 @@ mod tests {
             messages: vec![ChatMessage {
                 role: "user".to_string(),
                 content: "Hi".to_string(),
+                reasoning_content: None,
             }],
             temperature: None,
             max_tokens: None,
@@ -420,6 +435,7 @@ mod tests {
             messages: vec![ChatMessage {
                 role: "user".to_string(),
                 content: "Hi".to_string(),
+                reasoning_content: None,
             }],
             temperature: Some(0.7),
             max_tokens: Some(100),
@@ -463,6 +479,7 @@ mod tests {
                 message: ChatMessage {
                     role: "assistant".to_string(),
                     content: "Hello".to_string(),
+                    reasoning_content: None,
                 },
                 finish_reason: Some("stop".to_string()),
             }],
@@ -491,6 +508,7 @@ mod tests {
                 delta: DeltaMessage {
                     role: Some("assistant".to_string()),
                     content: Some("Hello".to_string()),
+                    reasoning_content: None,
                 },
                 finish_reason: None,
             }],
@@ -508,6 +526,7 @@ mod tests {
         let msg = ChatMessage {
             role: "user".to_string(),
             content: "Hello world".to_string(),
+            reasoning_content: None,
         };
 
         let json = serde_json::to_string(&msg).unwrap();
@@ -529,6 +548,7 @@ mod tests {
                 delta: DeltaMessage {
                     role: Some("assistant".to_string()),
                     content: Some("Hi".to_string()),
+                    reasoning_content: None,
                 },
                 finish_reason: None,
             }],
@@ -553,6 +573,7 @@ mod tests {
                 delta: DeltaMessage {
                     role: Some("assistant".to_string()),
                     content: Some("Hello".to_string()),
+                    reasoning_content: None,
                 },
                 finish_reason: Some("stop".to_string()),
             }],

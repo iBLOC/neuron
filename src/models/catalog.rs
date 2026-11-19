@@ -572,6 +572,20 @@ pub const SUPPORTED_CATALOG: &[SupportedModel] = &[
         source_id: "huggingface",
         families: &["qwen3_5"],
     },
+    // Qwen 3.8-27B — the config is the Qwen3.5 architecture verbatim
+    // (`model_type: "qwen3_5"`), so it rides the same mistralrs
+    // Qwen3_5 loader path measured by `examples/qwen3_8_27b_smoke.rs`.
+    // bf16 ≈54 GB: pull it only onto a disk that can hold it. Vision
+    // tower loads but stays unused (text chat only), same story as
+    // Qwen3.5-4B above.
+    SupportedModel {
+        id: "Qwen/Qwen3.8-27B",
+        engine: EngineType::Llm,
+        engine_impl: "mistralrs",
+        default_repo: "modelscope:Qwen/Qwen3.8-27B",
+        source_id: "modelscope",
+        families: &["qwen3_5"],
+    },
     // Tencent WeVisOne-VL (WeChat Vision, Apache-2.0) — a perception VLM
     // whose backbone is Qwen3-VL (`model_type: "qwen3_vl"`). The candle
     // backend cannot load that architecture; mistral.rs v0.8.22 ships a

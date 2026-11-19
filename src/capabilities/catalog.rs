@@ -316,6 +316,18 @@ pub fn default_capabilities() -> Vec<ModelCapabilities> {
         cap("mistralrs", "Qwen/Qwen3.5-4B", &[TextInput], &[TextOutput],
             &[ApiStyle::openai_chat(), ApiStyle::anthropic_messages()],
             true, false, false, false),
+        // Qwen 3.8-27B on the mistralrs backend. Its config.json is the
+        // Qwen3.5 architecture verbatim (`model_type: "qwen3_5"`,
+        // `Qwen3_5ForConditionalGeneration`) — the Qwen3.5 entry above
+        // inherits wholesale; measured, not just audited, via
+        // `examples/qwen3_8_27b_smoke.rs` (the loader path against the
+        // family weights; the 27B itself on the llamacpp leg).
+        //
+        // Text only: same story as Qwen3.5-4B — the vision tower is
+        // loaded but unused on this backend.
+        cap("mistralrs", "Qwen/Qwen3.8-27B", &[TextInput], &[TextOutput],
+            &[ApiStyle::openai_chat(), ApiStyle::anthropic_messages()],
+            true, false, false, false),
         // Tencent WeVisOne-VL (WeChat Vision, Apache-2.0) — a
         // perception VLM whose `config.json` is Qwen3-VL's
         // (`architectures: ["Qwen3VLForConditionalGeneration"]`,

@@ -303,6 +303,7 @@ fn chat_request(model: &str) -> neuron_lib::llm::ChatRequest {
         messages: vec![neuron_lib::llm::ChatMessage {
             role: "user".to_string(),
             content: LLM_PROMPT.to_string(),
+            reasoning_content: None,
         }],
         temperature: Some(0.0),
         max_tokens: Some(64),
@@ -825,8 +826,9 @@ async fn run_chronos2(
     unsafe { std::env::set_var("NEURON_CHRONOS2_MODEL_PATH", &dir) };
     // env_discovery() resolves `<CHRONOS2_DEFAULT_MODEL>` under the path
     // above — with the default "chronos-bolt-small" the id mismatches the
-    // downloaded chronos-t5-small directory and the registry falls back
-    // to the stub (which answers NotImplemented → the row reports the
+    // downloaded chronos-t5-small directory. ⚠ The registry now picks the
+    // checkpoint **by the named id** ⇒ ⇒ a mismatch is an **error that
+    // names the id** (the old shape fell back to a stub and reported a
     // misleading "Sprint 3 skeleton" note; found 2026-10-31).
     unsafe { std::env::set_var("NEURON_CHRONOS2_DEFAULT_MODEL", model_id) };
 
@@ -834,7 +836,10 @@ async fn run_chronos2(
     registry
         .register(model_id.to_string(), device, 0)
         .map_err(|e| e.to_string())?;
-    let rt = registry.runtime_for(model_id).await;
+    let rt = registry
+        .runtime_for(model_id)
+        .await
+        .map_err(|e| e.to_string())?;
 
     let series: Vec<f64> = (0..64).map(|i| (i as f64 * 0.5).sin()).collect();
     let mut samples: Vec<(f64, f64)> = Vec::new();

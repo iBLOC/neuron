@@ -19,12 +19,17 @@ pub struct ImageGenRuntimeRegistry {
     /// Shared behind an `Arc<Mutex<_>>` so that a **clone** of the
     /// registry sees the same list: `ServerState` keeps one copy for
     /// the handlers and one inside the registration lock, and a model
-    /// registered at runtime must reach both. (The other capability
-    /// registries still copy their list on clone — see
+    /// registered at runtime must reach both. (Every capability
+    /// registry shares its list this way — see
     /// `src/imagegen/registry_sharing_test.rs`.)
     pub registered: Arc<Mutex<Vec<RegisteredImageGen>>>,
     loaded: Arc<tokio::sync::Mutex<HashMap<ImageGenRegistryKey, Arc<dyn ImageGenRuntime>>>>,
-    resources: Mutex<ResourceTracker>,
+    /// ⚠ **resources 住在 `Arc<Mutex<_>>` 里** —— Clone 必须**共享**它，不许重建：
+    /// `ServerState` 把注册表 clone 出一份放进动态注册锁（`imagegen_registry_lock`），
+    /// handlers 读的是另一份（`imagegen_registry`）。重建 ⇒ 克隆件的配额从零起算 ⇒
+    /// 动态注册的扣账记在副本 tracker 上、原件不知道 ⇒ **超卖**。
+    /// 其余 capability 注册表逐字同形（chronos2 那份的文档注释记着同一课）。
+    resources: Arc<Mutex<ResourceTracker>>,
 }
 
 impl Clone for ImageGenRuntimeRegistry {
@@ -32,7 +37,7 @@ impl Clone for ImageGenRuntimeRegistry {
         Self {
             registered: self.registered.clone(),
             loaded: self.loaded.clone(),
-            resources: Mutex::new(ResourceTracker::default()),
+            resources: self.resources.clone(),
         }
     }
 }
@@ -72,7 +77,7 @@ impl ImageGenRuntimeRegistry {
         Self {
             registered: Arc::new(Mutex::new(Vec::new())),
             loaded: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
-            resources: Mutex::new(resources),
+            resources: Arc::new(Mutex::new(resources)),
         }
     }
 

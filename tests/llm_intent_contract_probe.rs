@@ -250,6 +250,7 @@ async fn the_local_small_model_keeps_the_intent_contract() {
                     ChatMessage {
                         role: "system".to_string(),
                         content: INTENT_SYSTEM_PROMPT.to_string(),
+                        reasoning_content: None,
                     },
                     ChatMessage {
                         role: "user".to_string(),
@@ -257,6 +258,7 @@ async fn the_local_small_model_keeps_the_intent_contract() {
                             "请把下面这句话分类成意图。\n\n[用户这一句]\n{}",
                             question
                         ),
+                        reasoning_content: None,
                     },
                 ],
                 temperature: Some(0.0),

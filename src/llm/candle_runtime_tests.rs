@@ -285,7 +285,7 @@ async fn test_candle_chat_without_load_returns_not_initialized() {
     let runtime = CandleLlmRuntime::new();
     let req = ChatRequest {
         model: "qwen3-0.6b".to_string(),
-        messages: vec![ChatMessage { role: "user".to_string(), content: "Hello".to_string() }],
+        messages: vec![ChatMessage { role: "user".to_string(), content: "Hello".to_string(), reasoning_content: None }],
         temperature: None,
         max_tokens: None,
         top_p: None,
@@ -306,7 +306,7 @@ async fn test_candle_chat_stream_without_load_returns_not_initialized() {
     let runtime = CandleLlmRuntime::new();
     let req = ChatRequest {
         model: "qwen3-0.6b".to_string(),
-        messages: vec![ChatMessage { role: "user".to_string(), content: "Hello".to_string() }],
+        messages: vec![ChatMessage { role: "user".to_string(), content: "Hello".to_string(), reasoning_content: None }],
         temperature: None,
         max_tokens: None,
         top_p: None,
@@ -325,8 +325,8 @@ async fn test_candle_chat_stream_without_load_returns_not_initialized() {
 #[test]
 fn test_chatml_prompt_format_system_user_assistant() {
     let messages = vec![
-        ChatMessage { role: "system".to_string(), content: "You are helpful".to_string() },
-        ChatMessage { role: "user".to_string(), content: "Hi".to_string() },
+        ChatMessage { role: "system".to_string(), content: "You are helpful".to_string(), reasoning_content: None },
+        ChatMessage { role: "user".to_string(), content: "Hi".to_string(), reasoning_content: None },
     ];
 
     let prompt = CandleLlmRuntime::render_chatml_prompt(&messages);
@@ -339,7 +339,7 @@ fn test_chatml_prompt_format_system_user_assistant() {
 
 #[test]
 fn test_chatml_prompt_single_user() {
-    let messages = vec![ChatMessage { role: "user".to_string(), content: "hello".to_string() }];
+    let messages = vec![ChatMessage { role: "user".to_string(), content: "hello".to_string(), reasoning_content: None }];
     let prompt = CandleLlmRuntime::render_chatml_prompt(&messages);
     assert_eq!(prompt, "<|im_start|>user\nhello<|im_end|>\n<|im_start|>assistant\n");
 }

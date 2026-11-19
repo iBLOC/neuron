@@ -802,6 +802,7 @@ impl super::LlmRuntime for CandleLlmRuntime {
                 message: ChatMessage {
                     role: "assistant".to_string(),
                     content: output_text,
+                    reasoning_content: None,
                 },
                 finish_reason: Some(if next_token == eos_token_id { "stop".to_string() } else { "length".to_string() }),
             }],
@@ -882,7 +883,7 @@ impl super::LlmRuntime for CandleLlmRuntime {
                         model: model_id.clone(),
                         choices: vec![super::ChunkChoice {
                             index: 0,
-                            delta: DeltaMessage { role: None, content: None },
+                            delta: DeltaMessage { role: None, content: None, reasoning_content: None },
                             finish_reason: Some("length".to_string()),
                         }],
                     });
@@ -903,7 +904,7 @@ impl super::LlmRuntime for CandleLlmRuntime {
                     model: model_id.clone(),
                     choices: vec![super::ChunkChoice {
                         index: 0,
-                        delta: DeltaMessage { role: None, content: None },
+                        delta: DeltaMessage { role: None, content: None, reasoning_content: None },
                         finish_reason: Some("length".to_string()),
                     }],
                 });
@@ -920,6 +921,7 @@ impl super::LlmRuntime for CandleLlmRuntime {
                     delta: DeltaMessage {
                         role: Some("assistant".to_string()),
                         content: None,
+                        reasoning_content: None,
                     },
                     finish_reason: None,
                 }],
@@ -995,6 +997,7 @@ impl super::LlmRuntime for CandleLlmRuntime {
                                 delta: DeltaMessage {
                                     role: None,
                                     content: Some(text_so_far[old_len..old_len + emit_len].to_string()),
+                                    reasoning_content: None,
                                 },
                                 finish_reason: None,
                             }],
@@ -1012,6 +1015,7 @@ impl super::LlmRuntime for CandleLlmRuntime {
                             delta: DeltaMessage {
                                 role: None,
                                 content: Some(decoded),
+                                reasoning_content: None,
                             },
                             finish_reason: None,
                         }],
@@ -1083,6 +1087,7 @@ impl super::LlmRuntime for CandleLlmRuntime {
                                     delta: DeltaMessage {
                                         role: None,
                                         content: Some(text_so_far[old_len..old_len + emit_len].to_string()),
+                                        reasoning_content: None,
                                     },
                                     finish_reason: None,
                                 }],
@@ -1100,6 +1105,7 @@ impl super::LlmRuntime for CandleLlmRuntime {
                                 delta: DeltaMessage {
                                     role: None,
                                     content: Some(decoded),
+                                    reasoning_content: None,
                                 },
                                 finish_reason: None,
                             }],
@@ -1116,7 +1122,7 @@ impl super::LlmRuntime for CandleLlmRuntime {
                 model: model_id.clone(),
                 choices: vec![super::ChunkChoice {
                     index: 0,
-                    delta: DeltaMessage { role: None, content: None },
+                    delta: DeltaMessage { role: None, content: None, reasoning_content: None },
                     finish_reason: Some(if finished {
                         "stop".to_string()
                     } else {

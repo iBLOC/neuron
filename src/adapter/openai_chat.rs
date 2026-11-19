@@ -75,6 +75,12 @@ pub struct OpenAiChatChoice {
 pub struct OpenAiChatResponseMessage {
     pub role: String,
     pub content: String,
+    /// The model's chain-of-thought (DeepSeek/OpenRouter-style wire
+    /// shape). Present only when the model actually reasoned — the
+    /// canonical Reasoning block mapped here; absent (not just null)
+    /// otherwise, so non-thinking responses keep the exact old shape.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<Value>>,
 }
@@ -110,6 +116,10 @@ pub struct OpenAiChatChunkDelta {
     pub role: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
+    /// Incremental chain-of-thought (arrives BEFORE the content
+    /// deltas); absent on non-thinking chunks.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
 }
 
 pub fn openai_to_canonical(req: OpenAiChatRequest) -> Result<CanonicalRequest, String> {
@@ -408,6 +418,19 @@ pub fn canonical_to_openai(resp: &CanonicalLlmResponse) -> OpenAiChatResponse {
         .collect::<Vec<_>>()
         .join("");
 
+    // The canonical Reasoning block (the model's chain-of-thought,
+    // produced when a backend hands its reasoning over separately)
+    // surfaces on the OpenAI wire as `reasoning_content` — joined when
+    // the model emitted several reasoning segments.
+    let reasoning = resp.content.iter()
+        .filter_map(|b| match b {
+            ContentBlock::Reasoning(r) => Some(r.text.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("");
+    let reasoning = (!reasoning.is_empty()).then_some(reasoning);
+
     // ToolUse blocks round-trip to OpenAI response tool_calls (arguments
     // as a JSON string per the wire contract).
     let tool_calls: Vec<Value> = resp
@@ -445,6 +468,7 @@ pub fn canonical_to_openai(resp: &CanonicalLlmResponse) -> OpenAiChatResponse {
             message: OpenAiChatResponseMessage {
                 role: "assistant".to_string(),
                 content: text,
+                reasoning_content: reasoning,
                 tool_calls: (!tool_calls.is_empty()).then_some(tool_calls),
             },
             finish_reason,
@@ -469,6 +493,16 @@ pub fn canonical_chunk_to_openai_chunk(
                 ContentDelta::TextDelta(s) => Some(s.clone()),
                 _ => None,
             };
+            // Reasoning deltas ride their own wire field (they arrive
+            // before the content deltas, mirroring the model's actual
+            // generation order).
+            let reasoning_content = match delta {
+                ContentDelta::ReasoningDelta(s) => Some(s.clone()),
+                _ => None,
+            };
+            if content.is_none() && reasoning_content.is_none() {
+                return None;
+            }
             Some(OpenAiChatChunk {
                 id: chunk_id.to_string(),
                 object: "chat.completion.chunk".to_string(),
@@ -476,7 +510,7 @@ pub fn canonical_chunk_to_openai_chunk(
                 model: model_id.to_string(),
                 choices: vec![OpenAiChatChunkChoice {
                     index: 0,
-                    delta: OpenAiChatChunkDelta { role: None, content },
+                    delta: OpenAiChatChunkDelta { role: None, content, reasoning_content },
                     finish_reason: None,
                 }],
                 usage: None,
@@ -606,5 +640,68 @@ mod tests {
         assert_eq!(v["model"], "gpt-4");
         assert_eq!(v["choices"][0]["message"]["content"], "hello");
         assert_eq!(v["choices"][0]["finish_reason"], "stop");
+    }
+
+    /// The canonical Reasoning block (a backend's split
+    /// chain-of-thought) surfaces on the OpenAI wire as
+    /// `reasoning_content` on the response message.
+    #[test]
+    fn canonical_reasoning_block_maps_to_openai_reasoning_content() {
+        let resp = CanonicalResponse::Llm(CanonicalLlmResponse {
+            id: "chat-1".into(),
+            model: "Qwen/Qwen3.5-4B".into(),
+            stop_reason: StopReason::EndTurn,
+            content: vec![
+                ContentBlock::Reasoning(crate::canonical::ReasoningBlock {
+                    text: "6 is not prime; 7 is.".into(),
+                    signature: None,
+                }),
+                ContentBlock::Text(TextBlock { text: "7".into() }),
+            ],
+            usage: Default::default(),
+            extensions: Default::default(),
+        });
+        let adapter = OpenAiChatAdapter;
+        let bytes = adapter.serialize_response(&resp).expect("serialize");
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            v["choices"][0]["message"]["reasoning_content"],
+            "6 is not prime; 7 is.",
+            "the chain-of-thought must reach the OpenAI wire"
+        );
+        assert_eq!(v["choices"][0]["message"]["content"], "7");
+    }
+
+    /// Streaming: a reasoning delta rides the chunk's own
+    /// `reasoning_content` field, content stays null — the wire
+    /// consumer sees the thinking BEFORE the answer, in generation order.
+    #[test]
+    fn chunk_reasoning_delta_maps_to_openai_reasoning_content() {
+        let event = CanonicalLlmStreamEvent::ContentBlockDelta {
+            index: 0,
+            delta: ContentDelta::ReasoningDelta("6 is not prime;".into()),
+        };
+        let chunk = canonical_chunk_to_openai_chunk(&event, "id", 0, "m").expect("chunk");
+        assert_eq!(
+            chunk.choices[0].delta.reasoning_content.as_deref(),
+            Some("6 is not prime;"),
+        );
+        assert!(chunk.choices[0].delta.content.is_none());
+    }
+
+    /// A non-thinking chunk keeps the exact old wire shape — no
+    /// `reasoning_content` key at all (not null, absent).
+    #[test]
+    fn plain_text_chunk_omits_the_reasoning_field_on_the_wire() {
+        let event = CanonicalLlmStreamEvent::ContentBlockDelta {
+            index: 0,
+            delta: ContentDelta::TextDelta("hello".into()),
+        };
+        let chunk = canonical_chunk_to_openai_chunk(&event, "id", 0, "m").expect("chunk");
+        let json = serde_json::to_value(&chunk).unwrap();
+        assert!(
+            json["choices"][0]["delta"].get("reasoning_content").is_none(),
+            "reasoning_content must be absent, not null: {json}"
+        );
     }
 }

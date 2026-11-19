@@ -45,6 +45,21 @@ pub struct MiniCPMConfig {
     /// unchanged.
     #[config(default = false)]
     pub no_rope: bool,
+    /// Qwen2-style q/k/v projection biases. Standard MiniCPM/Qwen2 blocks
+    /// have none (`with_bias(false)`), but the Ming-3.0-tts-0.5B checkpoint
+    /// carries `self_attn.{q,k,v}_proj.bias` on every block — LLM backbone
+    /// included — so its loader sets this. Defaults to false so the
+    /// VoxCPM2 configs parse unchanged.
+    #[config(default = false)]
+    pub qkv_bias: bool,
+    /// Sliding-window causal attention (`sliding_window` +
+    /// `use_sliding_window` in the Ming AudioVAE backbone configs; the
+    /// window applies to **every** layer uniformly, matching the
+    /// transformers 4.43 Qwen2 implementation the checkpoint pins).
+    /// `None` keeps full attention — every VoxCPM2 config parses unchanged.
+    /// (Option fields are excluded from the generated `new()` and default
+    /// to `None`, like `kv_channels`.)
+    pub sliding_window: Option<usize>,
 }
 
 impl MiniCPMConfig {
@@ -74,6 +89,8 @@ impl MiniCPMConfig {
                         self.max_position_embeddings,
                     )
                     .with_kv_channels(self.kv_channels)
+                    .with_qkv_bias(self.qkv_bias)
+                    .with_sliding_window(self.sliding_window)
                     .init(device)
                 })
                 .collect::<Vec<_>>(),
@@ -196,6 +213,12 @@ pub struct MiniCPMDecoderLayerConfig {
     num_heads: usize,
     num_key_value_heads: usize,
     max_position_embeddings: usize,
+    /// Qwen2-style q/k/v biases (Ming-3.0-tts backbone). See
+    /// [`MiniCPMConfig::qkv_bias`].
+    #[config(default = false)]
+    pub qkv_bias: bool,
+    /// Sliding-window causal attention. See [`MiniCPMConfig::sliding_window`].
+    pub sliding_window: Option<usize>,
 }
 
 impl MiniCPMDecoderLayerConfig {
@@ -209,6 +232,8 @@ impl MiniCPMDecoderLayerConfig {
                 self.max_position_embeddings,
             )
             .with_kv_channels(self.kv_channels)
+            .with_qkv_bias(self.qkv_bias)
+            .with_sliding_window(self.sliding_window)
             .init(device),
             mlp: MiniCPMMLPConfig::new(self.hidden_size, self.intermediate_size).init(device),
             input_layernorm: MiniCPMRMSNorm {
@@ -324,6 +349,12 @@ pub struct MiniCPMAttentionConfig {
     max_position_embeddings: usize,
     #[config(default = 10000.0)]
     rope_theta: f32,
+    /// Qwen2-style q/k/v biases (Ming-3.0-tts backbone). The output
+    /// projection never carries a bias in either family.
+    #[config(default = false)]
+    pub qkv_bias: bool,
+    /// Sliding-window causal attention. See [`MiniCPMConfig::sliding_window`].
+    pub sliding_window: Option<usize>,
 }
 
 impl MiniCPMAttentionConfig {
@@ -337,15 +368,22 @@ impl MiniCPMAttentionConfig {
             head_dim,
             num_key_value_heads: self.num_key_value_heads,
             num_key_value_groups: self.num_heads / self.num_key_value_heads,
+            sliding_window: self.sliding_window,
             q_proj: LinearConfig::new(self.hidden_size, self.num_heads * head_dim)
-                .with_bias(false)
+                .with_bias(self.qkv_bias)
                 .init(device),
-            k_proj: LinearConfig::new(self.hidden_size, self.num_key_value_heads * head_dim)
-                .with_bias(false)
-                .init(device),
-            v_proj: LinearConfig::new(self.hidden_size, self.num_key_value_heads * head_dim)
-                .with_bias(false)
-                .init(device),
+            k_proj: LinearConfig::new(
+                self.hidden_size,
+                self.num_key_value_heads * head_dim,
+            )
+            .with_bias(self.qkv_bias)
+            .init(device),
+            v_proj: LinearConfig::new(
+                self.hidden_size,
+                self.num_key_value_heads * head_dim,
+            )
+            .with_bias(self.qkv_bias)
+            .init(device),
             o_proj: LinearConfig::new(self.num_heads * head_dim, self.hidden_size)
                 .with_bias(false)
                 .init(device),
@@ -359,6 +397,7 @@ pub struct MiniCPMAttention<B: Backend> {
     head_dim: usize,
     num_key_value_heads: usize,
     num_key_value_groups: usize,
+    sliding_window: Option<usize>,
     q_proj: Linear<B>,
     k_proj: Linear<B>,
     v_proj: Linear<B>,
@@ -401,6 +440,7 @@ impl<B: Backend> MiniCPMAttention<B> {
             is_causal,
             None,
             true,
+            self.sliding_window,
         );
 
         let attn_output =
@@ -447,9 +487,21 @@ impl<B: Backend> MiniCPMAttention<B> {
 
         let (key_cache, value_cache) = kv_cache.as_ref().unwrap().get_layer_cache(kv_cache_index);
 
-        let attn_mask: Tensor<B, 1, burn::tensor::Bool> =
-            Tensor::arange(0..key_cache.dims()[2] as i64, &key_cache.device())
-                .lower_equal_elem(position_id as u32);
+        // Causal mask over the cached keys, narrowed to the sliding window
+        // when one is configured: keys must satisfy `ki <= position` and
+        // `position - ki < window`.
+        let keys = key_cache.dims()[2];
+        let causal = Tensor::arange(0..keys as i64, &key_cache.device())
+            .lower_equal_elem(position_id as u32);
+        let attn_mask: Tensor<B, 1, burn::tensor::Bool> = match self.sliding_window {
+            Some(w) => {
+                let window_start = position_id.saturating_sub(w - 1);
+                let in_window = Tensor::arange(0..keys as i64, &key_cache.device())
+                    .greater_equal_elem(window_start as u32);
+                causal.bool_and(in_window)
+            }
+            None => causal,
+        };
 
         let attn_output = Self::scaled_dot_product_attention(
             query_states,
@@ -459,6 +511,7 @@ impl<B: Backend> MiniCPMAttention<B> {
             false,
             None,
             true,
+            None,
         );
 
         let attn_output = attn_output.swap_dims(1, 2);
@@ -469,6 +522,7 @@ impl<B: Backend> MiniCPMAttention<B> {
         self.o_proj.forward(attn_output)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn scaled_dot_product_attention(
         query: Tensor<B, 4>,
         mut key: Tensor<B, 4>,
@@ -477,6 +531,7 @@ impl<B: Backend> MiniCPMAttention<B> {
         is_causal: bool,
         scale: Option<f32>,
         enable_gqa: bool,
+        sliding_window: Option<usize>,
     ) -> Tensor<B, 4> {
         let device = &query.device();
         let q_dims = query.dims();
@@ -488,8 +543,27 @@ impl<B: Backend> MiniCPMAttention<B> {
         let attn_bias: Tensor<B, 2> = Tensor::zeros([L, S], device);
 
         let attn_bias = if is_causal {
-            let temp_mask: Tensor<B, 2, Int> = Tensor::ones([L, S], device).tril(0);
-            attn_bias.mask_fill(temp_mask.bool().bool_not(), f32::NEG_INFINITY)
+            match sliding_window {
+                Some(w) => {
+                    // Band mask: key j is visible to query i iff
+                    // `j <= i && i - j < w` (the transformers 4.43 Qwen2
+                    // sliding shape, uniform across layers).
+                    let qi = Tensor::<B, 1, Int>::arange(0..L as i64, device)
+                        .float()
+                        .reshape([L, 1]);
+                    let ki = Tensor::<B, 1, Int>::arange(0..S as i64, device)
+                        .float()
+                        .reshape([1, S]);
+                    let causal_ok = ki.clone().lower_equal(qi.clone());
+                    let window_ok = qi.sub(ki).lower_elem(w as f32);
+                    let keep = causal_ok.bool_and(window_ok);
+                    attn_bias.mask_fill(keep.bool_not(), f32::NEG_INFINITY)
+                }
+                None => {
+                    let temp_mask: Tensor<B, 2, Int> = Tensor::ones([L, S], device).tril(0);
+                    attn_bias.mask_fill(temp_mask.bool().bool_not(), f32::NEG_INFINITY)
+                }
+            }
         } else {
             attn_bias
         };

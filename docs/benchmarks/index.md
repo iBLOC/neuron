@@ -143,6 +143,77 @@ CPU backend has no bf16 matmul, so CPU rows are f32 (highest memory).
 Larger catalog models (llama-3-8b, mistral-7b, chatglm-3-6b) run on the
 same harness; numbers not yet published.
 
+## Same model × backend (neuron's own backends, same weights)
+
+The table above answers *"how fast is each model?"* — one row per model,
+each on the backend it is registered to. This one answers the other
+question: **the same weights, on every backend that can serve them.**
+A model can be servable by several backends (and they differ by 3× on
+the same machine), and a model can be servable by *none* of the local
+backends — a refusal worth measuring rather than footnoting.
+
+`benches/backend_matrix.rs` runs each (model, backend, device) cell
+in-process through the same public registry API (`register` →
+`runtime_for`), with the same workload as the per-model sweep: one
+fixed prompt, greedy, 64 new tokens, streamed; warmup discarded;
+decode tok/s = (chunks − 1) / (total − first chunk); p50.
+
+### Speed — CPU, 2026-11-19 (Windows 11, 12 threads, RTX 3090 present but unused)
+
+| model | backend | decode tok/s | TTFT (ms) | total (ms) | load (s) | note |
+|---|---|---:|---:|---:|---:|---|
+| qwen3-0.6b | candle | 7.0 | 2 797 | 13 493 | 72.5 | f32 on CPU |
+| qwen3-0.6b | **mistralrs** | **26.1** | 258 | 13 298 | 93.1 | ISQ q4 quantized; **3.7× candle** |
+| qwen2.5-0.5b | candle | 8.9 | 73 | 3 097 | 18.9 | f32 on CPU |
+| qwen2.5-0.5b | **mistralrs** | **10.6** | 2 129 | 5 903 | 15.4 | ISQ q4 quantized; 1.2× candle |
+| Qwen3.5-4B | candle | — | — | — | — | **refused** — see below |
+| Qwen3.5-4B | mistralrs | 3.5 | 3 321 | 354 601 | 269.1 | bf16 checkpoint loaded as f32 on CPU ⇒ 16 GB resident |
+
+Reading the table: on CPU, **mistralrs decodes faster than candle on the
+same weights** (3.7× on Qwen3-0.6B) — it quantizes in situ (ISQ q4),
+while candle's CPU path runs f32. TTFT goes the other way: candle's
+first token arrives in 73–2 797 ms, mistralrs's in 258–3 321 ms,
+because mistralrs pays the quantization at load time (15–269 s) rather
+than at first use. **Neither backend wins on both axes** — pick by
+whether the session is short (TTFT) or long (throughput).
+
+### Coverage — which backend can serve which model at all
+
+| model | candle | mistralrs | why |
+|---|---|---|---|
+| qwen3-0.6b | servable | servable | both |
+| qwen2.5-0.5b | servable | servable | both |
+| Qwen3.5-4B | **refused** | servable | candle's `detect_arch` rejects `qwen3_5`: the config nests the text tower under `text_config` and mixes linear/full attention, and upstream candle-transformers has no module for that stack |
+
+The refusal is reported by the harness with the backend's own message
+(`Qwen 3.5 (qwen3_5) is not supported by the candle backend: … Serve
+Qwen 3.5 with the mistralrs backend … or with llama.cpp via a GGUF`),
+so the table row is the reason, not a dash. `llamacpp` is absent from
+these rows because the backend needs a C++ toolchain (cmake + libclang)
+that this host does not have — a *build-environment* skip, recorded as
+such.
+
+Reproduce:
+
+```bash
+cargo bench --bench backend_matrix --features "candle,mistralrs"
+# report -> target/backend-matrix-cpu.md
+# CUDA rows need the MSVC environment:
+scripts\cuda-build.bat cargo bench --bench backend_matrix --features "candle,cuda,mistralrs"
+```
+
+::: warning The GPU row needs a CUDA-12.x toolchain
+This host's CUDA toolkit is **13.4**, and `mistralrs` v0.9.5's CUDA leg
+fails to build against it in **two** places: the `candle-kernels`
+revision it pulls in (rev `66a8cf18`) cannot emit its PTX kernels, and
+`mistralrs-quant v0.9.5`'s own CUDA kernels (`__CUDA_ARCH__=860`) fail
+to compile — so the `mistralrs` **CUDA** row cannot be built here
+(neuron's own candle pin, rev `aebc405d`, does build). The rows above
+are therefore CPU-only, and the CUDA comparison is a **single-backend**
+one until the toolchain is downgraded to CUDA 12.x or the pinned
+revisions learn to emit code for 13.x.
+:::
+
 ## LLM across engines (same machine, cross-framework)
 
 | stack | model / quant | device | decode tok/s |
@@ -272,6 +343,11 @@ Poolable YOLOv8n intermediates ≈ 32 MB vs ~200 MB peak without pooling
 # Per-capability × per-engine matrix against a running neuron_server :18083
 # (report -> target/model-matrix.md)
 cargo bench --bench model_matrix --features "candle,tract,sherpa,voxcpm"
+
+# Same model × backend matrix (in-process, real weights, same weights
+# served by every backend that can take them)
+# (report -> target/backend-matrix-<device>.md)
+cargo bench --bench backend_matrix --features "candle,mistralrs"
 
 # ASR tract-vs-sherpa (report -> target/asr-speed-compare.md)
 cargo bench --bench asr_speed --features tract,sherpa

@@ -38,6 +38,7 @@ feature flag(见 [/zh/concepts/feature-flags](/zh/concepts/feature-flags))。
 | qwen2.5-1.5b | litert | 1.5B | 端侧(LiteRT-LM) |
 | Qwen/Qwen3-0.6B | mistralrs | 0.6B | ISQ 量化(默认 q4_0) |
 | Qwen/Qwen3.5-4B | mistralrs | 4B | Qwen 3.5 文本对话;该后端未接图像输入 |
+| Qwen/Qwen3.8-27B | mistralrs | 27B | Qwen 3.8 文本对话;架构即 Qwen3.5(`model_type: "qwen3_5"`),视觉塔装载但不用;见 `examples/qwen3_8_27b_smoke.rs` |
 | microsoft/Mage-VL | mage_vl | 4B | 图像+视频,自研 candle 移植 |
 
 ::: warning `litert` 的模型集合由内置 `lit` 二进制决定

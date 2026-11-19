@@ -16,8 +16,27 @@ pub mod voxcpm2;
 #[cfg(feature = "voxcpm")]
 pub use voxcpm2::VoxCpm2TtsRuntime;
 
+/// The MiniCPM/Qwen2-family transformer backbone (GQA, RoPE, static KV
+/// cache) — shared by the VoxCPM2 runtime and the Ming-3.0-tts model.
+/// Physically `voxcpm_burn/minicpm4.rs`; hoisted above the voxcpm gate
+/// because ming3 does not require that feature.
+#[cfg(any(feature = "voxcpm", feature = "ming3"))]
+#[path = "voxcpm_burn/minicpm4.rs"]
+pub mod minicpm4;
+
+/// The direct-checkpoint loader machinery (safetensors/pth → burn module
+/// with dtype/transpose/norm adaptations) — shared by VoxCPM2 and Ming-3.0.
+/// Physically `voxcpm_burn/weights.rs`, same hoisting rationale.
+#[cfg(any(feature = "voxcpm", feature = "ming3"))]
+#[path = "voxcpm_burn/weights.rs"]
+pub mod weights;
+
 #[cfg(feature = "voxcpm")]
 pub mod voxcpm_burn;
+
+/// Ming-3.0-tts (inclusionAI dense 0.5B) — contract/tasks/config layers.
+#[cfg(feature = "ming3")]
+pub mod ming3;
 
 /// Voice-clone reference-audio decoding shared by the HTTP handler and the
 /// VoxCPM2 runtime.
@@ -37,14 +56,14 @@ use crate::llm::{ChatResult, NeuronError};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TtsImpl {
-    #[cfg(feature = "voxcpm")]
+    #[cfg(any(feature = "voxcpm", feature = "ming3"))]
     Burn,
 }
 
 impl TtsImpl {
     pub fn as_str(&self) -> &'static str {
         match self {
-            #[cfg(feature = "voxcpm")]
+            #[cfg(any(feature = "voxcpm", feature = "ming3"))]
             Self::Burn => "burn",
             #[allow(unreachable_patterns)]
             _ => unreachable!("no TtsImpl variant at runtime"),
@@ -53,7 +72,7 @@ impl TtsImpl {
 
     pub fn parse(s: &str) -> Result<Self, String> {
         match s {
-            #[cfg(feature = "voxcpm")]
+            #[cfg(any(feature = "voxcpm", feature = "ming3"))]
             "burn" => Ok(Self::Burn),
             other => Err(format!("unknown TtsImpl: {other}")),
         }

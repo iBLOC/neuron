@@ -92,7 +92,7 @@ pub fn load_checkpoint_into_with_dtype<B: Backend, M: ModuleSnapshot<B>>(
     dtype: DType,
 ) -> Result<LoadReport, String> {
     let snapshots = read_snapshots(path)?;
-    let transformed = transform_snapshots(snapshots, dtype)?;
+    let transformed = transform_snapshots(snapshots, dtype, &|name| name.to_string())?;
 
     let result = module.apply(transformed, None, None, true);
 
@@ -110,7 +110,7 @@ pub fn load_checkpoint_into_with_dtype<B: Backend, M: ModuleSnapshot<B>>(
     Ok(report)
 }
 
-fn read_snapshots(path: &Path) -> Result<Vec<TensorSnapshot>, String> {
+pub(crate) fn read_snapshots(path: &Path) -> Result<Vec<TensorSnapshot>, String> {
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
@@ -161,10 +161,27 @@ fn read_snapshots(path: &Path) -> Result<Vec<TensorSnapshot>, String> {
 }
 
 /// True for burn `Linear.weight` tensors: 2-D, suffix `.weight`, and not an
-/// embedding (`embed_tokens`, `scale_embed`, `bias_embed`). Convs are 3-D and
-/// already share PyTorch's `[out, in, k]` layout, so they pass through.
-fn is_transposed_linear_weight(name: &str, rank: usize) -> bool {
-    rank == 2 && name.ends_with(".weight") && !name.to_ascii_lowercase().contains("embed")
+/// embedding table. Convs are 3-D and already share PyTorch's
+/// `[out, in, k]` layout, so they pass through.
+///
+/// The embedding exclusion is an explicit suffix list, not a blanket
+/// "embed" substring: the substring rule also swallowed the genuine Linear
+/// layers named `x_embedder` / `c_embedder` / `t_embedder.*` in Ming-3.0
+/// (the real checkpoint caught it — four shape mismatches on first load).
+pub(crate) fn is_transposed_linear_weight(name: &str, rank: usize) -> bool {
+    if rank != 2 || !name.ends_with(".weight") {
+        return false;
+    }
+    let lower = name.to_ascii_lowercase();
+    // Embedding tables keep PyTorch's [rows, cols] layout:
+    // - `embed_tokens` — LLM/backbone tables (both families),
+    // - `word_embedder` — Ming-3.0 Aggregator's CLS table,
+    // - `scale_embed` / `bias_embed` — VoxCPM2's sr-condition tables.
+    let embedding_table = lower.ends_with("embed_tokens.weight")
+        || lower.ends_with("word_embedder.weight")
+        || lower.ends_with("scale_embed.weight")
+        || lower.ends_with("bias_embed.weight");
+    !embedding_table
 }
 
 /// Rewrite the upstream PyTorch VAE module tree into neuron's burn tree.
@@ -189,7 +206,7 @@ fn remap_vae_path(name: &str) -> String {
 }
 
 /// Rewrite burn-target paths for the RmsNorm wrapper naming.
-fn remap_norm_path(name: &str) -> String {
+pub(crate) fn remap_norm_path(name: &str) -> String {
     for stem in [
         "input_layernorm",
         "post_attention_layernorm",
@@ -207,7 +224,7 @@ fn remap_norm_path(name: &str) -> String {
     name.to_string()
 }
 
-fn transpose_2d(data: &TensorData) -> Result<TensorData, String> {
+pub(crate) fn transpose_2d(data: &TensorData) -> Result<TensorData, String> {
     let rank = data.shape.rank();
     if rank != 2 {
         return Err(format!("transpose_2d expects rank 2, got rank {rank}"));
@@ -226,15 +243,17 @@ fn transpose_2d(data: &TensorData) -> Result<TensorData, String> {
     Ok(TensorData::new(out, Shape::from([cols, rows])))
 }
 
-fn transform_snapshots(
+pub(crate) fn transform_snapshots(
     snapshots: Vec<TensorSnapshot>,
     dtype: DType,
+    extra_remap: &dyn Fn(&str) -> String,
 ) -> Result<Vec<TensorSnapshot>, String> {
     snapshots
         .into_iter()
         .map(|snapshot| {
             let name = snapshot.full_path();
             let name = remap_vae_path(&name);
+            let name = extra_remap(&name);
             let name = remap_norm_path(&name);
             let path_stack: Vec<String> = name
                 .split('.')
@@ -283,10 +302,11 @@ fn transform_snapshots(
         .collect()
 }
 
-/// Test-only helpers shared by the voxcpm_burn checkpoint tests: build a
-/// PyTorch-style fixture (transposed Linears, `weight`-named norms, flat
-/// enum-less paths) from a burn module and serialize it to safetensors bytes.
-#[cfg(all(test, feature = "voxcpm"))]
+/// Test-only helpers shared by the checkpoint tests (VoxCPM and Ming-3.0):
+/// build a PyTorch-style fixture (transposed Linears, `weight`-named norms,
+/// flat enum-less paths) from a burn module and serialize it to safetensors
+/// bytes.
+#[cfg(all(test, any(feature = "voxcpm", feature = "ming3")))]
 pub(crate) mod fixture {
     use burn::prelude::Backend;
     use burn::tensor::{TensorData};

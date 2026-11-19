@@ -7,7 +7,7 @@ use crate::llm::{ChatMessage, ChatRequest, ChatResponse};
 pub fn canonical_to_chat_request(req: &CanonicalLlmRequest) -> Result<ChatRequest, String> {
     let mut messages = Vec::new();
     for sb in &req.system {
-        messages.push(ChatMessage { role: "system".into(), content: sb.text.clone() });
+        messages.push(ChatMessage { role: "system".into(), content: sb.text.clone(), reasoning_content: None });
     }
     for m in &req.messages {
         let role = match m.role {
@@ -17,7 +17,12 @@ pub fn canonical_to_chat_request(req: &CanonicalLlmRequest) -> Result<ChatReques
             MessageRole::System => "system",
         };
         let content = blocks_to_text(&m.content);
-        messages.push(ChatMessage { role: role.into(), content });
+        // The canonical message's reasoning slot carries a prior
+        // assistant turn's chain-of-thought; forward it so the backend
+        // can re-wrap it per its own template. (Reasoning that arrived
+        // as a ContentBlock::Reasoning stays inline via blocks_to_text
+        // — the two slots never double up.)
+        messages.push(ChatMessage { role: role.into(), content, reasoning_content: m.reasoning_content.clone() });
     }
     Ok(ChatRequest {
         model: req.model.clone(),
@@ -48,7 +53,7 @@ pub fn canonical_to_chat_request_with_media(
     let marker = crate::canonical::mtmd_marker();
 
     for sb in &req.system {
-        messages.push(ChatMessage { role: "system".into(), content: sb.text.clone() });
+        messages.push(ChatMessage { role: "system".into(), content: sb.text.clone(), reasoning_content: None });
     }
     for m in &req.messages {
         let role = match m.role {
@@ -80,7 +85,7 @@ pub fn canonical_to_chat_request_with_media(
                 }
             }
         }
-        messages.push(ChatMessage { role: role.into(), content: text });
+        messages.push(ChatMessage { role: role.into(), content: text, reasoning_content: m.reasoning_content.clone() });
     }
     Ok((
         ChatRequest {
@@ -141,9 +146,25 @@ fn blocks_to_text(blocks: &[ContentBlock]) -> String {
 
 pub fn chat_response_to_canonical(model_id: &str, resp: ChatResponse) -> CanonicalLlmResponse {
     let first_choice = resp.choices.into_iter().next();
-    let content = first_choice.as_ref().map(|c| {
-        ContentBlock::Text(TextBlock { text: c.message.content.clone() })
-    }).unwrap_or_else(|| ContentBlock::Text(TextBlock { text: String::new() }));
+    // Reasoning that the backend handed over separately becomes a
+    // first-class Reasoning block, placed BEFORE the answer text (the
+    // thinking happened first). The Anthropic wire face already maps
+    // this block to a `thinking` content block; the OpenAI face maps
+    // it to `reasoning_content` on the response message.
+    let mut content: Vec<ContentBlock> = Vec::new();
+    if let Some(reasoning) = first_choice.as_ref()
+        .and_then(|c| c.message.reasoning_content.as_ref())
+        .filter(|r| !r.trim().is_empty())
+    {
+        content.push(ContentBlock::Reasoning(crate::canonical::ReasoningBlock {
+            text: reasoning.clone(),
+            signature: None,
+        }));
+    }
+    let answer = first_choice.as_ref()
+        .map(|c| c.message.content.clone())
+        .unwrap_or_default();
+    content.push(ContentBlock::Text(TextBlock { text: answer }));
 
     let stop_reason = match first_choice.and_then(|c| c.finish_reason) {
         Some(ref s) if s == "stop" => StopReason::EndTurn,
@@ -157,7 +178,7 @@ pub fn chat_response_to_canonical(model_id: &str, resp: ChatResponse) -> Canonic
         id: resp.id,
         model: model_id.to_string(),
         stop_reason,
-        content: vec![content],
+        content,
         usage: resp.usage.map(|u| UsageInfo {
             input_tokens: u.prompt_tokens,
             output_tokens: u.completion_tokens,
@@ -300,5 +321,65 @@ mod tests {
         };
         let err = canonical_to_chat_request_with_media(&req).unwrap_err();
         assert!(err.contains("ImageSource::Url"), "got: {err}");
+    }
+
+    /// Reasoning the backend handed over separately becomes a
+    /// first-class canonical Reasoning block, placed BEFORE the answer
+    /// text — the thinking happened first, and the wire faces consume
+    /// that order (Anthropic → thinking block, OpenAI →
+    /// reasoning_content).
+    #[test]
+    fn split_reasoning_arrives_as_a_reasoning_block_before_the_text() {
+        let resp = ChatResponse {
+            id: "r".into(),
+            object: "chat.completion".into(),
+            created: 0,
+            model: "m".into(),
+            choices: vec![crate::llm::Choice {
+                index: 0,
+                message: ChatMessage {
+                    role: "assistant".into(),
+                    content: "7".into(),
+                    reasoning_content: Some("6 is not prime; 7 is.".into()),
+                },
+                finish_reason: Some("stop".into()),
+            }],
+            usage: None,
+        };
+        let got = chat_response_to_canonical("m", resp);
+        assert_eq!(got.content.len(), 2, "reasoning + text");
+        assert!(
+            matches!(&got.content[0], ContentBlock::Reasoning(r) if r.text == "6 is not prime; 7 is."),
+            "the chain-of-thought must be a first-class Reasoning block, got {:?}",
+            got.content[0]
+        );
+        assert!(
+            matches!(&got.content[1], ContentBlock::Text(t) if t.text == "7"),
+            "the answer follows the reasoning, got {:?}",
+            got.content[1]
+        );
+    }
+
+    #[test]
+    fn no_split_reasoning_keeps_the_single_text_block() {
+        let resp = ChatResponse {
+            id: "r".into(),
+            object: "chat.completion".into(),
+            created: 0,
+            model: "m".into(),
+            choices: vec![crate::llm::Choice {
+                index: 0,
+                message: ChatMessage {
+                    role: "assistant".into(),
+                    content: "plain answer".into(),
+                    reasoning_content: None,
+                },
+                finish_reason: Some("stop".into()),
+            }],
+            usage: None,
+        };
+        let got = chat_response_to_canonical("m", resp);
+        assert_eq!(got.content.len(), 1, "no reasoning must mean no Reasoning block");
+        assert!(matches!(&got.content[0], ContentBlock::Text(t) if t.text == "plain answer"));
     }
 }

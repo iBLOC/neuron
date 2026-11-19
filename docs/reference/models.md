@@ -40,6 +40,7 @@ OCR engine) are noted separately. All entries require their feature flag
 | qwen2.5-1.5b | litert | 1.5B | on-device (LiteRT-LM) |
 | Qwen/Qwen3-0.6B | mistralrs | 0.6B | ISQ quantized (q4_0 default) |
 | Qwen/Qwen3.5-4B | mistralrs | 4B | Qwen 3.5 text chat; image input not wired on this backend |
+| Qwen/Qwen3.8-27B | mistralrs | 27B | Qwen 3.8 text chat; architecture is Qwen3.5 verbatim (`model_type: "qwen3_5"`), vision tower loaded but unused; see `examples/qwen3_8_27b_smoke.rs` |
 | microsoft/Mage-VL | mage_vl | 4B | image+video, own candle port |
 
 ::: warning The `litert` model set is fixed by the bundled `lit` binary

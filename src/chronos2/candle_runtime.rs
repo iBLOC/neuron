@@ -318,7 +318,7 @@ impl CandleChronos2Runtime {
                 .map_err(|e| super::Chronos2Error::Runtime(e.to_string()))?,
             ForecastMethod::Median => self.head.extract_median(&horizon_cdf)
                 .map_err(|e| super::Chronos2Error::Runtime(e.to_string()))?,
-            ForecastMethod::Quantile => self.head.extract_median(&horizon_cdf)
+            ForecastMethod::Quantile(_) => self.head.extract_median(&horizon_cdf)
                 .map_err(|e| super::Chronos2Error::Runtime(e.to_string()))?,
         };
 
@@ -384,7 +384,7 @@ impl Chronos2Runtime for CandleChronos2Runtime {
                 .map_err(|e| super::Chronos2Error::Runtime(e.to_string()))?,
             ForecastMethod::Median => self.head.extract_median(&horizon_cdf)
                 .map_err(|e| super::Chronos2Error::Runtime(e.to_string()))?,
-            ForecastMethod::Quantile => self.head.extract_median(&horizon_cdf)
+            ForecastMethod::Quantile(_) => self.head.extract_median(&horizon_cdf)
                 .map_err(|e| super::Chronos2Error::Runtime(e.to_string()))?,
         };
 

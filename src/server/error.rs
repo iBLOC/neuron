@@ -20,20 +20,49 @@ pub enum ServerError {
     BadRequestWithParam(String, String),
     NotImplemented(String),
     Internal(String),
+    /// The named model / checkpoint does not exist here.
+    ///
+    /// ⚠ **404, not 400/500** — "the thing you named is not here" is the
+    /// same answer the chat face gives (`no_engine_for_model`) ⇒ ⇒ one
+    /// vocabulary across faces instead of "one status here, another there".
+    NotFound(String),
 }
 
 impl IntoResponse for ServerError {
     fn into_response(self) -> axum::response::Response {
-        let (status, message, param) = match self {
-            ServerError::BadRequest(m) => (StatusCode::BAD_REQUEST, m, None),
-            ServerError::BadRequestWithParam(m, p) => (StatusCode::BAD_REQUEST, m, Some(p)),
-            ServerError::NotImplemented(m) => (StatusCode::NOT_IMPLEMENTED, m, None),
-            ServerError::Internal(m) => (StatusCode::INTERNAL_SERVER_ERROR, m, None),
+        let (status, message, param, error_type) = match self {
+            ServerError::BadRequest(m) => (
+                StatusCode::BAD_REQUEST,
+                m,
+                None,
+                "invalid_request_error",
+            ),
+            ServerError::BadRequestWithParam(m, p) => (
+                StatusCode::BAD_REQUEST,
+                m,
+                Some(p),
+                "invalid_request_error",
+            ),
+            ServerError::NotImplemented(m) => (
+                StatusCode::NOT_IMPLEMENTED,
+                m,
+                None,
+                "invalid_request_error",
+            ),
+            ServerError::Internal(m) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                m,
+                None,
+                "invalid_request_error",
+            ),
+            // ⚠ 同一口台词：点名的那枚没有 ⇒ ⇒
+            // 这里也是 404 + no_engine_for_model（而不是 503）。
+            ServerError::NotFound(m) => (StatusCode::NOT_FOUND, m, None, "no_engine_for_model"),
         };
         let body = json!({
             "error": {
                 "message": message,
-                "type": "invalid_request_error",
+                "type": error_type,
                 "param": param,
                 "code": null
             }
@@ -49,6 +78,7 @@ impl std::fmt::Display for ServerError {
             ServerError::BadRequestWithParam(m, p) => write!(f, "BadRequest: {} (param={})", m, p),
             ServerError::NotImplemented(m) => write!(f, "NotImplemented: {}", m),
             ServerError::Internal(m) => write!(f, "Internal: {}", m),
+            ServerError::NotFound(m) => write!(f, "NotFound: {}", m),
         }
     }
 }

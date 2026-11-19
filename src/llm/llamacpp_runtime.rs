@@ -512,6 +512,11 @@ impl LlmRuntime for LlamaCppLlmRuntime {
                 message: ChatMessage {
                     role: "assistant".to_string(),
                     content: output,
+                    // llama.cpp hands back the raw generation — any
+                    // `<think>` stream is already inline in `content`
+                    // (no backend-side splitting), so there is no
+                    // separate reasoning to forward here.
+                    reasoning_content: None,
                 },
                 finish_reason: Some(finish_reason.to_string()),
             }],
@@ -568,6 +573,7 @@ impl LlmRuntime for LlamaCppLlmRuntime {
                     delta: DeltaMessage {
                         role: Some("assistant".to_string()),
                         content: None,
+                        reasoning_content: None,
                     },
                     finish_reason: None,
                 }],
@@ -615,6 +621,7 @@ impl LlmRuntime for LlamaCppLlmRuntime {
                         delta: DeltaMessage {
                             role: None,
                             content: Some(piece),
+                            reasoning_content: None,
                         },
                         finish_reason: None,
                     }],
@@ -641,7 +648,7 @@ impl LlmRuntime for LlamaCppLlmRuntime {
                 model: model_id.clone(),
                 choices: vec![ChunkChoice {
                     index: 0,
-                    delta: DeltaMessage { role: None, content: None },
+                    delta: DeltaMessage { role: None, content: None, reasoning_content: None },
                     finish_reason: Some(finish_reason.to_string()),
                 }],
             };
@@ -711,6 +718,11 @@ impl LlmRuntime for LlamaCppLlmRuntime {
                 message: ChatMessage {
                     role: "assistant".to_string(),
                     content: output,
+                    // llama.cpp hands back the raw generation — any
+                    // `<think>` stream is already inline in `content`
+                    // (no backend-side splitting), so there is no
+                    // separate reasoning to forward here.
+                    reasoning_content: None,
                 },
                 finish_reason: Some(finish_reason.to_string()),
             }],
@@ -750,6 +762,7 @@ impl LlmRuntime for LlamaCppLlmRuntime {
                     delta: DeltaMessage {
                         role: Some("assistant".to_string()),
                         content: None,
+                        reasoning_content: None,
                     },
                     finish_reason: None,
                 }],
@@ -796,6 +809,7 @@ impl LlmRuntime for LlamaCppLlmRuntime {
                         delta: DeltaMessage {
                             role: None,
                             content: Some(piece),
+                            reasoning_content: None,
                         },
                         finish_reason: None,
                     }],
@@ -814,7 +828,7 @@ impl LlmRuntime for LlamaCppLlmRuntime {
                 model: model_id.clone(),
                 choices: vec![ChunkChoice {
                     index: 0,
-                    delta: DeltaMessage { role: None, content: None },
+                    delta: DeltaMessage { role: None, content: None, reasoning_content: None },
                     finish_reason: Some(finish_reason.to_string()),
                 }],
             };
@@ -1306,6 +1320,7 @@ mod tests {
             messages: vec![ChatMessage {
                 role: "user".into(),
                 content: "hi".into(),
+                reasoning_content: None,
             }],
             temperature: Some(0.7),
             max_tokens: None,
@@ -1326,6 +1341,7 @@ mod tests {
             messages: vec![ChatMessage {
                 role: "user".into(),
                 content: "a".into(),
+                reasoning_content: None,
             }],
             temperature: Some(0.7),
             max_tokens: None,
@@ -1339,6 +1355,7 @@ mod tests {
             messages: vec![ChatMessage {
                 role: "user".into(),
                 content: "b".into(),
+                reasoning_content: None,
             }],
             temperature: Some(0.7),
             max_tokens: None,

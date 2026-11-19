@@ -132,10 +132,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             ChatMessage {
                 role: "system".into(),
                 content: "You are a helpful assistant.".into(),
+                reasoning_content: None,
             },
             ChatMessage {
                 role: "user".into(),
                 content: prompt,
+                reasoning_content: None,
             },
         ],
         temperature: Some(0.0),

@@ -128,6 +128,68 @@ panic 内容,不会杀掉整个扫描。
 所以 CPU 行是 f32(内存最高)。更大的目录模型(llama-3-8b、mistral-7b、
 chatglm-3-6b)可用同一 harness 测量,数字尚未发布。
 
+## 同一模型 × 多后端(同一份权重,neuron 自家后端)
+
+上面那张表答的是「**每个模型有多快**」——每个模型一行,跑在它登记
+的那个后端上。这张表答的是另一个问题:**同一份权重,在每个能服务它的
+后端上有多快**。一个模型可能**同时**被多个后端服务(而且同机相差 3 倍),
+也可能**一个本地后端都服务不了**——那种「拒绝」值得被测出来,而不是
+写成脚注。
+
+`benches/backend_matrix.rs` 按 (模型, 后端, 设备) 三元组逐格真跑,
+走与上面同一套公开注册表 API(`register` → `runtime_for`)与同一套
+工作负载:固定提示词、贪婪、64 个新 token、流式;丢掉预热;
+解码 tok/s =(块数 − 1)/(总时长 − 首块);p50。
+
+### 速度 —— CPU 档,2026-11-19(Windows 11,12 线程;RTX 3090 在场但未用)
+
+| 模型 | 后端 | 解码 tok/s | TTFT (ms) | 总时长 (ms) | 加载 (s) | 备注 |
+|---|---|---:|---:|---:|---:|---|
+| qwen3-0.6b | candle | 7.0 | 2 797 | 13 493 | 72.5 | CPU 上 f32 |
+| qwen3-0.6b | **mistralrs** | **26.1** | 258 | 13 298 | 93.1 | ISQ q4 量化;**是 candle 的 3.7 倍** |
+| qwen2.5-0.5b | candle | 8.9 | 73 | 3 097 | 18.9 | CPU 上 f32 |
+| qwen2.5-0.5b | **mistralrs** | **10.6** | 2 129 | 5 903 | 15.4 | ISQ q4 量化;candle 的 1.2 倍 |
+| Qwen3.5-4B | candle | — | — | — | — | **被拒**——见下 |
+| Qwen3.5-4B | mistralrs | 3.5 | 3 321 | 354 601 | 269.1 | bf16 权重在 CPU 路径被抬成 f32 ⇒ 常驻 16 GB |
+
+解读:**CPU 上 mistralrs 的解码比 candle 快**(Qwen3-0.6B 上快 3.7 倍)——
+它就地量化(ISQ q4),而 candle 的 CPU 路径跑 f32。但 TTFT 反过来:candle 的
+首 token 在 73–2 797 ms 到达,mistralrs 要 258–3 321 ms,因为 mistralrs
+把量化成本付在**加载时**(15–269 s)而不是首次使用时。⇒ **两个后端各赢一个
+维度**:短会话看 TTFT,长会话看吞吐。
+
+### 覆盖 —— 哪个后端能服务哪个模型
+
+| 模型 | candle | mistralrs | 原因 |
+|---|---|---|---|
+| qwen3-0.6b | 可服务 | 可服务 | 两者都行 |
+| qwen2.5-0.5b | 可服务 | 可服务 | 两者都行 |
+| Qwen3.5-4B | **被拒** | 可服务 | candle 的 `detect_arch` 拒 `qwen3_5`:配置把文本塔嵌在 `text_config` 下且混合线性/全注意力,而上游 candle-transformers 没有对应模块 |
+
+那格「被拒」**带后端自己的原话**(`Qwen 3.5 (qwen3_5) is not supported by
+the candle backend: … Serve Qwen 3.5 with the mistralrs backend … or with
+llama.cpp via a GGUF`)⇒ ⇒ 表里那行是**原因**,不是一个破折号。`llamacpp`
+不在这几张表里,是因为该后端要 C++ 工具链(cmake + libclang)而本机没有
+——那是**构建环境**级的跳过,报告里如实记成跳过。
+
+复现:
+
+```bash
+cargo bench --bench backend_matrix --features "candle,mistralrs"
+# 报告 -> target/backend-matrix-cpu.md
+# CUDA 行需要 MSVC 环境:
+scripts\cuda-build.bat cargo bench --bench backend_matrix --features "candle,cuda,mistralrs"
+```
+
+::: warning GPU 行需要 CUDA 12.x 工具链
+本机 CUDA toolkit 是 **13.4**,而 `mistralrs` v0.9.5 的 CUDA 腿在**两处**
+编不出来:它带来的那份 `candle-kernels`(rev `66a8cf18`)的 PTX kernel
+编不过,`mistralrs-quant v0.9.5` 自己的 CUDA kernel(`__CUDA_ARCH__=860`)
+也编不过 ⇒ ⇒ **mistralrs 的 CUDA 行在本机编不出来**(neuron 自己的 candle
+pin `aebc405d` 能编)。⇒ ⇒ 所以上面那些行**只有 CPU 档**;CUDA 档在工具链
+降到 CUDA 12.x(或那份 revision 学会出 13.x 的代码)之前是**单后端**的。
+:::
+
 ## LLM 跨引擎对比(同机、跨框架)
 
 | 技术栈 | 模型 / 量化 | 设备 | 解码 tok/s |

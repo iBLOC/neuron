@@ -983,10 +983,42 @@ pub async fn vision_lora_unregister(
 // ---------------------------------------------------------------------------
 
 /// `POST /v1/forecast` — run a time-series forecast through the
-/// chronos2 registry. The v0 registry only ships a stub runtime;
-/// the candle port of Chronos2 plugs in via a future commit and
-/// replaces the stub transparently. Until then the handler returns
-/// a clean 503 with the stub's `NotImplemented` message.
+/// chronos2 registry.
+///
+/// ⚠ **这条注释曾经说假话**（2026-11-19 订正）：它写着「registry 只带一个
+/// stub 运行时 ⇒ ⇒ 一直返回 503」⇒ ⇒ 而**真模型路径当时确实加载不了**
+/// （vendored 端口与上游 checkpoint 不是同一套架构）⇒ ⇒ 那句话当时是
+/// **对的**，但它把「暂时做不到」写成了「设计如此」。
+/// 现在：上游布局的 checkpoint（amazon/chronos-bolt-*）由
+/// `chronos2::bolt` 那个**上游兼容运行时**真跑。
+///
+/// ⚠ **点名一枚没装的 checkpoint ⇒ ⇒ 明确报错**（2026-11-19 订正）：
+/// 旧形式落 stub ⇒ ⇒ 503/501 ＋ 一句「port not vendored」的 canned note
+/// ⇒ ⇒ 既不点名那枚 id、也不说为什么 ⇒ ⇒ 用户看到的是一个说不清所以然
+/// 的错。现在**选 checkpoint 的那一层**（`Chronos2Registry::runtime_for`）
+/// 直接报错：点名 id ＋ 说清为什么（没装 / 装的是另一枚 / 加载失败），
+/// HTTP 状态码 **404**（与 chat 面的 `no_engine_for_model` 同一种说法）。
+
+/// Map a chronos2 error onto the HTTP error surface.
+///
+/// ⚠ **One vocabulary across faces**: a named checkpoint that is not
+/// installed is a **404** with `type: "no_engine_for_model"` — the same
+/// answer the chat face gives for a model it does not have ⇒ ⇒ a caller
+/// no longer has to learn two different ways of being told "no such model"
+/// (the old shape said 503/501 with a canned note that named neither the
+/// model nor the reason).
+fn forecast_error(e: crate::chronos2::Chronos2Error) -> ServerError {
+    match e {
+        crate::chronos2::Chronos2Error::NotImplemented(m) => ServerError::NotImplemented(m),
+        crate::chronos2::Chronos2Error::InvalidRequest(m) => ServerError::BadRequest(m),
+        crate::chronos2::Chronos2Error::NotLoaded(m) => {
+            ServerError::BadRequestWithParam(m, "model".to_string())
+        }
+        crate::chronos2::Chronos2Error::ModelNotAvailable(m) => ServerError::NotFound(m),
+        crate::chronos2::Chronos2Error::Runtime(m) => ServerError::Internal(m),
+    }
+}
+
 pub async fn forecast(
     State(state): State<ServerState>,
     Json(req): Json<crate::chronos2::ForecastRequest>,
@@ -1011,15 +1043,12 @@ pub async fn forecast(
     }
 
     let started = std::time::Instant::now();
-    let rt = state.chronos2_registry.runtime_for(&req.model).await;
-    let resp = rt.forecast(req).await.map_err(|e| match e {
-        crate::chronos2::Chronos2Error::NotImplemented(m) => ServerError::NotImplemented(m),
-        crate::chronos2::Chronos2Error::InvalidRequest(m) => ServerError::BadRequest(m),
-        crate::chronos2::Chronos2Error::NotLoaded(m) => {
-            ServerError::BadRequestWithParam(m, "model".to_string())
-        }
-        crate::chronos2::Chronos2Error::Runtime(m) => ServerError::Internal(m),
-    })?;
+    let rt = state
+        .chronos2_registry
+        .runtime_for(&req.model)
+        .await
+        .map_err(forecast_error)?;
+    let resp = rt.forecast(req).await.map_err(forecast_error)?;
     let took_ms = started.elapsed().as_millis() as u64;
     Ok(Json(crate::chronos2::ForecastResponse {
         took_ms,

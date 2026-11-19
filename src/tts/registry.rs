@@ -86,14 +86,47 @@ impl TtsRuntimeRegistry {
         // Each match arm handles its own return path so the wildcard
         // doesn't make the post-match code unreachable.
         match entry.impl_id {
-            #[cfg(feature = "voxcpm")]
+            #[cfg(any(feature = "voxcpm", feature = "ming3"))]
             TtsImpl::Burn => {
-                // Both burn TTS runtimes share the `burn` engine impl;
-                // the catalog id picks the model generation.
+                // All burn TTS runtimes share the `burn` engine impl; the
+                // catalog id picks the model family/generation.
                 let result = if entry.model_id == "voxcpm2" {
-                    super::VoxCpm2TtsRuntime::load(&entry.model_id, &entry.device).await
+                    #[cfg(feature = "voxcpm")]
+                    {
+                        super::VoxCpm2TtsRuntime::load(&entry.model_id, &entry.device).await
+                    }
+                    #[cfg(not(feature = "voxcpm"))]
+                    {
+                        Err(NeuronError::new(
+                            "model 'voxcpm2' requires building neuron with --features voxcpm"
+                                .to_string(),
+                        ))
+                    }
+                } else if entry.model_id == "ming3" {
+                    #[cfg(feature = "ming3")]
+                    {
+                        super::ming3::runtime::Ming3TtsRuntime::load(&entry.model_id, &entry.device)
+                            .await
+                    }
+                    #[cfg(not(feature = "ming3"))]
+                    {
+                        Err(NeuronError::new(
+                            "model 'ming3' requires building neuron with --features ming3"
+                                .to_string(),
+                        ))
+                    }
                 } else {
-                    super::VoxCpmTtsRuntime::load(&entry.model_id, &entry.device).await
+                    #[cfg(feature = "voxcpm")]
+                    {
+                        super::VoxCpmTtsRuntime::load(&entry.model_id, &entry.device).await
+                    }
+                    #[cfg(not(feature = "voxcpm"))]
+                    {
+                        Err(NeuronError::new(
+                            "legacy voxcpm ids require building neuron with --features voxcpm"
+                                .to_string(),
+                        ))
+                    }
                 };
                 // `load` returns a boxed trait object; the cache stores
                 // `Arc<dyn TtsRuntime>`. Coerce via `Arc::from` (the blanket
@@ -107,7 +140,7 @@ impl TtsRuntimeRegistry {
             }
             #[allow(unreachable_patterns)]
             _ => {
-                Err(NeuronError::new("TTS implementation 'burn' requires building neuron with --features voxcpm".to_string()))
+                Err(NeuronError::new("TTS implementation 'burn' requires building neuron with --features voxcpm or ming3".to_string()))
             }
         }
     }

@@ -125,6 +125,7 @@ impl LlmRuntime for LitertLlmRuntime {
                 message: ChatMessage {
                     role: "assistant".to_string(),
                     content: text,
+                    reasoning_content: None,
                 },
                 finish_reason: Some("stop".to_string()),
             }],
@@ -166,6 +167,7 @@ impl LlmRuntime for LitertLlmRuntime {
                     delta: DeltaMessage {
                         role: Some("assistant".to_string()),
                         content: None,
+                        reasoning_content: None,
                     },
                     finish_reason: None,
                 }],
@@ -185,6 +187,7 @@ impl LlmRuntime for LitertLlmRuntime {
                                 delta: DeltaMessage {
                                     role: None,
                                     content: Some(text),
+                                    reasoning_content: None,
                                 },
                                 finish_reason: None,
                             }],
@@ -204,7 +207,7 @@ impl LlmRuntime for LitertLlmRuntime {
                 model,
                 choices: vec![ChunkChoice {
                     index: 0,
-                    delta: DeltaMessage { role: None, content: None },
+                    delta: DeltaMessage { role: None, content: None, reasoning_content: None },
                     finish_reason: Some("stop".to_string()),
                 }],
             };
@@ -390,6 +393,7 @@ mod tests {
             messages: vec![ChatMessage {
                 role: "user".to_string(),
                 content: "hello".to_string(),
+                reasoning_content: None,
             }],
             temperature: None,
             max_tokens: None,
@@ -412,6 +416,7 @@ mod tests {
             messages: vec![ChatMessage {
                 role: "user".to_string(),
                 content: "hello".to_string(),
+                reasoning_content: None,
             }],
             temperature: None,
             max_tokens: None,
