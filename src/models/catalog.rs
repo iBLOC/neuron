@@ -429,14 +429,16 @@ pub const SUPPORTED_CATALOG: &[SupportedModel] = &[
         source_id: "modelscope",
         families: &["qwen3"],
     },
-    SupportedModel {
-        id: "whisper-base",
-        engine: EngineType::Asr,
-        engine_impl: "candle",
-        default_repo: "modelscope:openai-whisper/whisper-base",
-        source_id: "modelscope",
-        families: &["whisper"],
-    },
+    // ⚠️⚠️ **这里曾经有一行 `modelscope:openai-whisper/whisper-base`** ——
+    // 2026-11-26 查实：魔搭上**根本没有**那个仓（`/api/v1/models/…` 与
+    // `/repo/files` 两个端点都 `record not found`）⇒ ⇒ 它把 whisper 的
+    // **合并默认源**顶成了**一个不存在的仓** ⇒ ⇒ 手机上下必败（404）⇒ ⇒
+    // 失败长得像「模型没下载」。
+    //
+    // ⚠️⚠️ **而且它连仓名都对不上**：HF 那边是 `openai/whisper-base`，
+    // 它写的是 `openai-whisper/whisper-base` ⇒ ⇒ **魔搭的镜像约定是同名
+    // 同 owner** ⇒ ⇒ 那一行**不是镜像**，是**另一个仓** ⇒ ⇒ 删掉
+    // （判据 D1「多源必须同仓」钉的就是这一条）。
     SupportedModel {
         id: "bge-reranker-base",
         engine: EngineType::Rerank,
@@ -670,6 +672,30 @@ pub struct Catalog {
     supported: &'static [SupportedModel],
 }
 
+/// ⚠️ **给一行 `huggingface:` 源配一行**同仓的 `hf-mirror:` 镜像行。
+///
+/// ⚠️ **同仓**（`owner/repo` 逐字相同）⇒ ⇒ 镜像行**不引入新的仓**
+/// ⇒ ⇒ 仓的**存在性**由 huggingface 那行保证 ⇒ ⇒ 不会凭空多出一个
+/// 「据说存在」的仓（判据 D1 钉的就是这一条）。
+///
+/// ⚠️ **没有 hf-mirror 这个源**（没注册）⇒ ⇒ 返回 `None`
+/// ⇒ ⇒ **不摆出一个客户端拉不动的源**（拉的时候会是 `unknown source`）。
+fn mirror_source_ref(source: &SourceRef, sources: &SourceRegistry) -> Option<SourceRef> {
+    if source.id != "huggingface" {
+        return None;
+    }
+    let (_, repo) = source.reference.split_once(':')?;
+    if repo.is_empty() {
+        return None;
+    }
+    let mirror = sources.get("hf-mirror")?;
+    Some(SourceRef {
+        id: "hf-mirror".to_string(),
+        endpoint: mirror.base_url().map(String::from),
+        reference: format!("hf-mirror:{repo}"),
+    })
+}
+
 impl Catalog {
     pub fn new(registry: Registry, sources: Arc<SourceRegistry>, config: CatalogConfig) -> Self {
         Self {
@@ -740,7 +766,30 @@ impl Catalog {
                 source: String::new(),
             });
 
+            // ⚠️ **先算镜像行**（它要用 `source_ref` ⇒ ⇒ 得在 move 之前）。
+            let mirror_ref = mirror_source_ref(&source_ref, &self.sources);
             entry.sources.push(source_ref);
+            // ⚠️⚠️ **hf-mirror ＝ huggingface 的镜像** ⇒ ⇒ **同一个仓、换一个
+            // 端点** ⇒ ⇒ 目录里凡是 `huggingface:` 那一档，**自动补一行同仓的
+            // `hf-mirror:`** ⇒ ⇒ 客户端拿 `default_repo` 发起 pull 时，落在
+            // 一个**国内可达**的端点上。
+            //
+            // ⚠️ **为什么需要这一行**（2026-11-26 真机读数，MIX4 arm64
+            // Android 13）：那台设备上 `huggingface.co` **直连不可达**
+            // （`Network is unreachable`）⇒ ⇒ 只挂 `huggingface:` 那一档
+            // ⇒ ⇒ **手机上下必败**；而魔搭上**没有** whisper 的镜像仓
+            // （`openai-whisper/whisper-base` 与 `openai/whisper-base` 两个
+            // 端点都 `record not found`）⇒ ⇒ **国内唯一活着的 HF 系端点
+            // 是 hf-mirror**。
+            //
+            // ⚠️ **换源不换仓**：镜像行的 `owner/repo` 与 huggingface 行
+            // **逐字相同** ⇒ ⇒ 仓的**存在性**由 huggingface 那行继承
+            // ⇒ ⇒ 不会凭空多出一个「据说存在」的仓（判据 D1 钉的就是这条）。
+            if let Some(mirror) = mirror_ref
+                && !entry.sources.iter().any(|s| s.id == mirror.id)
+            {
+                entry.sources.push(mirror);
+            }
             if entry.default_repo.is_none() {
                 entry.default_repo = Some(s.default_repo.to_string());
             }
@@ -758,6 +807,10 @@ impl Catalog {
         // qwen3/whisper/bge/minicpm5/voxcpm/moss-image/embeddinggemma）
         // 从此默认走魔搭。
         for entry in groups.values_mut() {
+            // ⚠️ **同一个源 id 不许出现两次**（自动补的镜像行与清单里显式
+            // 写的那一行可能撞上）⇒ ⇒ 保留第一个（两者逐字相同）。
+            let mut seen_sources = std::collections::HashSet::new();
+            entry.sources.retain(|s| seen_sources.insert(s.id.clone()));
             const SOURCE_PRIORITY: &[&str] = &["modelscope", "hf-mirror", "huggingface"];
             entry.sources.sort_by_key(|s| {
                 SOURCE_PRIORITY
@@ -1025,16 +1078,33 @@ mod tests {
             qwen3.default_repo
         );
 
-        // 负控：没有魔搭镜像的模型不换主源（whisper-small 只有
-        // huggingface 一份）。
+        // ⚠️⚠️ **口径变更（2026-11-26）** —— 负控那一格从「保留
+        // huggingface 主源」改成了「**退到 hf-mirror**」。
+        //
+        // ⚠️ **为什么**：真机读数（MIX4 arm64 Android 13）——那台设备上
+        // `huggingface.co` **直连不可达**（`Network is unreachable`）⇒ ⇒
+        // 默认源指着它 ⇒ ⇒ **手机上下必败** ⇒ ⇒ 「没有魔搭镜像」的模型
+        // 应当退到 **hf-mirror**（HF 的国内可达镜像）⇒ ⇒ 而不是直连。
+        //
+        // ⚠️ **whisper-small 只有 huggingface 一份**（没有魔搭镜像）⇒ ⇒
+        // 它是这一格的**真对象**（不是空检）。
         let whisper = entries
             .iter()
             .find(|e| e.id == "asr/whisper-small")
             .expect("whisper-small must be in the catalog");
         assert_eq!(
             whisper.sources.first().map(|s| s.id.as_str()),
-            Some("huggingface"),
-            "models without a ModelScope mirror keep their primary source"
+            Some("hf-mirror"),
+            "models without a ModelScope mirror fall back to the reachable hf-mirror, not to huggingface.co"
+        );
+        assert!(
+            whisper
+                .default_repo
+                .as_deref()
+                .unwrap_or("")
+                .starts_with("hf-mirror:"),
+            "default_repo must follow the primary source, got {:?}",
+            whisper.default_repo
         );
     }
 
@@ -1080,5 +1150,89 @@ mod tests {
         assert!(is_legacy_model("qwen2.5-0.5b"));
         assert!(!is_legacy_model("qwen3-0.6b"));
         assert!(!is_legacy_model("whisper-base"));
+    }
+
+    /// ⚠️⚠️ **同一个模型的多源必须指向同一个仓**（2026-11-26）—— 判据 D1。
+    ///
+    /// ⚠️ **为什么**：目录里同一个 (engine, id) 可以挂多份仓库（HF ＋ 魔搭
+    /// ＋ 镜像）⇒ ⇒ 但那**必须是一份仓的多个端点** ⇒ ⇒ **换源不换仓**
+    /// ⇒ ⇒ 仓的**存在性**由其中一行保证 ⇒ ⇒ 不会凭空多出一个「据说存在」
+    /// 的仓。
+    ///
+    /// ⚠️⚠️ **真实撞过的坑**：whisper-base 曾经挂着一行
+    /// `modelscope:openai-whisper/whisper-base` ⇒ ⇒ 那是**另一个仓**
+    /// （HF 那边是 `openai/whisper-base`）⇒ ⇒ 而且**魔搭上压根没有它**
+    /// （`/api/v1/models/…` 与 `/repo/files` 两个端点都
+    /// `record not found`）⇒ ⇒ 它把合并默认源顶成了一个**死源** ⇒ ⇒
+    /// 手机上下必败（404）⇒ ⇒ 失败长得像「模型没下载」。
+    ///
+    /// ⚠️ **大小写不敏感**：魔搭把同一个 HF 仓的大小写改了
+    /// （HF `openbmb/…` ↔ 魔搭 `OpenBMB/…`）⇒ ⇒ 那**仍然是同一份仓**
+    /// ⇒ ⇒ 判据不许把它判成红。
+    #[test]
+    fn every_catalog_group_offers_one_and_the_same_repo_from_every_source() {
+        let tmp = TempDir::new().unwrap();
+        let registry = Registry::new(tmp.path().to_path_buf());
+        let sources = Arc::new(SourceRegistry::with_defaults());
+        let catalog = Catalog::new(registry, sources, CatalogConfig::default());
+        let entries = catalog.entries();
+        for e in &entries {
+            let mut repos: Vec<String> = e
+                .sources
+                .iter()
+                .map(|s| {
+                    s.reference
+                        .split_once(':')
+                        .map(|(_, r)| r.to_lowercase())
+                        .unwrap_or_default()
+                })
+                .collect();
+            repos.sort();
+            repos.dedup();
+            assert!(
+                repos.len() <= 1,
+                "条目 {} 的多源指向了**不同的仓**：{:?} —— 换源必须换端点、不换仓",
+                e.id,
+                e.sources.iter().map(|s| &s.reference).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    /// ⚠️ **ASR 条目的默认源不许是 `huggingface:`**（2026-11-26 真机读数）
+    /// —— 判据 D2。
+    ///
+    /// ⚠️ **为什么**：MIX4（arm64 Android 13）上 `huggingface.co`
+    /// **直连不可达**（`Network is unreachable`）⇒ ⇒ 默认源指着它
+    /// ⇒ ⇒ **手机上下必败**（而失败长得像「模型没下载」⇒ ⇒ 而盘上
+    /// 明明有那份权重）。
+    ///
+    /// ⚠️ **只钉 ASR**：LLM 那一族有魔搭镜像（默认走魔搭）⇒ ⇒ 不受这条
+    /// 约束；这条钉的是「**魔搭没有镜像**的那一族」该退到哪。
+    #[test]
+    fn every_asr_entry_defaults_to_a_reachable_mirror_endpoint() {
+        let tmp = TempDir::new().unwrap();
+        let registry = Registry::new(tmp.path().to_path_buf());
+        let sources = Arc::new(SourceRegistry::with_defaults());
+        let catalog = Catalog::new(registry, sources, CatalogConfig::default());
+        let entries = catalog.entries();
+        let asr: Vec<_> = entries.iter().filter(|e| e.engine == "asr").collect();
+        assert!(
+            !asr.is_empty(),
+            "目录里必须有 ASR 条目，否则这一格是**空检**（恒绿）"
+        );
+        for e in asr {
+            let d = e.default_repo.clone().unwrap_or_default();
+            assert!(
+                !d.starts_with("huggingface:"),
+                "ASR 条目 {} 的默认源是 huggingface: —— 真机上直连不可达",
+                e.id
+            );
+            assert!(
+                d.starts_with("modelscope:") || d.starts_with("hf-mirror:"),
+                "ASR 条目 {} 的默认源必须是一个**可达的镜像端点**，got {:?}",
+                e.id,
+                d
+            );
+        }
     }
 }

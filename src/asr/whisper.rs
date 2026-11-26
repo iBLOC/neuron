@@ -18,7 +18,7 @@ use candle_nn::VarBuilder;
 use candle_transformers::models::whisper::{self as m, audio, Config};
 use tokenizers::Tokenizer;
 
-use crate::config::{ensure_dir, DeviceSelection};
+use crate::config::DeviceSelection;
 use crate::llm::{ChatResult, NeuronError};
 
 use super::wav::decode_wav;
@@ -61,6 +61,19 @@ const LANG_CANDIDATES: [&str; 12] = [
 /// building the per-model benchmark).
 const N_MELS: usize = 201;
 
+/// ⚠️⚠️ **内嵌的 mel 滤波器组**（2026-11-26）—— candle 的 whisper 运行时
+/// **必须**有它，而它**不在模型仓里**（它在 HF 的 `spaces/lmz/candle-whisper`
+/// 那个 space 里）⇒ ⇒ 以前「拉完模型」之后**还要手动补一个文件**⇒ ⇒
+/// 「下载完即用」在下载腿上是**假的**。
+///
+/// ⇒ ⇒ 这份**逐字内嵌**（上游原件，64 400 字节，sha256
+/// `36659F7523AF90B41A32BE885049E79577D3BF6E5E277A71764C55AC0C9B23BD`；
+/// 两份独立副本对撞一致 —— 上游直取 ＋ 设备上那份）⇒ ⇒ **盘上没有就用它**
+/// ⇒ ⇒ 「手动补一步」这一步**从此不存在**。
+///
+/// ⚠️ **盘上那份优先**（用户自己放的那份可能是更新的）⇒ ⇒ 内嵌只是**兜底**。
+const EMBEDDED_MEL_FILTERS: &[u8] = include_bytes!("mel_filters.safetensors");
+
 pub struct WhisperAsrRuntime {
     inner: Mutex<Option<LoadedWhisper>>,
 }
@@ -80,24 +93,40 @@ impl WhisperAsrRuntime {
         }
     }
 
-    fn resolve_model_path(model: &str) -> Result<PathBuf, String> {
-        let path = match crate::config::env_var_result("ASR_MODEL_PATH") {
-            Ok(p) => PathBuf::from(p),
-            Err(_) => {
+    /// 按**给定的根**解析权重目录（显式 `NEURON_ASR_MODEL_PATH` 仍然优先）。
+    ///
+    /// ⚠️ **根从哪儿来**（刀 16 续同源，2026-11-26）：**注册面／下载面**走
+    /// `config.model_dirs`（宿主交进来的那份），**加载面**必须读**同一份**
+    /// ⇒ ⇒ 否则嵌脑形态里宿主给的目录只被用来下载 ⇒ ⇒ 加载时却去
+    /// `./.neuron/models` 找 ⇒ ⇒ **引擎注册上了、权重找不到**（失败长得像
+    /// 「模型没下载」⇒ ⇒ 而盘上**明明有**那份权重）。
+    fn resolve_model_path_in(model: &str, roots: &[PathBuf]) -> Result<PathBuf, String> {
+        let path = match crate::asr::resolve_asr_model_dir_with_override_in(roots, model) {
+            Ok(p) => p,
+            Err(why) => {
                 return Err(format!(
-                    "WhisperAsrRuntime: set NEURON_ASR_MODEL_PATH to a directory containing \
-                     config.json + tokenizer.json + *.safetensors + mel_filters.safetensors \
-                     for Whisper model '{}' (e.g. openai/whisper-tiny). \
-                     Download mel_filters from: \
-                     https://huggingface.co/spaces/lmz/candle-whisper/resolve/main/mel_filters.safetensors",
-                    model
+                    "WhisperAsrRuntime: {why}; set NEURON_ASR_MODEL_PATH to a directory containing config.json + tokenizer.json + *.safetensors + mel_filters.safetensors for Whisper model '{model}' (e.g. openai/whisper-tiny). Download mel_filters from: https://hf-mirror.com/spaces/lmz/candle-whisper/resolve/main/mel_filters.safetensors"
                 ));
             }
         };
-        ensure_dir(&path, "NEURON_ASR_MODEL_PATH")?;
+        Self::validate_model_dir(&path)
+    }
+
+    /// 按**进程级真相源**（`NeuronConfig::model_roots()`）解析权重目录。
+    ///
+    /// ⚠️ 与 LLM 那条腿同口径（`CandleLlmRuntime::resolve_model_path`）⇒ ⇒
+    /// **三条腿不许各说各话**。
+    fn resolve_model_path(model: &str) -> Result<PathBuf, String> {
+        let roots = crate::asr::asr_model_roots();
+        Self::resolve_model_path_in(model, &roots)
+    }
+
+    /// 校验目录里确实有一份**可装载的** Whisper 权重（`load` 与
+    /// `load_with_roots` 共用这一段 ⇒ ⇒ 两个入口不许各写一份校验）。
+    fn validate_model_dir(path: &Path) -> Result<PathBuf, String> {
         let config_path = path.join("config.json");
         let tokenizer_path = path.join("tokenizer.json");
-        let has_weights = std::fs::read_dir(&path)
+        let has_weights = std::fs::read_dir(path)
             .map(|entries| {
                 entries.filter_map(|e| e.ok()).any(|e| {
                     e.path()
@@ -107,9 +136,10 @@ impl WhisperAsrRuntime {
                 })
             })
             .unwrap_or(false);
-        let has_mel_filters = path.join("mel_filters.safetensors").exists()
-            || path.join("mel_filters.npz").exists();
-
+        // ⚠️⚠️ **mel_filters 不再是「目录里必须有的文件」**（2026-11-26）——
+        // 它**内嵌**在 crate 里了（见 `EMBEDDED_MEL_FILTERS`）⇒ ⇒ 盘上有
+        // 没有那份**不影响能不能装** ⇒ ⇒ 「拉完模型」**不必再手动补一个
+        // 文件** ⇒ ⇒ 「下载完即用」这一格才成立。
         if !config_path.exists() {
             return Err(format!("config.json not found in {}", path.display()));
         }
@@ -125,14 +155,71 @@ impl WhisperAsrRuntime {
                 path.display()
             ));
         }
-        if !has_mel_filters {
-            return Err(format!(
-                "mel_filters.safetensors not found in {}. Download from: \
-                 https://huggingface.co/spaces/lmz/candle-whisper/resolve/main/mel_filters.safetensors",
-                path.display()
+        Ok(path.to_path_buf())
+    }
+
+    /// 装载**已经解析好的**权重目录（`load` 与 `load_with_roots` 共用
+    /// 这一段 ⇒ ⇒ 两个入口不许各写一份装载流程）。
+    async fn load_from_dir(
+        device: &DeviceSelection,
+        path: PathBuf,
+    ) -> ChatResult<Box<dyn AsrRuntime>> {
+        let dev = Self::map_device(device).map_err(NeuronError::not_implemented)?;
+
+        let config_path = path.join("config.json");
+        let config_data = std::fs::read_to_string(&config_path)
+            .map_err(|e| NeuronError::not_implemented(format!("read config.json: {}", e)))?;
+        let config: Config = serde_json::from_str(&config_data)
+            .map_err(|e| NeuronError::not_implemented(format!("parse config.json: {}", e)))?;
+
+        let tokenizer_path = path.join("tokenizer.json");
+        let tokenizer = Tokenizer::from_file(&tokenizer_path)
+            .map_err(|e| NeuronError::not_implemented(format!("load tokenizer: {}", e)))?;
+
+        let mel_filters = Self::load_mel_filters(&path, config.num_mel_bins)
+            .map_err(|e| NeuronError::not_implemented(format!("load mel_filters: {}", e)))?;
+
+        let safetensors_files: Vec<PathBuf> = std::fs::read_dir(&path)
+            .map_err(|e| NeuronError::not_implemented(format!("read dir: {}", e)))?
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.path()
+                    .extension()
+                    .map(|ext| ext == "safetensors")
+                    .unwrap_or(false)
+            })
+            .map(|e| e.path())
+            .collect();
+
+        if safetensors_files.is_empty() {
+            return Err(NeuronError::not_implemented(
+                "No safetensors files found".to_string(),
             ));
         }
-        Ok(path)
+
+        let safetensors_paths: Vec<&std::path::Path> =
+            safetensors_files.iter().map(|p| p.as_path()).collect();
+
+        let vb = unsafe {
+            crate::candle_compat::from_mmaped_safetensors(safetensors_paths.as_slice(), DType::F32, &dev)
+        }
+        .map_err(|e| NeuronError::not_implemented(format!("load safetensors: {}", e)))?;
+
+        let model = m::model::Whisper::load(&vb, config.clone())
+            .map_err(|e| NeuronError::not_implemented(format!("build Whisper model: {}", e)))?;
+
+        let loaded = LoadedWhisper {
+            model,
+            tokenizer,
+            config,
+            mel_filters,
+            device: dev,
+        };
+
+        let runtime = WhisperAsrRuntime::new();
+        *runtime.inner.lock().unwrap() = Some(loaded);
+
+        Ok(Box::new(runtime))
     }
 
     fn map_device(device: &DeviceSelection) -> Result<Device, String> {
@@ -171,7 +258,11 @@ impl WhisperAsrRuntime {
         if npz_path.exists() {
             return Self::load_mel_npz(&npz_path, num_mel_bins);
         }
-        Err("mel_filters file not found".to_string())
+        // ⚠️⚠️ **盘上没有 ⇒ ⇒ 用内嵌的那份**（见 `EMBEDDED_MEL_FILTERS`）⇒ ⇒
+        // 「拉完模型就能装」这一格不再需要**手动补一个文件**。
+        Self::load_mel_safetensors_bytes(EMBEDDED_MEL_FILTERS, num_mel_bins).map_err(|e| {
+            format!("mel_filters: neither the model dir nor the embedded copy worked: {e}")
+        })
     }
 
     /// Read the mel filter bank from a **standard** `.safetensors` file
@@ -190,6 +281,12 @@ impl WhisperAsrRuntime {
         let mut file = File::open(path).map_err(|e| format!("open mel_filters: {}", e))?;
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes).map_err(|e| format!("read mel_filters: {}", e))?;
+        Self::load_mel_safetensors_bytes(&bytes, num_mel_bins)
+    }
+
+    /// 解析**一份** mel 滤波器组的字节（盘上那份与内嵌那份共用这一段
+    /// ⇒ ⇒ 两个入口不许各写一份解析）。
+    fn load_mel_safetensors_bytes(bytes: &[u8], num_mel_bins: usize) -> Result<Vec<f32>, String> {
         if bytes.len() < 8 {
             return Err("mel_filters safetensors file too short".to_string());
         }
@@ -504,62 +601,23 @@ impl AsrRuntime for WhisperAsrRuntime {
         Self: Sized,
     {
         let path = Self::resolve_model_path(model).map_err(NeuronError::not_implemented)?;
-        let dev = Self::map_device(device).map_err(NeuronError::not_implemented)?;
+        Self::load_from_dir(device, path).await
+    }
 
-        let config_path = path.join("config.json");
-        let config_data = std::fs::read_to_string(&config_path)
-            .map_err(|e| NeuronError::not_implemented(format!("read config.json: {}", e)))?;
-        let config: Config = serde_json::from_str(&config_data)
-            .map_err(|e| NeuronError::not_implemented(format!("parse config.json: {}", e)))?;
-
-        let tokenizer_path = path.join("tokenizer.json");
-        let tokenizer = Tokenizer::from_file(&tokenizer_path)
-            .map_err(|e| NeuronError::not_implemented(format!("load tokenizer: {}", e)))?;
-
-        let mel_filters = Self::load_mel_filters(&path, config.num_mel_bins)
-            .map_err(|e| NeuronError::not_implemented(format!("load mel_filters: {}", e)))?;
-
-        let safetensors_files: Vec<PathBuf> = std::fs::read_dir(&path)
-            .map_err(|e| NeuronError::not_implemented(format!("read dir: {}", e)))?
-            .filter_map(|e| e.ok())
-            .filter(|e| {
-                e.path()
-                    .extension()
-                    .map(|ext| ext == "safetensors")
-                    .unwrap_or(false)
-            })
-            .map(|e| e.path())
-            .collect();
-
-        if safetensors_files.is_empty() {
-            return Err(NeuronError::not_implemented(
-                "No safetensors files found".to_string(),
-            ));
-        }
-
-        let safetensors_paths: Vec<&std::path::Path> =
-            safetensors_files.iter().map(|p| p.as_path()).collect();
-
-        let vb = unsafe {
-            crate::candle_compat::from_mmaped_safetensors(safetensors_paths.as_slice(), DType::F32, &dev)
-        }
-        .map_err(|e| NeuronError::not_implemented(format!("load safetensors: {}", e)))?;
-
-        let model = m::model::Whisper::load(&vb, config.clone())
-            .map_err(|e| NeuronError::not_implemented(format!("build Whisper model: {}", e)))?;
-
-        let loaded = LoadedWhisper {
-            model,
-            tokenizer,
-            config,
-            mel_filters,
-            device: dev,
-        };
-
-        let runtime = WhisperAsrRuntime::new();
-        *runtime.inner.lock().unwrap() = Some(loaded);
-
-        Ok(Box::new(runtime))
+    /// ⚠️ **把【注册面用的那份根】递进来**（刀 16 续同源）—— 注册刚在
+    /// `config.model_dirs` 里找到这份权重 ⇒ ⇒ 加载就必须读**同一份** ⇒ ⇒
+    /// 否则「引擎注册上了、权重找不到」。
+    async fn load_with_roots(
+        model: &str,
+        device: &DeviceSelection,
+        roots: &[std::path::PathBuf],
+    ) -> ChatResult<Box<dyn AsrRuntime>>
+    where
+        Self: Sized,
+    {
+        let path =
+            Self::resolve_model_path_in(model, roots).map_err(NeuronError::not_implemented)?;
+        Self::load_from_dir(device, path).await
     }
 
     async fn transcribe(&self, audio: &[u8], lang: Option<&str>) -> ChatResult<Transcription> {
@@ -676,11 +734,96 @@ impl AsrRuntime for WhisperAsrRuntime {
 mod tests {
     use super::*;
 
+    /// ⚠️⚠️ **盘上没有 mel_filters ⇒ ⇒ 照样能装**（2026-11-26）—— 判据 F3-a。
+    ///
+    /// ⚠️ **为什么**：candle 的 whisper 运行时**必须**有 mel 滤波器组，而它
+    /// **不在模型仓里**（它在 HF 的 `spaces/lmz/candle-whisper` 那个 space
+    /// 里）⇒ ⇒ 以前「拉完模型」之后**还要手动补一个文件**⇒ ⇒
+    /// 「下载完即用」在下载腿上是**假的** ⇒ ⇒ 现在内嵌了一份 ⇒ ⇒ 这一格
+    /// 变成真的。
+    #[test]
+    fn a_model_dir_without_mel_filters_still_passes_validation() {
+        let dir = std::env::temp_dir().join(format!(
+            "neuron-mel-{}-{}",
+            uuid::Uuid::new_v4(),
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("config.json"), b"{}").unwrap();
+        std::fs::write(dir.join("tokenizer.json"), b"{}").unwrap();
+        std::fs::write(dir.join("model.safetensors"), b"fake").unwrap();
+        // ⚠️ **故意不放 mel_filters** ⇒ ⇒ 以前这一格会红。
+        assert!(
+            !dir.join("mel_filters.safetensors").exists(),
+            "这条判据的前提：目录里**没有** mel_filters"
+        );
+        let ok = WhisperAsrRuntime::validate_model_dir(&dir);
+        assert!(
+            ok.is_ok(),
+            "没有 mel_filters 也必须能过校验（内嵌兜底）：{:?}",
+            ok.err()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ⚠️ **内嵌的那份能解出正确的滤波器组**（2026-11-26）—— 判据 F3-b。
+    #[test]
+    fn the_embedded_mel_filters_parse_into_the_expected_filter_bank() {
+        let filters = WhisperAsrRuntime::load_mel_safetensors_bytes(EMBEDDED_MEL_FILTERS, 80)
+            .expect("the embedded mel_filters must parse");
+        assert_eq!(filters.len(), 80 * 201);
+        assert!(
+            filters.iter().all(|f| f.is_finite()),
+            "内嵌的滤波器组里有非有限值"
+        );
+        // ⚠️⚠️ **形状按真数据写**（2026-11-26 实测内嵌原件：16 080 个 f32
+        // ／ shape [80, 201]／ min 0／ max 0.025 880 683／ sum 1.999 024／
+        // **非零 391 个**）—— 三角滤波器**没有负瓣** ⇒ ⇒ 上一版判据写的是
+        // 「至少有一个负值」⇒ ⇒ **前提是假的** ⇒ ⇒ **红的是判据，不是实现**
+        // ⇒ ⇒ 改成真数据的形状。
+        assert!(filters.iter().all(|f| *f >= 0.0), "三角滤波器不该有负值");
+        let max = filters.iter().cloned().fold(0f32, f32::max);
+        assert!(max > 0.0, "内嵌的滤波器组全是 0 ⇒ ⇒ 形状可疑");
+        assert!(max < 1.0, "归一化后的滤波器峰值不该 ≥ 1（实测 0.0259）");
+        let non_zero = filters.iter().filter(|f| **f != 0.0).count();
+        assert!(non_zero > 0, "内嵌的滤波器组全是 0");
+        assert!(
+            non_zero < filters.len() / 4,
+            "三角滤波器是稀疏的（实测 391/16 080）"
+        );
+    }
+
+    /// ⚠️ **盘上那份优先**（2026-11-26）—— 判据 F3-c。
+    ///
+    /// ⚠️ **怎么证「优先」**：盘上放一份**坏掉**的文件 ⇒ ⇒ 加载必须
+    /// **报错**（而不是悄悄回落内嵌那份）⇒ ⇒ 这才证明「盘上优先」是真的
+    /// 优先，而不是「内嵌优先」。
+    #[test]
+    fn the_on_disk_mel_filters_win_over_the_embedded_copy() {
+        let dir = std::env::temp_dir().join(format!(
+            "neuron-mel-disk-{}-{}",
+            uuid::Uuid::new_v4(),
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("mel_filters.safetensors"), b"not-a-safetensors").unwrap();
+        let err = WhisperAsrRuntime::load_mel_filters(&dir, 80).unwrap_err();
+        assert!(
+            err.contains("mel_filters"),
+            "盘上那份坏了 ⇒ ⇒ 必须报错（不许悄悄回落内嵌那份）：{err}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     #[serial_test::serial]
     fn test_resolve_model_path_without_env_returns_useful_error() {
         unsafe { std::env::remove_var("NEURON_ASR_MODEL_PATH") };
-        let result = WhisperAsrRuntime::resolve_model_path("whisper-base");
+        // ⚠️ **口径变更**（2026-11-26）：这条腿现在也认模型库里的
+        // `<root>/asr/<id>` ⇒ ⇒ 本机默认库里**真的**躺着 whisper-base ⇒ ⇒
+        // 拿它当「找不到」的探针就是**假前提** ⇒ ⇒ 换一个**哪都不存在**的
+        // id ⇒ ⇒ 判据要测的是「找不到时的话有没有用」，不是「某台机器上有没有」。
+        let result = WhisperAsrRuntime::resolve_model_path("whisper-base-absent-probe");
         assert!(result.is_err());
         let err = result.err().unwrap();
         assert!(
@@ -752,7 +895,9 @@ mod tests {
     #[serial_test::serial]
     async fn test_whisper_load_without_path_returns_useful_error() {
         unsafe { std::env::remove_var("NEURON_ASR_MODEL_PATH") };
-        let result = WhisperAsrRuntime::load("whisper-base", &DeviceSelection::Cpu).await;
+        // ⚠️ 同上：用一个**哪都不存在**的 id（见上一条判据的说明）。
+        let result =
+            WhisperAsrRuntime::load("whisper-base-absent-probe", &DeviceSelection::Cpu).await;
         assert!(result.is_err());
         let err = result.err().unwrap();
         assert!(err.message.contains("NEURON_ASR_MODEL_PATH"));

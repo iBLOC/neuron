@@ -80,6 +80,9 @@ impl Puller {
         let jobs = self.jobs.clone();
         let id_for_task = id;
         let dest_dir = req.dest_dir.clone();
+        // ⚠️ **引擎要哪套权重格式**（拉的时候只留那套）—— 见
+        // `preferred_weight_extensions`。
+        let preferred_weights = crate::models::source::preferred_weight_extensions(req.engine);
 
         tokio::spawn(async move {
             if let Some(j) = jobs.lock().unwrap().get_mut(&id_for_task) {
@@ -100,7 +103,12 @@ impl Puller {
                 }
             });
 
-            let result = source.download(&parsed, &dest_dir, tx).await;
+            // ⚠️ **只拉这个引擎要的那套权重**（见 `filter_weight_files`）⇒ ⇒
+            // 同一个仓里的 pytorch/tf/flax 替代格式不被拖下来
+            // （真机读数：设备上原本在拖 85 MB 的 msgpack）。
+            let result = source
+                .download_filtered(&parsed, &dest_dir, tx, preferred_weights)
+                .await;
 
             // Stage cleanup state in locals — touching `jobs`
             // across an `.await` would hold the std::sync::Mutex

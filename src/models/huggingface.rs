@@ -163,9 +163,33 @@ impl Source for HuggingFaceSource {
         // retries, and ETag caching for us. Fall back to direct
         // HTTP if the CLI binary isn't on disk.
         if self.cli_is_available() {
-            return self.download_via_cli(reference, dest_dir, progress_tx).await;
+            return self
+                .download_via_cli(reference, dest_dir, progress_tx)
+                .await;
         }
-        self.download_via_http(reference, dest_dir, progress_tx).await
+        self.download_via_http(reference, dest_dir, progress_tx, &[])
+            .await
+    }
+
+    /// ⚠️ **只拉引擎要的那套权重**（见 `filter_weight_files` 的口径）。
+    ///
+    /// ⚠️ **CLI 那条腿不过滤**（`hf download` 的 `--include` 不在这一刀
+    /// 的范围内）⇒ ⇒ **手机上没有 CLI** ⇒ ⇒ 手机那条腿**是**过滤的
+    /// ⇒ ⇒ 而真机读数正是手机上的那一条。
+    async fn download_filtered(
+        &self,
+        reference: &ParsedReference,
+        dest_dir: &Path,
+        progress_tx: UnboundedSender<DownloadProgress>,
+        preferred_weights: &[&str],
+    ) -> Result<(), String> {
+        if self.cli_is_available() {
+            return self
+                .download_via_cli(reference, dest_dir, progress_tx)
+                .await;
+        }
+        self.download_via_http(reference, dest_dir, progress_tx, preferred_weights)
+            .await
     }
 }
 
@@ -226,6 +250,7 @@ impl HuggingFaceSource {
         reference: &ParsedReference,
         dest_dir: &Path,
         progress_tx: UnboundedSender<DownloadProgress>,
+        preferred_weights: &[&str],
     ) -> Result<(), String> {
         // The puller passes the raw reference (`huggingface:owner/name`),
         // but the HF REST API expects just `owner/name`. Strip the
@@ -329,13 +354,23 @@ impl HuggingFaceSource {
         // `path` field is what we want; `type` is "file" | "directory".
         let mut bytes_downloaded: u64 = 0;
 
+        // ⚠️ **先收集路径、再按「引擎要的那套权重」过滤**（见
+        // `filter_weight_files` 的口径）⇒ ⇒ 同一个仓里的**替代格式**
+        // （pytorch_model / tf_model / flax_model）不被拖下来。
+        let mut all_paths: Vec<String> = Vec::with_capacity(entries.len());
         for entry in entries {
-            let path = entry["path"].as_str()
-                .ok_or_else(|| format!("entry missing path: {entry}"))?;
             let kind = entry["type"].as_str().unwrap_or("file");
             if kind != "file" {
                 continue;
             }
+            let path = entry["path"].as_str()
+                .ok_or_else(|| format!("entry missing path: {entry}"))?;
+            all_paths.push(path.to_string());
+        }
+        let paths = crate::models::source::filter_weight_files(&all_paths, preferred_weights);
+
+        for path in paths {
+            let path = path.as_str();
 
             let parent = dest_dir.join(path).parent()
                 .map(|p| p.to_path_buf());

@@ -27,7 +27,7 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 
-use crate::config::{ensure_dir, DeviceSelection};
+use crate::config::DeviceSelection;
 use crate::llm::{ChatResult, NeuronError};
 
 use super::wav::decode_wav;
@@ -100,24 +100,31 @@ impl SherpaAsrRuntime {
         })
     }
 
-    fn resolve_model_path(model: &str) -> Result<PathBuf, String> {
-        let path = match crate::config::env_var_result("ASR_MODEL_PATH") {
-            Ok(p) => PathBuf::from(p),
-            Err(_) => {
+    /// 按**给定的根**解析模型目录（显式 `NEURON_ASR_MODEL_PATH` 仍然优先）。
+    ///
+    /// ⚠️ **根从哪儿来**（刀 16 续同源，2026-11-26）：**注册面／下载面**走
+    /// `config.model_dirs`（宿主交进来的那份），**加载面**必须读**同一份**
+    /// ⇒ ⇒ 否则嵌脑形态里宿主给的目录只被用来下载 ⇒ ⇒ 加载时却去别处找
+    /// ⇒ ⇒ **引擎注册上了、权重找不到** ⇒ ⇒ 与 candle／tract 两条腿**同一
+    /// 口径**（**三条腿不许各说各话**）。
+    fn resolve_model_path_in(model: &str, roots: &[PathBuf]) -> Result<PathBuf, String> {
+        let path = match crate::asr::resolve_asr_model_dir_with_override_in(roots, model) {
+            Ok(p) => p,
+            Err(why) => {
                 return Err(format!(
-                    "SherpaAsrRuntime: set NEURON_ASR_MODEL_PATH to a directory containing \
-                     model.onnx (or model.int8.onnx) + tokens.txt for SenseVoice model '{model}' \
-                     (sherpa-onnx-sense-voice-zh-en-ja-ko-yue releases)"
+                    "SherpaAsrRuntime: {why}; set NEURON_ASR_MODEL_PATH to a directory containing model.onnx (or model.int8.onnx) + tokens.txt for SenseVoice model '{model}' (sherpa-onnx-sense-voice-zh-en-ja-ko-yue releases)"
                 ));
             }
         };
-        ensure_dir(&path, "NEURON_ASR_MODEL_PATH")?;
         // NEURON_ASR_ONNX_FILE forces one graph (same knob the tract path
         // reads) so both engines can be pinned to the same export.
         let onnx = if let Ok(name) = std::env::var("NEURON_ASR_ONNX_FILE") {
             let p = path.join(&name);
             if !p.is_file() {
-                return Err(format!("NEURON_ASR_ONNX_FILE={name} but {} does not exist", p.display()));
+                return Err(format!(
+                    "NEURON_ASR_ONNX_FILE={name} but {} does not exist",
+                    p.display()
+                ));
             }
             Some(p)
         } else {
@@ -136,6 +143,12 @@ impl SherpaAsrRuntime {
             return Err(format!("tokens.txt not found in {}", path.display()));
         }
         Ok(path)
+    }
+
+    /// 按**进程级真相源**（`NeuronConfig::model_roots()`）解析模型目录。
+    fn resolve_model_path(model: &str) -> Result<PathBuf, String> {
+        let roots = crate::asr::asr_model_roots();
+        Self::resolve_model_path_in(model, &roots)
     }
 }
 
@@ -167,6 +180,23 @@ impl AsrRuntime for SherpaAsrRuntime {
         Self: Sized,
     {
         let path = Self::resolve_model_path(model).map_err(NeuronError::not_implemented)?;
+        let runtime = Self::from_dir(&path)?;
+        Ok(Box::new(runtime))
+    }
+
+    /// ⚠️ **把【注册面用的那份根】递进来**（刀 16 续同源）—— 注册刚在
+    /// `config.model_dirs` 里找到这份权重 ⇒ ⇒ 加载就必须读**同一份** ⇒ ⇒
+    /// 否则「引擎注册上了、权重找不到」。
+    async fn load_with_roots(
+        model: &str,
+        _device: &DeviceSelection,
+        roots: &[std::path::PathBuf],
+    ) -> ChatResult<Box<dyn AsrRuntime>>
+    where
+        Self: Sized,
+    {
+        let path =
+            Self::resolve_model_path_in(model, roots).map_err(NeuronError::not_implemented)?;
         let runtime = Self::from_dir(&path)?;
         Ok(Box::new(runtime))
     }
@@ -226,7 +256,11 @@ mod tests {
     #[serial_test::serial]
     fn test_resolve_model_path_without_env_returns_useful_error() {
         unsafe { std::env::remove_var("NEURON_ASR_MODEL_PATH") };
-        let result = SherpaAsrRuntime::resolve_model_path("sensevoice-small");
+        // ⚠️ **口径变更**（2026-11-26）：这条腿现在也认模型库里的
+        // `<root>/asr/<id>` ⇒ ⇒ 本机默认库里**真的**躺着 sensevoice-small
+        // ⇒ ⇒ 拿它当「找不到」的探针就是**假前提** ⇒ ⇒ 换一个**哪都不存在**
+        // 的 id ⇒ ⇒ 判据要测的是「找不到时的话有没有用」。
+        let result = SherpaAsrRuntime::resolve_model_path("sensevoice-absent-probe");
         assert!(result.is_err());
         assert!(
             result.err().unwrap().contains("NEURON_ASR_MODEL_PATH"),

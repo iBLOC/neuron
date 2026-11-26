@@ -531,38 +531,27 @@ fn load_sym_table(path: &Path) -> Result<HashMap<u32, String>, NeuronError> {
     Ok(table)
 }
 
-/// Where a SenseVoice model directory lives: `NEURON_ASR_MODEL_PATH` first,
-/// then `$NEURON_MODEL_DIRS`-style roots as `asr/{model_id}`.
-pub fn resolve_model_dir(model_id: &str) -> Result<PathBuf, NeuronError> {
-    if let Ok(p) = std::env::var("NEURON_ASR_MODEL_PATH") {
-        let path = PathBuf::from(&p);
-        if !path.is_dir() {
-            return Err(NeuronError::invalid_input(format!(
-                "NEURON_ASR_MODEL_PATH={p} is not a directory"
-            )));
-        }
-        return Ok(path);
-    }
-    let roots = std::env::var("NEURON_MODEL_DIRS")
-        .or_else(|_| std::env::var("NEURON_MODEL_DIR"))
-        .unwrap_or_else(|_| {
-            let home = std::env::var("USERPROFILE")
-                .or_else(|_| std::env::var("HOME"))
-                .unwrap_or_default();
-            format!("{home}/.neuron/models")
-        });
-    for root in roots.split(':').filter(|s| !s.is_empty()) {
-        let candidate = Path::new(root).join("asr").join(model_id);
-        if candidate.is_dir() {
-            return Ok(candidate);
-        }
-    }
-    Err(NeuronError::invalid_input(format!(
-        "SenseVoice model dir not found for {model_id}; set NEURON_ASR_MODEL_PATH to a \
-         directory containing model.onnx + tokens.txt"
-    )))
+/// 按**给定的根**解析 SenseVoice 模型目录（显式 `NEURON_ASR_MODEL_PATH`
+/// 优先）。
+///
+/// ⚠️ **根从哪儿来**（刀 16 续同源，2026-11-26）：**注册面／下载面**走
+/// `config.model_dirs`（宿主交进来的那份），**加载面**必须读**同一份**
+/// ⇒ ⇒ 否则嵌脑形态里宿主给的目录只被用来下载 ⇒ ⇒ 加载时却去别处找
+/// ⇒ ⇒ **引擎注册上了、权重找不到** ⇒ ⇒ 与 candle／sherpa 两条腿**同一
+/// 口径**（**三条腿不许各说各话**）。
+pub fn resolve_model_dir_in(model_id: &str, roots: &[PathBuf]) -> Result<PathBuf, NeuronError> {
+    crate::asr::resolve_asr_model_dir_with_override_in(roots, model_id).map_err(|why| {
+        NeuronError::invalid_input(format!(
+            "SenseVoice model dir not found: {why}; set NEURON_ASR_MODEL_PATH to a directory containing model.onnx + tokens.txt"
+        ))
+    })
 }
 
+/// 按**进程级真相源**（`NeuronConfig::model_roots()`）解析模型目录。
+pub fn resolve_model_dir(model_id: &str) -> Result<PathBuf, NeuronError> {
+    let roots = crate::asr::asr_model_roots();
+    resolve_model_dir_in(model_id, &roots)
+}
 #[async_trait]
 impl AsrRuntime for TractSenseVoiceRuntime {
     async fn load(model: &str, _device: &DeviceSelection) -> ChatResult<Box<dyn AsrRuntime>>
@@ -570,6 +559,22 @@ impl AsrRuntime for TractSenseVoiceRuntime {
         Self: Sized,
     {
         let dir = resolve_model_dir(model)?;
+        let rt = Self::from_dir(model, &dir)?;
+        Ok(Box::new(rt))
+    }
+
+    /// ⚠️ **把【注册面用的那份根】递进来**（刀 16 续同源）—— 注册刚在
+    /// `config.model_dirs` 里找到这份权重 ⇒ ⇒ 加载就必须读**同一份** ⇒ ⇒
+    /// 否则「引擎注册上了、权重找不到」。
+    async fn load_with_roots(
+        model: &str,
+        _device: &DeviceSelection,
+        roots: &[std::path::PathBuf],
+    ) -> ChatResult<Box<dyn AsrRuntime>>
+    where
+        Self: Sized,
+    {
+        let dir = resolve_model_dir_in(model, roots)?;
         let rt = Self::from_dir(model, &dir)?;
         Ok(Box::new(rt))
     }

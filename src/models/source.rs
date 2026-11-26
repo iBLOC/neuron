@@ -37,6 +37,108 @@ pub trait Source: Send + Sync {
         dest_dir: &Path,
         progress_tx: UnboundedSender<DownloadProgress>,
     ) -> Result<(), String>;
+
+    /// 拉**这个引擎要的那套权重**（默认实现 = 全拉；真正的源覆写它）。
+    ///
+    /// ⚠️ **为什么要有这一格**（2026-11-26 真机读数，MIX4 arm64）：设备上
+    /// 真跑一次 `hf-mirror:openai/whisper-tiny` ⇒ ⇒ 它**正在下**
+    /// `flax_model.msgpack`（85 MB）⇒ ⇒ **candle 根本用不了** ⇒ ⇒ 同一
+    /// 个仓里的另外两套（`pytorch_model.bin` 151 MB／`tf_model.h5`
+    /// 290 MB）也一样 ⇒ ⇒ ≈ 680 MB 里**只有 151 MB 是要的**。
+    ///
+    /// ⚠️ **默认实现是「全拉」** ⇒ ⇒ 别的源（与测试里的替身）**一行不用
+    /// 改** ⇒ ⇒ 行为不突变 ⇒ ⇒ 覆写是**逐个源自愿**的。
+    async fn download_filtered(
+        &self,
+        reference: &ParsedReference,
+        dest_dir: &Path,
+        progress_tx: UnboundedSender<DownloadProgress>,
+        preferred_weights: &[&str],
+    ) -> Result<(), String> {
+        let _ = preferred_weights;
+        self.download(reference, dest_dir, progress_tx).await
+    }
+}
+
+/// 引擎**要哪套权重格式**（拉的时候只留那套）。
+///
+/// ⚠️ **口径**：这是**引擎族**的粗口径 ⇒ ⇒ 真正的判定仍由装载面说了算
+/// （装不上 ⇒ ⇒ 报「装不下」那一句真话）⇒ ⇒ 这里只管**别把三套格式
+/// 都拖下来**。
+pub fn preferred_weight_extensions(
+    engine: crate::models::registry::EngineType,
+) -> &'static [&'static str] {
+    use crate::models::registry::EngineType;
+    match engine {
+        EngineType::Llm
+        | EngineType::Tts
+        | EngineType::Embedding
+        | EngineType::Rerank
+        | EngineType::Vision
+        | EngineType::ImageGen => &["safetensors"],
+        // ⚠️ ASR 有两族：candle 那族吃 safetensors、sherpa/tract 那族吃
+        // onnx ⇒ ⇒ 两个都留着（真仓里只有其中一套）。
+        EngineType::Asr => &["safetensors", "onnx"],
+        EngineType::Ocr => &["onnx"],
+        EngineType::Decision => &[],
+    }
+}
+
+/// ⚠️⚠️ **同一个仓里往往同时躺着多套权重格式** —— `openai/whisper-tiny`
+/// 那一档同时有 `model.safetensors`（151 MB）／`pytorch_model.bin`
+/// （151 MB）／`tf_model.h5`（290 MB）／`flax_model.msgpack`（85 MB）
+/// ⇒ ⇒ **全拉下来 ≈ 680 MB**，而 candle **只吃 safetensors**
+/// ⇒ ⇒ **4.5 倍的带宽**（真机读数：设备上真的在拖那个 85 MB 的 msgpack）。
+///
+/// ⚠️ **口径**（三句话，每句都有一格判据）：
+///   ❶ 仓里**有**引擎要的那套 ⇒ ⇒ **只留那套**，把**同权重的替代格式**
+///      剔掉（`pytorch_model*`／`tf_model*`／`flax_model*`）
+///      ⇒ ⇒ **别的 `.bin`／`.pth` 不误伤**（例：`audiovae.pth` 是
+///      TTS 那条腿自己要用的）；
+///   ❷ 仓里**没有**那套 ⇒ ⇒ **全留**（不许把仓拉成空目录 ⇒ ⇒ 那比多下
+///      几倍更糟：用户看到「下载完成」却什么也没有）；
+///   ❸ `preferred` 为空 ⇒ ⇒ **全留**（这一族没有偏好 ⇒ ⇒ 不猜）。
+pub fn filter_weight_files(paths: &[String], preferred: &[&str]) -> Vec<String> {
+    if preferred.is_empty() {
+        return paths.to_vec();
+    }
+    let has_preferred = paths.iter().any(|p| {
+        let ext = Path::new(p)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        preferred.iter().any(|w| *w == ext)
+    });
+    if !has_preferred {
+        return paths.to_vec();
+    }
+    paths
+        .iter()
+        .filter(|p| !is_alternate_weight_file(p))
+        .cloned()
+        .collect()
+}
+
+/// 那几份**同权重的替代格式**（HF 老仓三件套）—— **只认这几个文件名**。
+///
+/// ⚠️ **为什么按文件名而不按扩展名**：TTS 那条腿的 `audiovae.pth`、
+/// 某些仓的 `model.bin` 都是**自己要用的** ⇒ ⇒ 按扩展名一刀切会误伤
+/// ⇒ ⇒ 误伤的后果是「引擎注册上了、权重找不到」⇒ ⇒ 只剔**那几份**
+/// **同权重替代品**。
+fn is_alternate_weight_file(path: &str) -> bool {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    let ext = name
+        .rsplit_once('.')
+        .map(|(_, e)| e.to_ascii_lowercase())
+        .unwrap_or_default();
+    const ALT_EXTS: &[&str] = &["bin", "h5", "msgpack", "ot", "pb"];
+    if !ALT_EXTS.contains(&ext.as_str()) {
+        return false;
+    }
+    const ALT_STEMS: &[&str] = &["pytorch_model", "tf_model", "flax_model"];
+    let stem = name.split('.').next().unwrap_or(name);
+    ALT_STEMS.iter().any(|s| stem.starts_with(s))
 }
 
 pub struct SourceRegistry {
@@ -322,5 +424,103 @@ mod tests {
         r.register(dummy("mmm"));
         let ids: Vec<String> = r.list_endpoints().into_iter().map(|(id, _)| id).collect();
         assert_eq!(ids, vec!["aaa".to_string(), "mmm".to_string(), "zzz".to_string()]);
+    }
+
+    /// ⚠️⚠️ **同一个仓里的多套权重格式 ⇒ ⇒ 只留引擎要的那套**（2026-11-26）
+    /// —— 判据 F2-a／b／c。
+    ///
+    /// ⚠️ **真机读数**（MIX4，arm64 Android 13）：真跑一次
+    /// `hf-mirror:openai/whisper-tiny` ⇒ ⇒ 它**正在下**
+    /// `flax_model.msgpack`（85 MB）⇒ ⇒ **candle 根本用不了** ⇒ ⇒ 同一
+    /// 个仓里 ≈ 680 MB，**只有 151 MB 是要的**。
+    #[test]
+    fn the_weight_filter_keeps_only_the_format_the_engine_loads() {
+        let whisper_repo: Vec<String> = [
+            "README.md",
+            "added_tokens.json",
+            "config.json",
+            "flax_model.msgpack",
+            "generation_config.json",
+            "model.safetensors",
+            "preprocessor_config.json",
+            "pytorch_model.bin",
+            "tf_model.h5",
+            "tokenizer.json",
+            "tokenizer_config.json",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+
+        let kept = filter_weight_files(&whisper_repo, &["safetensors"]);
+        // ⚠️ **那三份替代格式必须没了**（它们是**同一份权重**的别的格式）。
+        for gone in ["flax_model.msgpack", "pytorch_model.bin", "tf_model.h5"] {
+            assert!(
+                !kept.iter().any(|k| k == gone),
+                "{gone} 是同一份权重的替代格式 ⇒ ⇒ 不该被拖下来；kept={kept:?}"
+            );
+        }
+        // ⚠️ **要用的那份与杂项都得留着**（少一个都装不上）。
+        for wanted in [
+            "model.safetensors",
+            "config.json",
+            "tokenizer.json",
+            "preprocessor_config.json",
+        ] {
+            assert!(
+                kept.iter().any(|k| k == wanted),
+                "{wanted} 必须留下；kept={kept:?}"
+            );
+        }
+
+        // ⚠️ **仓里没有引擎要的那套 ⇒ ⇒ 全留**（不许把仓拉成空目录 ⇒ ⇒
+        // 那比多下几倍更糟：用户看到「下载完成」却什么也没有）。
+        let pytorch_only: Vec<String> = ["pytorch_model.bin", "config.json"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let kept = filter_weight_files(&pytorch_only, &["safetensors"]);
+        assert_eq!(
+            kept, pytorch_only,
+            "仓里没有引擎要的那套 ⇒ ⇒ 必须全拉（不许下成空目录）"
+        );
+
+        // ⚠️ **别的 .bin／.pth 不误伤**（TTS 那条腿的 audiovae.pth 是
+        // 要用的；按扩展名一刀切会把它砍掉 ⇒ ⇒ 「引擎注册上了、权重找不到」）。
+        let mixed: Vec<String> = ["model.safetensors", "audiovae.pth", "pytorch_model.bin"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let kept = filter_weight_files(&mixed, &["safetensors"]);
+        assert!(
+            kept.iter().any(|k| k == "audiovae.pth"),
+            "audiovae.pth 不是替代格式 ⇒ ⇒ 不许被砍；kept={kept:?}"
+        );
+        assert!(
+            !kept.iter().any(|k| k == "pytorch_model.bin"),
+            "pytorch_model.bin 是替代格式 ⇒ ⇒ 该被砍；kept={kept:?}"
+        );
+
+        // ⚠️ **没有偏好 ⇒ ⇒ 全留**（这一族没有偏好 ⇒ ⇒ 不猜）。
+        let kept = filter_weight_files(&whisper_repo, &[]);
+        assert_eq!(kept.len(), whisper_repo.len());
+    }
+
+    /// ⚠️ **每个引擎族要哪套权重格式**（2026-11-26）—— 判据 F2-d。
+    #[test]
+    fn every_engine_family_declares_the_weight_format_it_loads() {
+        use crate::models::registry::EngineType;
+        assert_eq!(
+            preferred_weight_extensions(EngineType::Llm),
+            &["safetensors"]
+        );
+        // ⚠️ ASR 有两族：candle 吃 safetensors、sherpa/tract 吃 onnx
+        // ⇒ ⇒ 两个都要留（真仓里只有其中一套）。
+        let asr = preferred_weight_extensions(EngineType::Asr);
+        assert!(
+            asr.contains(&"safetensors") && asr.contains(&"onnx"),
+            "ASR 的偏好必须同时容下两族：{asr:?}"
+        );
+        assert_eq!(preferred_weight_extensions(EngineType::Ocr), &["onnx"]);
     }
 }

@@ -56,7 +56,23 @@ impl Source for ModelScopeSource {
         }
 
         // Fallback: download via HTTP API
-        self.download_via_http(reference, dest_dir, progress_tx).await
+        self.download_via_http(reference, dest_dir, progress_tx, &[])
+            .await
+    }
+
+    /// ⚠️ **只拉引擎要的那套权重**（见 `filter_weight_files` 的口径）。
+    async fn download_filtered(
+        &self,
+        reference: &ParsedReference,
+        dest_dir: &Path,
+        progress_tx: UnboundedSender<DownloadProgress>,
+        preferred_weights: &[&str],
+    ) -> Result<(), String> {
+        if self.cli_path.exists() || which(&self.cli_path.to_string_lossy()).is_some() {
+            return self.download_via_cli(reference, dest_dir, progress_tx).await;
+        }
+        self.download_via_http(reference, dest_dir, progress_tx, preferred_weights)
+            .await
     }
 }
 
@@ -106,6 +122,7 @@ impl ModelScopeSource {
         reference: &ParsedReference,
         dest_dir: &Path,
         progress_tx: UnboundedSender<DownloadProgress>,
+        preferred_weights: &[&str],
     ) -> Result<(), String> {
         let base_url = self.endpoint.as_deref()
             .unwrap_or("https://modelscope.cn/api/v1");
@@ -171,26 +188,39 @@ impl ModelScopeSource {
         let files = body["Data"]["Files"].as_array()
             .ok_or_else(|| format!("no files found in response: {}", body))?;
 
-        let total_bytes: u64 = files.iter()
-            .filter_map(|f| f["Size"].as_u64())
-            .sum();
-
-        let mut bytes_downloaded: u64 = 0;
-
+        // ⚠️ **先收集、再按「引擎要的那套权重」过滤**（见
+        // `filter_weight_files` 的口径）⇒ ⇒ 同一个仓里的**替代格式**
+        // 不被拖下来；**总量按过滤后的算** ⇒ ⇒ 否则进度条在说假话。
+        let mut all_files: Vec<(String, u64)> = Vec::with_capacity(files.len());
         for file in files {
-            let filename = file["Path"].as_str()
-                .ok_or("file path not found")?;
-
             // Skip directory entries (Type == "tree") — the listing
             // returns both files and folders; folders have Size 0
             // and would otherwise cause us to attempt to write a
             // file at a path that's already a directory.
-            let is_dir = file["Type"].as_str() == Some("tree");
-            if is_dir {
+            if file["Type"].as_str() == Some("tree") {
                 continue;
             }
-
+            let filename = file["Path"].as_str().ok_or("file path not found")?;
             let size = file["Size"].as_u64().unwrap_or(0);
+            all_files.push((filename.to_string(), size));
+        }
+        let kept_paths: std::collections::HashSet<String> =
+            crate::models::source::filter_weight_files(
+                &all_files.iter().map(|(p, _)| p.clone()).collect::<Vec<_>>(),
+                preferred_weights,
+            )
+            .into_iter()
+            .collect();
+        let kept_files: Vec<(String, u64)> = all_files
+            .into_iter()
+            .filter(|(p, _)| kept_paths.contains(p))
+            .collect();
+        let total_bytes: u64 = kept_files.iter().map(|(_, s)| *s).sum();
+
+        let mut bytes_downloaded: u64 = 0;
+
+        for (filename, size) in kept_files {
+            let filename = filename.as_str();
 
             let download_url = format!(
                 "{}/models/{}/repo?Revision={}&FilePath={}",
