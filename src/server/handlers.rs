@@ -24,7 +24,8 @@ use crate::embedding::{EmbeddingInput, EmbeddingRequest};
 use crate::ocr::{OcrRequest, OcrResponse};
 use crate::vision::{
     load_lora_from_path, LoraAdapterMeta, LoraListResponse, LoraRegisterRequest,
-    LoraRegisterResponse, LoraAdapterStatus, VisionRequest, VisionResponse, VisionTask,
+    LoraRegisterResponse, LoraAdapterStatus, VisionImageSource, VisionRequest, VisionResponse,
+    VisionTask,
 };
 
 // ---------------------------------------------------------------------------
@@ -593,6 +594,129 @@ pub async fn audio_transcriptions(
 }
 
 // ---------------------------------------------------------------------------
+// Speaker embeddings (声纹)
+// ---------------------------------------------------------------------------
+
+/// `POST /v1/audio/speaker-embeddings` —— 一段人声 → 一条声纹向量。
+///
+/// neuron 形状的端点（OpenAI 没有对应接口）—— 与 `/v1/ocr/recognize` 同类：
+/// 音频进，结构化结果出。
+///
+/// **模型是内置的**（CAM++，随发行包走）⇒ ⇒ 用户零配置；权重找不到时这个
+/// 端点**明确说不可用**（501），而不是返回零向量冒充声纹。
+#[derive(Debug, Serialize)]
+pub struct SpeakerEmbeddingResponse {
+    /// 声纹向量（CAM++ ⇒ 192 维）。
+    pub embedding: Vec<f32>,
+    /// 维度（冗余一份，客户端不用自己数）。
+    pub dim: usize,
+}
+
+pub async fn speaker_embeddings(
+    State(state): State<ServerState>,
+    mut multipart: Multipart,
+) -> Result<Json<SpeakerEmbeddingResponse>, ServerError> {
+    let mut file_bytes: Option<Vec<u8>> = None;
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|e| ServerError::BadRequest(format!("multipart: {e}")))?
+    {
+        let name = field.name().unwrap_or("");
+        if name == "file" {
+            file_bytes = Some(
+                field
+                    .bytes()
+                    .await
+                    .map_err(|e| ServerError::BadRequest(format!("file read: {e}")))?
+                    .to_vec(),
+            );
+        }
+    }
+
+    let bytes =
+        file_bytes.ok_or_else(|| ServerError::BadRequest("file is required".to_string()))?;
+
+    let spk = state
+        .spkemb
+        .embed(&bytes)
+        .await
+        .map_err(|e| ServerError::NotImplemented(e))?;
+
+    Ok(Json(SpeakerEmbeddingResponse {
+        embedding: spk.embedding,
+        dim: spk.dim,
+    }))
+}
+
+// ---------------------------------------------------------------------------
+// Face embeddings (人脸)
+// ---------------------------------------------------------------------------
+
+/// `POST /v1/vision/faces/embed` —— 一张图 → 每张脸的 128 维嵌入。
+///
+/// **模型是内置的**（YuNet 检脸 ＋ MobileFaceNet 嵌入，随发行包走）⇒ ⇒ 用户零配置；
+/// 权重找不到时这个端点**明确说不可用**（501），而不是返回零向量冒充人脸。
+#[derive(Debug, Serialize)]
+pub struct FaceEmbeddingResponse {
+    /// 每张脸的嵌入（框、分数、关键点、向量）。
+    pub faces: Vec<crate::face::FaceEmbedding>,
+    /// 维度（冗余一份，客户端不用自己数）。
+    pub dim: usize,
+}
+
+/// 请求体 —— **与其它 vision 端点同一套形状**（base64 / data URI）。
+///
+/// ⚠️ 之前这一档是 multipart（`file` 字段）⇒ ⇒ 与仓里其它 vision 调用形状不一致
+/// ⇒ ⇒ 枕叶得单独写一套上传代码 ⇒ ⇒ 改成 JSON，枕叶就能复用同一套 `VisionImage`。
+#[derive(Debug, Deserialize)]
+pub struct FaceEmbeddingRequest {
+    pub image: VisionImageSource,
+}
+
+fn face_decode_base64(data: &str) -> Result<Vec<u8>, ServerError> {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD
+        .decode(data.trim())
+        .map_err(|e| ServerError::BadRequest(format!("base64 decode failed: {e}")))
+}
+
+pub async fn face_embeddings(
+    State(state): State<ServerState>,
+    Json(req): Json<FaceEmbeddingRequest>,
+) -> Result<Json<FaceEmbeddingResponse>, ServerError> {
+    let bytes = match req.image {
+        VisionImageSource::Base64 { media_type: _, data } => {
+            let data = data.trim();
+            if let Some(rest) = data.strip_prefix("data:") {
+                let (_, payload) = rest
+                    .split_once(',')
+                    .ok_or_else(|| ServerError::BadRequest("malformed data URI".to_string()))?;
+                face_decode_base64(payload)?
+            } else {
+                face_decode_base64(data)?
+            }
+        }
+        other => {
+            return Err(ServerError::BadRequest(format!(
+                "face embedding takes base64 images only (got {other:?})"
+            )))
+        }
+    };
+
+    let result = state
+        .face
+        .embed_faces(&bytes)
+        .await
+        .map_err(|e| ServerError::NotImplemented(e))?;
+
+    Ok(Json(FaceEmbeddingResponse {
+        faces: result.faces,
+        dim: result.dim,
+    }))
+}
+
+// ---------------------------------------------------------------------------
 // Rerank
 // ---------------------------------------------------------------------------
 
@@ -839,17 +963,26 @@ pub async fn ocr_recognize(
     Json(req): Json<OcrRequest>,
 ) -> Result<Json<OcrResponse>, ServerError> {
     let model = req.model.clone();
-    let rt = state
-        .ocr_registry
-        .runtime_for(&model)
-        .await
-        .unwrap_or_else(|e| {
-            // Same fallback shape as the vision handler — but log the load
-            // error: a silent swap for the unavailable stub turns a missing
-            // onnxruntime.dll into a baffling 501.
-            tracing::warn!(model = %model, error = %e, "ocr: registry load failed, serving the unavailable stub");
-            state.ocr.clone()
-        });
+    // ⚠️⚠️ **空 `model` ＝「用默认那枚」**（2026-11-25）——
+    //
+    // ⇒ ⇒ **为什么**：客户端**学不到**注册表里的 `model_id` ⇒ ⇒
+    // `/v1/models` **只列上游目录条目**（目录里根本没有 OCR）⇒ ⇒
+    // 客户端只能打 `model: ''` ⇒ ⇒ 端脑得接住这一脚 ⇒ ⇒ 否则
+    // **探针式**的 OCR 那一支**结构性不可达**（永远 501）。
+    //
+    // ⇒ ⇒ **不通则已**：给了 id 就按 id 找（老行为一字未改）。
+    let rt = if model.trim().is_empty() {
+        state.ocr_registry.runtime_for_default().await
+    } else {
+        state.ocr_registry.runtime_for(&model).await
+    }
+    .unwrap_or_else(|e| {
+        // Same fallback shape as the vision handler — but log the load
+        // error: a silent swap for the unavailable stub turns a missing
+        // onnxruntime.dll into a baffling 501.
+        tracing::warn!(model = %model, error = %e, "ocr: registry load failed, serving the unavailable stub");
+        state.ocr.clone()
+    });
 
     rt.run(req)
         .await

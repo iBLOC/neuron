@@ -721,20 +721,20 @@ fn test_model_type_str_mapping() {
 
 #[test]
 #[serial_test::serial]
-fn test_parse_use_flash_attn_unset_returns_none() {
+fn test_parse_use_flash_attn_unset_is_not_set() {
     unsafe { std::env::remove_var("NEURON_USE_FLASH_ATTN") };
-    assert_eq!(parse_use_flash_attn(), None);
+    assert_eq!(parse_use_flash_attn(), FlashAttnRequest::NotSet);
 }
 
 #[test]
 #[serial_test::serial]
-fn test_parse_use_flash_attn_truthy_values_return_true() {
-    for v in ["1", "true", "TRUE", "yes"] {
+fn test_parse_use_flash_attn_truthy_values_request_flash_attn() {
+    for v in ["1", "true", "TRUE", "yes", "on", "ON"] {
         unsafe { std::env::set_var("NEURON_USE_FLASH_ATTN", v) };
         assert_eq!(
             parse_use_flash_attn(),
-            Some(true),
-            "value `{v}` should parse as Some(true)"
+            FlashAttnRequest::Enabled,
+            "value `{v}` should request FlashAttention-2"
         );
     }
     unsafe { std::env::remove_var("NEURON_USE_FLASH_ATTN") };
@@ -742,27 +742,32 @@ fn test_parse_use_flash_attn_truthy_values_return_true() {
 
 #[test]
 #[serial_test::serial]
-fn test_parse_use_flash_attn_falsy_values_return_false() {
-    for v in ["0", "false", "FALSE", "no"] {
+fn test_parse_use_flash_attn_falsy_values_disable_flash_attn() {
+    for v in ["0", "false", "FALSE", "no", "off", "OFF"] {
         unsafe { std::env::set_var("NEURON_USE_FLASH_ATTN", v) };
         assert_eq!(
             parse_use_flash_attn(),
-            Some(false),
-            "value `{v}` should parse as Some(false)"
+            FlashAttnRequest::Disabled,
+            "value `{v}` should turn FlashAttention-2 off"
         );
     }
     unsafe { std::env::remove_var("NEURON_USE_FLASH_ATTN") };
 }
 
+/// The unknown spelling is KEPT, not folded into "off": the operator
+/// has to see the value they actually typed. (This test used to assert
+/// the opposite — that an unknown value silently became `None` — which
+/// is exactly the "I asked for FA and got sdpa, silently" failure the
+/// 2026-11-24 knife killed.)
 #[test]
 #[serial_test::serial]
-fn test_parse_use_flash_attn_unknown_values_return_none() {
-    for v in ["on", "off", "", "2", "TRUE ", " true", "enabled"] {
+fn test_parse_use_flash_attn_unknown_values_are_kept_verbatim() {
+    for v in ["", "2", "enabled", "onn"] {
         unsafe { std::env::set_var("NEURON_USE_FLASH_ATTN", v) };
         assert_eq!(
             parse_use_flash_attn(),
-            None,
-            "value `{v}` should parse as None (fall back to false)"
+            FlashAttnRequest::Unknown(v.to_string()),
+            "value `{v}` should be kept verbatim"
         );
     }
     unsafe { std::env::remove_var("NEURON_USE_FLASH_ATTN") };
@@ -772,7 +777,7 @@ fn test_parse_use_flash_attn_unknown_values_return_none() {
 #[serial_test::serial]
 fn test_flash_attn_env_var_affects_mistral_config() {
     unsafe { std::env::set_var("NEURON_USE_FLASH_ATTN", "1") };
-    let use_flash_attn = parse_use_flash_attn().unwrap_or(false);
+    let use_flash_attn = matches!(parse_use_flash_attn(), FlashAttnRequest::Enabled);
     assert!(use_flash_attn, "NEURON_USE_FLASH_ATTN=1 should parse as true");
 
     let mut cfg = candle_transformers::models::mistral::Config::config_7b_v0_1(false);
@@ -790,7 +795,7 @@ fn test_flash_attn_env_var_affects_mistral_config() {
 #[serial_test::serial]
 fn test_flash_attn_qwen2_no_support() {
     unsafe { std::env::set_var("NEURON_USE_FLASH_ATTN", "1") };
-    let use_flash_attn = parse_use_flash_attn().unwrap_or(false);
+    let use_flash_attn = matches!(parse_use_flash_attn(), FlashAttnRequest::Enabled);
     assert!(use_flash_attn);
 
     let _cfg = candle_transformers::models::qwen2::Config {
@@ -817,8 +822,457 @@ fn test_flash_attn_qwen2_no_support() {
 #[serial_test::serial]
 fn test_flash_attn_llama_still_works() {
     unsafe { std::env::set_var("NEURON_USE_FLASH_ATTN", "1") };
-    let use_flash_attn = parse_use_flash_attn().unwrap_or(false);
+    let use_flash_attn = matches!(parse_use_flash_attn(), FlashAttnRequest::Enabled);
     assert!(use_flash_attn);
 
     unsafe { std::env::remove_var("NEURON_USE_FLASH_ATTN") };
+}
+// ---- FlashAttention resolver + operator-facing messages ----
+//
+// The knob is not the truth: `NEURON_USE_FLASH_ATTN=1` is a REQUEST.
+// What the candle leg actually does is decided by **four** prerequisites —
+// the `flash-attn` build feature, an architecture that has an FA path,
+// a CUDA device, and a **dtype the kernels accept** (f16/bf16 — *not*
+// f32) — and every missing one has to be NAMED. These judgments pin the
+// resolver's branch order and the messages' content, including the
+// negative control that a degraded state must not blame a prerequisite
+// that is actually present.
+//
+// The fourth one was found the hard way (real machine, 2026-11-25):
+// with f32 weights the FA path was entered and then died inside the
+// forward pass with `flash-attn is only supported for f16/bf16 (F32)` —
+// after the weights were loaded and the VRAM was taken. A prerequisite
+// that is only discovered inside the kernel has to be checked *before*
+// the model is built.
+
+/// Build a prerequisite set (feature, arch, device, dtype).
+fn prereqs(feature: bool, arch: bool, device: bool, dtype: bool) -> FlashAttnPrereqs {
+    FlashAttnPrereqs {
+        feature_compiled: feature,
+        arch_covered: arch,
+        device_is_cuda: device,
+        dtype_supported: dtype,
+    }
+}
+
+#[test]
+fn test_resolve_flash_attn_branch_order() {
+    // A missing feature makes every other question moot.
+    assert_eq!(
+        resolve_flash_attn(
+            &FlashAttnRequest::Enabled,
+            prereqs(false, false, false, false)
+        ),
+        FlashAttnStatus::FeatureNotCompiled
+    );
+    // Feature present, architecture missing: the device is irrelevant.
+    assert_eq!(
+        resolve_flash_attn(
+            &FlashAttnRequest::Enabled,
+            prereqs(true, false, false, false)
+        ),
+        FlashAttnStatus::ArchNotCovered
+    );
+    // Feature + architecture present, device missing.
+    assert_eq!(
+        resolve_flash_attn(
+            &FlashAttnRequest::Enabled,
+            prereqs(true, true, false, false)
+        ),
+        FlashAttnStatus::DeviceNotCuda
+    );
+    // Everything but the dtype ⇒ the kernel would die inside the
+    // forward pass ⇒ ⇒ the dtype has to be a *named* prerequisite.
+    assert_eq!(
+        resolve_flash_attn(
+            &FlashAttnRequest::Enabled,
+            prereqs(true, true, true, false)
+        ),
+        FlashAttnStatus::DtypeNotSupported
+    );
+    // Everything present ⇒ really on.
+    assert_eq!(
+        resolve_flash_attn(
+            &FlashAttnRequest::Enabled,
+            prereqs(true, true, true, true)
+        ),
+        FlashAttnStatus::Enabled
+    );
+}
+
+#[test]
+fn test_resolve_flash_attn_non_requests_never_degrade() {
+    // Not asking for FA is not a degraded state — it is the sdpa path.
+    assert_eq!(
+        resolve_flash_attn(
+            &FlashAttnRequest::NotSet,
+            prereqs(false, false, false, false)
+        ),
+        FlashAttnStatus::NotRequested
+    );
+    assert_eq!(
+        resolve_flash_attn(
+            &FlashAttnRequest::Disabled,
+            prereqs(false, false, false, false)
+        ),
+        FlashAttnStatus::DisabledByEnv
+    );
+    // An unknown spelling is its own state — it must never be reported
+    // as "off", which is the silence this knife exists to kill.
+    assert_eq!(
+        resolve_flash_attn(
+            &FlashAttnRequest::Unknown("onn".to_string()),
+            prereqs(false, false, false, false),
+        ),
+        FlashAttnStatus::UnknownValue
+    );
+}
+
+#[test]
+fn test_flash_attn_effective_flag_is_only_true_when_enabled() {
+    // The flag handed to the model builder must be the EFFECTIVE one.
+    // If it were the requested one, a CPU run in a build that has the
+    // feature would build a FlashAttention model and then die inside
+    // the attention kernel.
+    for status in [
+        FlashAttnStatus::NotRequested,
+        FlashAttnStatus::DisabledByEnv,
+        FlashAttnStatus::UnknownValue,
+        FlashAttnStatus::FeatureNotCompiled,
+        FlashAttnStatus::ArchNotCovered,
+        FlashAttnStatus::DeviceNotCuda,
+        FlashAttnStatus::DtypeNotSupported,
+    ] {
+        assert!(!status.is_enabled(), "{status:?} must not enable FlashAttention");
+    }
+    assert!(FlashAttnStatus::Enabled.is_enabled());
+}
+
+#[test]
+fn test_flash_attn_degraded_messages_name_the_missing_prerequisite() {
+    // Each degraded state must name what is missing — and ONLY what is
+    // missing, so the operator is not sent to fix the wrong thing.
+    let feature_msg = flash_attn_status_message(
+        FlashAttnStatus::FeatureNotCompiled,
+        &FlashAttnRequest::Enabled,
+        FlashAttnArch::Qwen2,
+    )
+    .expect("feature-not-compiled must say something");
+    assert!(feature_msg.contains("flash-attn"), "got: {feature_msg}");
+    assert!(
+        !feature_msg.contains("device is not CUDA"),
+        "must not blame the device: {feature_msg}"
+    );
+
+    let arch_msg = flash_attn_status_message(
+        FlashAttnStatus::ArchNotCovered,
+        &FlashAttnRequest::Enabled,
+        FlashAttnArch::Phi3,
+    )
+    .expect("arch-not-covered must say something");
+    assert!(arch_msg.contains("phi3"), "must name the architecture: {arch_msg}");
+    assert!(
+        !arch_msg.contains("device is not CUDA"),
+        "must not blame the device: {arch_msg}"
+    );
+
+    let device_msg = flash_attn_status_message(
+        FlashAttnStatus::DeviceNotCuda,
+        &FlashAttnRequest::Enabled,
+        FlashAttnArch::Qwen2,
+    )
+    .expect("device-not-cuda must say something");
+    assert!(device_msg.contains("CUDA"), "must name the device: {device_msg}");
+    assert!(
+        !device_msg.contains("build with"),
+        "must not blame the build: {device_msg}"
+    );
+}
+
+#[test]
+fn test_flash_attn_unknown_value_message_quotes_the_raw_value() {
+    let msg = flash_attn_status_message(
+        FlashAttnStatus::UnknownValue,
+        &FlashAttnRequest::Unknown("onn".to_string()),
+        FlashAttnArch::Qwen2,
+    )
+    .expect("an unknown spelling must be reported");
+    assert!(msg.contains("onn"), "must quote what the operator typed: {msg}");
+    assert!(
+        msg.contains("NEURON_USE_FLASH_ATTN"),
+        "must name the knob: {msg}"
+    );
+}
+
+#[test]
+fn test_flash_attn_silent_states_produce_no_message() {
+    // Never asked for / explicitly off / genuinely on: no noise. A knob
+    // that prints on every startup trains operators to ignore it.
+    assert!(
+        flash_attn_status_message(
+            FlashAttnStatus::NotRequested,
+            &FlashAttnRequest::NotSet,
+            FlashAttnArch::Qwen2
+        )
+        .is_none()
+    );
+    assert!(
+        flash_attn_status_message(
+            FlashAttnStatus::DisabledByEnv,
+            &FlashAttnRequest::Disabled,
+            FlashAttnArch::Qwen2
+        )
+        .is_none()
+    );
+    assert!(
+        flash_attn_status_message(
+            FlashAttnStatus::Enabled,
+            &FlashAttnRequest::Enabled,
+            FlashAttnArch::Qwen2
+        )
+        .is_none()
+    );
+}
+
+#[test]
+fn test_flash_attn_arch_coverage_matches_the_implementations() {
+    // The four covered architectures have a real FA path: qwen2/qwen3
+    // via src/llm/vendor/, llama via vendor/llama_hd.rs, mistral via
+    // candle-transformers' own `use_flash_attn` field.
+    assert!(FlashAttnArch::Qwen2.supports_flash_attn());
+    assert!(FlashAttnArch::Qwen3.supports_flash_attn());
+    assert!(FlashAttnArch::Llama.supports_flash_attn());
+    assert!(FlashAttnArch::Mistral.supports_flash_attn());
+    // Phi3 and ChatGlm have NO such field — the old code printed
+    // "use_flash_attn=true" for them while never passing the flag
+    // anywhere.
+    assert!(!FlashAttnArch::Phi3.supports_flash_attn());
+    assert!(!FlashAttnArch::ChatGlm.supports_flash_attn());
+}
+
+#[test]
+fn test_flash_attn_needs_a_dtype_the_kernel_accepts() {
+    // ⚠ **真机撞出来的那一条**（2026-11-25）：FA 内核只认 f16/bf16 ⇒ ⇒
+    // 默认的 f32 进不去 ⇒ ⇒ 旧口径会把 f32 的权重**照送进内核**，然后
+    // 在 forward pass 里炸（那时模型已加载、显存已占）⇒ ⇒ 现在它是
+    // **前提**，不是意外。
+    assert_eq!(
+        resolve_flash_attn(
+            &FlashAttnRequest::Enabled,
+            prereqs(true, true, true, false)
+        ),
+        FlashAttnStatus::DtypeNotSupported
+    );
+    assert!(!FlashAttnStatus::DtypeNotSupported.is_enabled());
+    // The dtype is the *last* prerequisite checked — an earlier missing
+    // one is the cheaper thing to explain.
+    assert_eq!(
+        resolve_flash_attn(
+            &FlashAttnRequest::Enabled,
+            prereqs(true, true, false, false)
+        ),
+        FlashAttnStatus::DeviceNotCuda
+    );
+}
+
+#[test]
+fn test_dtype_complaint_names_the_knob() {
+    // 「降级必须响亮**且点名缺的那一个前提**」⇒ ⇒ 抱怨里必须出现
+    // `NEURON_LLM_DTYPE=bf16` ⇒ ⇒ 不许只说「FA 用不了」。
+    let msg = flash_attn_status_message(
+        FlashAttnStatus::DtypeNotSupported,
+        &FlashAttnRequest::Enabled,
+        FlashAttnArch::Qwen2,
+    )
+    .expect("a requested-but-not-enabled FA must produce a line");
+    assert!(msg.contains("NEURON_LLM_DTYPE=bf16"), "got: {msg}");
+    assert!(msg.contains("f16/bf16"), "got: {msg}");
+    assert!(msg.contains("NOT in use"), "got: {msg}");
+}
+
+#[test]
+#[serial_test::serial]
+fn test_flash_attn_env_to_message_chain() {
+    // The full chain the operator experiences: env value → request →
+    // status → message. A build without the `flash-attn` feature has
+    // to say so out loud when FA was requested.
+    unsafe { std::env::set_var("NEURON_USE_FLASH_ATTN", "1") };
+    let request = parse_use_flash_attn();
+    assert_eq!(request, FlashAttnRequest::Enabled);
+    let status = resolve_flash_attn(
+        &request,
+        prereqs(
+            cfg!(feature = "flash-attn"),
+            FlashAttnArch::Qwen2.supports_flash_attn(),
+            false,
+            true,
+        ),
+    );
+    assert!(!status.is_enabled());
+    let msg = flash_attn_status_message(status, &request, FlashAttnArch::Qwen2)
+        .expect("a requested-but-not-enabled FA must produce a line");
+    if cfg!(feature = "flash-attn") {
+        // With the feature compiled, the missing prerequisite is the
+        // device (this judgment runs on the CPU).
+        assert_eq!(status, FlashAttnStatus::DeviceNotCuda);
+        assert!(msg.contains("device is not CUDA"), "got: {msg}");
+    } else {
+        assert_eq!(status, FlashAttnStatus::FeatureNotCompiled);
+        assert!(msg.contains("flash-attn"), "got: {msg}");
+    }
+    unsafe { std::env::remove_var("NEURON_USE_FLASH_ATTN") };
+}
+
+// ---- 刀 12：条目带来的 dtype 真的压过全局 env ----
+//
+// 「自动降级」要能救一个模型，光在**策略层**把 dtype 算对是不够的 ——
+// 决策必须**到达执行者**：物化权重时用的必须是条目里那一档。
+// 以前 dtype 只有一个全局 env 旋钮 ⇒ ⇒ 策略层算出的 bf16 到运行时会被
+// env 的 f32 盖掉 ⇒ ⇒ 「自动降级」是**假动作**（账本说 bf16、真实占用
+// 是 f32 的两倍，而账本正是用来算「装不装得下」的那份）。
+#[test]
+#[serial_test::serial]
+fn test_entry_dtype_overrides_global_env() {
+    unsafe { std::env::set_var("NEURON_LLM_DTYPE", "f32") };
+    assert_eq!(
+        resolve_weight_dtype(Some(crate::accel::DTypeChoice::BF16)),
+        DType::BF16,
+        "the entry's dtype must win over NEURON_LLM_DTYPE"
+    );
+    assert_eq!(
+        resolve_weight_dtype(Some(crate::accel::DTypeChoice::F32)),
+        DType::F32,
+        "an explicit f32 entry must not be silently promoted to bf16"
+    );
+    assert_eq!(
+        resolve_weight_dtype(Some(crate::accel::DTypeChoice::F16)),
+        DType::F16
+    );
+    assert_eq!(resolve_weight_dtype(None), DType::F32);
+    unsafe { std::env::set_var("NEURON_LLM_DTYPE", "bf16") };
+    assert_eq!(
+        resolve_weight_dtype(None),
+        DType::BF16,
+        "without an entry the global knob still applies"
+    );
+    unsafe { std::env::remove_var("NEURON_LLM_DTYPE") };
+}
+
+// ===========================================================================
+// 刀 16 续（2026-11-26）：**模型库落点的两个真相源**
+//
+// 真机逐字（产品形态：App 内起 neuron，端脑 HTTP 面真打一次）：
+//   engine_execution_error: llm load failed for 'qwen3-0.6b': neuron_error:
+//   CandleLlmRuntime load failed: not_implemented: CandleLlmRuntime:
+//   model 'qwen3-0.6b' not found under ./.neuron/models
+// ⇒ ⇒ 引擎**注册上了**（注册面走 `config.model_dirs` ＝ 宿主给的
+// `<data_dir>/models`），加载面却走 `resolved_model_dir()`（Android
+// 没有 `$HOME` ⇒ ⇒ 退化成 `./.neuron/models`）⇒ ⇒ **两个真相源**
+// ⇒ ⇒ 「注册上了、找不到权重」⇒ ⇒ 失败长得像「模型没下载」⇒ ⇒ 而盘上**明明有**。
+// ===========================================================================
+
+/// **纯函数**：LLM 权重的布局是 `<root>/llm/<id>`（模型库）或
+/// `<root>/<id>`（直接指路）⇒ ⇒ 判据住在纯函数里 ⇒ ⇒ 零环境依赖。
+#[test]
+fn pure_layout_of_llm_model_dir() {
+    let root = std::env::temp_dir().join(format!("neuron-llm-layout-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let lib = root.join("llm").join("qwen3-0.6b");
+    std::fs::create_dir_all(&lib).unwrap();
+    assert_eq!(
+        CandleLlmRuntime::find_llm_model_dir(&[root.clone()], "qwen3-0.6b"),
+        Some(lib),
+        "the library layout is <root>/llm/<id>"
+    );
+    let direct = root.join("qwen2.5-0.5b");
+    std::fs::create_dir_all(&direct).unwrap();
+    assert_eq!(
+        CandleLlmRuntime::find_llm_model_dir(&[root.clone()], "qwen2.5-0.5b"),
+        Some(direct),
+        "the direct layout is <root>/<id>"
+    );
+    assert_eq!(
+        CandleLlmRuntime::find_llm_model_dir(&[root.clone()], "not-there"),
+        None,
+        "a miss must not be guessed"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// **注册面与加载面必须找到【同一个目录】** —— 第五个洞的**正面**判据。
+#[test]
+fn the_registration_face_and_the_loading_face_find_the_same_dir() {
+    let root = std::env::temp_dir().join(format!("neuron-llm-same-dir-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let model_dir = root.join("llm").join("qwen3-0.6b");
+    std::fs::create_dir_all(&model_dir).unwrap();
+    std::fs::write(model_dir.join("config.json"), b"{}").unwrap();
+    std::fs::write(model_dir.join("tokenizer.json"), b"{}").unwrap();
+    std::fs::write(model_dir.join("model.safetensors"), b"stub").unwrap();
+    // 注册面（`LlmRuntimeRegistry::try_register_downloaded`）的判据：
+    // `<dir>/llm/<id>/model.safetensors` 存在。
+    assert!(
+        model_dir.join("model.safetensors").exists(),
+        "the registration face must see the weights"
+    );
+    // 加载面用的是**同一份根** ⇒ ⇒ 必须落在**同一个目录**上。
+    let loading_face = CandleLlmRuntime::resolve_model_path_in("qwen3-0.6b", &[root.clone()])
+        .unwrap_or_else(|e| panic!("the loading face must find it: {e}"));
+    assert_eq!(
+        loading_face, model_dir,
+        "the loading face must land on the very directory the registration face found"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// **嵌脑那一格**：`NEURON_MODELS_DIR` 也是 LLM 那条腿的根 ⇒ ⇒
+/// 引擎注册上了就**找得到权重**（此前只认 `$HOME/.neuron/models` ⇒ ⇒
+/// 手机上恒 `./.neuron/models`）。
+///
+/// ⚠️ **不碰进程环境**（注入取值函数）⇒ ⇒ 不与别的判据抢环境变量
+/// （共享工作树上并行测试互抢 env 是**已量过**的事）。
+#[test]
+fn the_embedded_slot_is_a_root_for_the_llm_leg() {
+    let root = std::env::temp_dir().join(format!("neuron-llm-embedded-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let model_dir = root.join("llm").join("qwen3-0.6b");
+    std::fs::create_dir_all(&model_dir).unwrap();
+    std::fs::write(model_dir.join("config.json"), b"{}").unwrap();
+    std::fs::write(model_dir.join("tokenizer.json"), b"{}").unwrap();
+    std::fs::write(model_dir.join("model.safetensors"), b"stub").unwrap();
+    // 端脑启动时把宿主给的 <data_dir>/models 指到 NEURON_MODELS_DIR ⇒ ⇒
+    // 那一格必须是根 ⇒ ⇒ 加载面就找得到。
+    let roots = crate::config::NeuronConfig::model_roots_from(
+        |var| {
+            if var == "NEURON_MODELS_DIR" {
+                Some(root.display().to_string())
+            } else {
+                None
+            }
+        },
+        std::env::temp_dir().join("neuron-llm-embedded-default"),
+    );
+    let path = CandleLlmRuntime::resolve_model_path_in("qwen3-0.6b", &roots)
+        .unwrap_or_else(|e| panic!("the embedded slot must be a root: {e}"));
+    assert_eq!(path, model_dir);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// **找不到 ⇒ ⇒ 错误里说清试过哪些目录**（不许只说一句「not found」）。
+#[test]
+fn the_miss_error_names_the_tried_dirs() {
+    let root = std::env::temp_dir().join(format!("neuron-llm-miss-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let err = CandleLlmRuntime::resolve_model_path_in("llm-miss-probe-model", &[root.clone()])
+        .unwrap_err();
+    assert!(
+        err.contains("llm-miss-probe-model"),
+        "err must name the model: {err}"
+    );
+    assert!(
+        err.contains(&root.display().to_string()),
+        "err must name the tried dir: {err}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
 }

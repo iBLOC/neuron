@@ -26,7 +26,7 @@ use crate::canonical::{
 };
 use crate::capabilities::Capability;
 use crate::engine::AnyCapabilityEngine;
-use crate::scheduler::{HoldingStream, ModelLease, ScheduleError};
+use crate::scheduler::{HoldingStream, ModelLease};
 
 pub async fn adapter_dispatch(
     State(state): State<crate::server::state::ServerState>,
@@ -180,13 +180,17 @@ pub async fn adapter_dispatch_at(
     }
 }
 
-/// Pull image blocks out of a `CanonicalLlmRequest` and convert
-/// them into `MediaAttachment`s ready to hand to a multimodal
-/// backend. Returns `Ok(None)` for text-only requests (so the
-/// caller can take the legacy dispatch path); `Ok(Some(vec))` for
-/// requests with at least one image; `Err(ApiError)` for malformed
-/// image sources (e.g. an http(s) URL when v1 only supports
-/// `data:` URIs).
+/// Pull **image / audio / video** blocks out of a `CanonicalLlmRequest`
+/// and convert them into `MediaAttachment`s ready to hand to a
+/// multimodal backend. Returns `Ok(None)` for text-only requests (so
+/// the caller can take the legacy dispatch path); `Ok(Some(vec))` for
+/// requests with at least one attachment; `Err(ApiError)` for malformed
+/// media sources (e.g. an http(s) URL when v1 only supports `data:`
+/// URIs).
+///
+/// ⚠️ **音频与视频都是媒体** —— 它们必须**当附件**走 ⇒ ⇒ 绝不折进
+/// prompt（折进去 ⇒ ⇒ 模型会照着那坨 base64 JSON 编故事 ⇒ ⇒
+/// **失败长得像成功**）。
 fn extract_media(
     llm_req: &crate::canonical::CanonicalLlmRequest,
 ) -> (Option<Vec<crate::canonical::MediaAttachment>>, Option<ApiError>) {
@@ -196,6 +200,39 @@ fn extract_media(
     let mut media: Vec<crate::canonical::MediaAttachment> = Vec::new();
     for m in &llm_req.messages {
         for b in &m.content {
+            // Audio IS media: it must travel as an attachment, never folded
+            // into the prompt as JSON (that makes the model narrate about a
+            // base64 blob instead of listening to it).
+            if let ContentBlock::Audio(aud) = b {
+                match &aud.source {
+                    crate::canonical::AudioSource::Base64 { media_type, data } => {
+                        match base64::engine::general_purpose::STANDARD.decode(data) {
+                            Ok(bytes) => media.push(crate::canonical::MediaAttachment {
+                                bytes,
+                                mime_type: media_type.clone(),
+                                detail: None,
+                            }),
+                            Err(e) => {
+                                return (
+                                    None,
+                                    Some(ApiError::Execution(format!(
+                                        "base64 decode failed for audio block: {e}"
+                                    ))),
+                                )
+                            }
+                        }
+                    }
+                    crate::canonical::AudioSource::Url(u) => {
+                        return (
+                            None,
+                            Some(ApiError::Execution(format!(
+                                "AudioSource::Url not supported in v1 (pre-decode to a \
+                                 data URI in the adapter): {u}"
+                            ))),
+                        )
+                    }
+                }
+            }
             if let ContentBlock::Image(img) = b {
                 match &img.source {
                     ImageSource::Base64 { media_type, data } => {
@@ -236,6 +273,48 @@ fn extract_media(
                     }
                 }
             }
+            // Video IS media too: the same rule as audio — it must travel as
+            // an attachment, never folded into the prompt as JSON (that makes
+            // the model narrate about a base64 blob instead of watching it).
+            if let ContentBlock::Video(vid) = b {
+                match &vid.source {
+                    crate::canonical::VideoSource::Base64 { media_type, data } => {
+                        match base64::engine::general_purpose::STANDARD.decode(data) {
+                            Ok(bytes) => media.push(crate::canonical::MediaAttachment {
+                                bytes,
+                                mime_type: media_type.clone(),
+                                detail: None,
+                            }),
+                            Err(e) => {
+                                return (
+                                    None,
+                                    Some(ApiError::Execution(format!(
+                                        "base64 decode failed for video block: {e}"
+                                    ))),
+                                )
+                            }
+                        }
+                    }
+                    crate::canonical::VideoSource::Url(u) => {
+                        return (
+                            None,
+                            Some(ApiError::Execution(format!(
+                                "VideoSource::Url not supported in v1 (pre-decode to a \
+                                 data URI in the adapter): {u}"
+                            ))),
+                        )
+                    }
+                    crate::canonical::VideoSource::Frames(_) => {
+                        return (
+                            None,
+                            Some(ApiError::Execution(
+                                "VideoSource::Frames is a frame list (the visual lane \
+                                 owns frames) - it is not one video payload".to_string(),
+                            )),
+                        )
+                    }
+                }
+            }
         }
     }
     if media.is_empty() {
@@ -270,7 +349,18 @@ async fn resolve_engine_legacy(
                 // ⚠️⚠️ 点名了不存在的模型 ⇒ 报错，不拿别的模型顶上（理由同
                 // `resolve_llm_target`）。
                 if !model_id.trim().is_empty() {
-                    return Err(ApiError::NoEngineForModel(model_id.to_string()));
+                    // ⚠️ **照实说为什么没注册**（2026-11-26 刀 16 续）——
+                    // 「**注册被拒**」（例如内存装不下）**不是**「模型没下载」
+                    // ⇒ ⇒ 不许只说后者 ⇒ ⇒ 失败长得像「没下载」⇒ ⇒ 而盘上
+                    // **明明有**那份权重（真机逐字：`no engine registered for
+                    // model 'qwen3-0.6b'` —— 那句话在骗人）。
+                    return Err(match state.llm_registry.registration_refusal(model_id) {
+                        Some(reason) => ApiError::NoEngineForModelWithReason {
+                            model_id: model_id.to_string(),
+                            reason,
+                        },
+                        None => ApiError::NoEngineForModel(model_id.to_string()),
+                    });
                 }
                 let first = state.llm_registry.registered.lock().unwrap().first().cloned();
                 if let Some(entry) = first {
@@ -342,7 +432,18 @@ fn resolve_llm_target(
     }
     // ⚠️⚠️ **点名了一个不存在的模型 ⇒ 老实报错**（理由见上面的注释）。
     if !requested.trim().is_empty() {
-        return Err(ApiError::NoEngineForModel(requested.to_string()));
+        // ⚠️ **但「不存在」与「被拒」是两件事**（2026-11-26 刀 16 续）——
+        // 「**注册被拒**」（例如内存装不下）**不是**「模型没下载」⇒ ⇒ 不许
+        // 只说后者 ⇒ ⇒ 失败长得像「没下载」⇒ ⇒ 而盘上**明明有**那份权重
+        // （真机逐字：`no engine registered for model 'qwen3-0.6b'` ——
+        // 那句话在骗人）。
+        return Err(match state.llm_registry.registration_refusal(requested) {
+            Some(reason) => ApiError::NoEngineForModelWithReason {
+                model_id: requested.to_string(),
+                reason,
+            },
+            None => ApiError::NoEngineForModel(requested.to_string()),
+        });
     }
     // 没点名 ⇒ 平台默认（第一个已注册的）。
     let first_entry = state.llm_registry.registered.lock().unwrap().first().cloned();
@@ -383,6 +484,78 @@ mod tests {
         CanonicalLlmRequest, CanonicalLlmResponse, CanonicalLlmStreamEvent, ContentBlock,
         ContentDelta, StopReason, TextBlock, UsageInfo,
     };
+
+    /// An audio block counts as MEDIA: that is what makes the request take
+    /// the multimodal leg instead of the text-only one (and it is what stops
+    /// the audio from being folded into the prompt as JSON).
+    #[test]
+    fn an_audio_block_counts_as_media() {
+        let req = CanonicalLlmRequest {
+            model: "qwen2-audio".into(),
+            system: vec![],
+            messages: vec![crate::canonical::CanonicalMessage {
+                role: crate::canonical::MessageRole::User,
+                content: vec![ContentBlock::Audio(crate::canonical::AudioBlock {
+                    source: crate::canonical::AudioSource::Base64 {
+                        media_type: "audio/wav".into(),
+                        data: "aGVsbG8=".into(),
+                    },
+                })],
+                tool_calls: vec![],
+                tool_call_id: None,
+                reasoning_content: None,
+            }],
+            tools: vec![],
+            sampling: crate::canonical::SamplingParams::default(),
+            stop_sequences: vec![],
+            stream: false,
+            cache_control: None,
+            metadata: Default::default(),
+            extensions: Default::default(),
+        };
+        let (media, err) = extract_media(&req);
+        assert!(err.is_none(), "extract_media must not error: {err:?}");
+        let media = media.expect("audio must count as media");
+        assert_eq!(media.len(), 1);
+        assert_eq!(media[0].bytes, b"hello".to_vec());
+        assert_eq!(media[0].mime_type, "audio/wav");
+    }
+
+    /// 视频块也**算媒体** —— 与音频同一条纪律 ⇒ ⇒ 不算媒体 ⇒ ⇒ 请求走
+    /// 纯文本腿 ⇒ ⇒ 而纯文本腿会把视频**折成 JSON** ⇒ ⇒ 双重的
+    /// 「失败长得像成功」。
+    #[test]
+    fn a_video_block_counts_as_media() {
+        let req = CanonicalLlmRequest {
+            model: "qwen2-video".into(),
+            system: vec![],
+            messages: vec![crate::canonical::CanonicalMessage {
+                role: crate::canonical::MessageRole::User,
+                content: vec![ContentBlock::Video(crate::canonical::VideoBlock {
+                    source: crate::canonical::VideoSource::Base64 {
+                        media_type: "video/mp4".into(),
+                        data: "aGVsbG8=".into(),
+                    },
+                })],
+                tool_calls: vec![],
+                tool_call_id: None,
+                reasoning_content: None,
+            }],
+            tools: vec![],
+            sampling: crate::canonical::SamplingParams::default(),
+            stop_sequences: vec![],
+            stream: false,
+            cache_control: None,
+            metadata: Default::default(),
+            extensions: Default::default(),
+        };
+        let (media, err) = extract_media(&req);
+        assert!(err.is_none(), "extract_media must not error: {err:?}");
+        let media = media.expect("video must count as media");
+        assert_eq!(media.len(), 1);
+        assert_eq!(media[0].bytes, b"hello".to_vec());
+        assert_eq!(media[0].mime_type, "video/mp4");
+    }
     use async_trait::async_trait;
     use axum::body::to_bytes;
     use std::sync::Mutex;

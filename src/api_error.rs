@@ -8,6 +8,16 @@ pub enum ApiError {
     #[error("no engine registered for model '{0}'")]
     NoEngineForModel(String),
 
+    /// ⚠️ **带原因的「没引擎」**（2026-11-26 刀 16 续）—— 「没注册」与
+    /// 「**注册被拒**」是**两件事** ⇒ ⇒ 只说前者 ⇒ ⇒ 失败长得像「模型没下载」
+    /// ⇒ ⇒ 而真相是「内存装不下」（真机逐字：`no engine registered for model
+    /// 'qwen3-0.6b'` —— 盘上**明明有**那份权重 ⇒ ⇒ 那句话在骗人）。
+    ///
+    /// ⚠️ **type code 与兄弟一样**（`no_engine_for_model`）⇒ ⇒ 客户端按 type
+    /// 分支的老代码**不受影响** ⇒ ⇒ 而 message 里多了真相。
+    #[error("no engine registered for model '{model_id}' (refused: {reason})")]
+    NoEngineForModelWithReason { model_id: String, reason: String },
+
     #[error("model '{model}' (engine '{engine}') does not support api_style '{api_style}'")]
     UnsupportedApiStyle {
         model: String,
@@ -60,7 +70,9 @@ impl ApiError {
     pub fn error_type(&self) -> &'static str {
         match self {
             Self::NoAdapterForPath(_) => "no_adapter_for_path",
-            Self::NoEngineForModel(_) => "no_engine_for_model",
+            Self::NoEngineForModel(_) | Self::NoEngineForModelWithReason { .. } => {
+                "no_engine_for_model"
+            }
             Self::UnsupportedApiStyle { .. } => "unsupported_api_style",
             Self::UnsupportedModality { .. } => "unsupported_modality",
             Self::UnsupportedFeature { .. } => "unsupported_feature",
@@ -76,7 +88,9 @@ impl ApiError {
 
     pub fn http_status(&self) -> u16 {
         match self {
-            Self::NoAdapterForPath(_) | Self::NoEngineForModel(_) => 404,
+            Self::NoAdapterForPath(_)
+            | Self::NoEngineForModel(_)
+            | Self::NoEngineForModelWithReason { .. } => 404,
             Self::UnsupportedApiStyle { .. }
             | Self::UnsupportedModality { .. }
             | Self::UnsupportedFeature { .. }
@@ -146,5 +160,20 @@ mod tests {
         };
         assert_eq!(e.error_type(), "unsupported_modality");
         assert_eq!(e.http_status(), 400);
+    }
+
+    /// **带原因的那一档** ⇒ ⇒ type code 与兄弟**一样**（客户端按 type 分支的
+    /// 老代码不受影响）⇒ ⇒ 而 message 里**有**真相。
+    #[test]
+    fn the_refused_variant_keeps_the_type_code_and_adds_the_reason() {
+        let e = ApiError::NoEngineForModelWithReason {
+            model_id: "qwen3-0.6b".to_string(),
+            reason: "内存装不下 f32".to_string(),
+        };
+        assert_eq!(e.error_type(), "no_engine_for_model");
+        assert_eq!(e.http_status(), 404);
+        let msg = e.to_string();
+        assert!(msg.contains("qwen3-0.6b"), "msg must name the model: {msg}");
+        assert!(msg.contains("内存装不下"), "msg must carry the real reason: {msg}");
     }
 }

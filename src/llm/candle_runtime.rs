@@ -3,7 +3,6 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use candle::{Device, DType, IndexOp};
-use candle_nn::VarBuilder;
 use candle_transformers::models::{chatglm, mistral, phi3, qwen2, qwen3};
 
 // The vendored llama (explicit `head_dim`) is upstream-compatible when
@@ -33,8 +32,6 @@ enum CausalModel {
     Qwen3(qwen3::ModelForCausalLM),
     #[cfg(feature = "flash-attn")]
     Qwen2Flash(vendor::qwen2::ModelForCausalLM),
-    #[cfg(feature = "flash-attn")]
-    Qwen3Flash(vendor::qwen3::ModelForCausalLM),
     Llama {
         model: llama::Llama,
         cache: llama::Cache,
@@ -51,8 +48,6 @@ impl CausalModel {
             CausalModel::Qwen3(m) => m.forward(input, offset),
             #[cfg(feature = "flash-attn")]
             CausalModel::Qwen2Flash(m) => m.forward(input, offset),
-            #[cfg(feature = "flash-attn")]
-            CausalModel::Qwen3Flash(m) => m.forward(input, offset),
             CausalModel::Llama { model, cache } => model.forward(input, offset, cache),
             CausalModel::Phi3(m) => m.forward(input, offset),
             CausalModel::Mistral(m) => m.forward(input, offset),
@@ -61,24 +56,246 @@ impl CausalModel {
     }
 }
 
-/// Resolve the `NEURON_USE_FLASH_ATTN` opt-in for FlashAttention-2.
+/// What `NEURON_USE_FLASH_ATTN` asked for.
 ///
-/// `flash-attn` requires the `candle-flash-attn` crate (built against
-/// CUDA) and a CUDA device at runtime; the sdpa path is correct for
-/// CPU and Metal. We default to `false` and only flip the Llama
-/// `Config::use_flash_attn` field when the user explicitly opts in.
+/// The raw value of an unrecognized spelling is kept instead of being
+/// folded into "off": a typo must not cost the operator the acceleration
+/// they asked for **in silence**.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum FlashAttnRequest {
+    /// The knob was not set at all.
+    NotSet,
+    /// FlashAttention-2 was asked for.
+    Enabled,
+    /// FlashAttention-2 was explicitly turned off.
+    Disabled,
+    /// The knob was set to a spelling we do not recognize.
+    Unknown(String),
+}
+
+/// The candle architectures, named.
 ///
-/// Accepted truthy values: `1`, `true`, `TRUE`, `yes`.
-/// Accepted falsy values: `0`, `false`, `FALSE`, `no`.
-/// Anything else (or unset) returns `None`, falling back to `false`.
-pub(crate) fn parse_use_flash_attn() -> Option<bool> {
-    crate::config::env_var("USE_FLASH_ATTN").and_then(|v| {
-        match v.as_str() {
-            "1" | "true" | "TRUE" | "yes" => Some(true),
-            "0" | "false" | "FALSE" | "no" => Some(false),
-            _ => None,
+/// The message has to say **which** architecture has no FlashAttention
+/// path — "FA is off" alone is not actionable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FlashAttnArch {
+    Qwen2,
+    Qwen3,
+    Llama,
+    Phi3,
+    Mistral,
+    ChatGlm,
+}
+
+impl FlashAttnArch {
+    /// Whether this architecture has a FlashAttention path at all.
+    ///
+    /// Qwen2/Qwen3 go through the vendored FA-capable modules
+    /// (`src/llm/vendor/{qwen2,qwen3}.rs`); Llama and Mistral carry
+    /// candle-transformers' own `use_flash_attn` field. **Phi3 and
+    /// ChatGlm have no such field** — the knob is not plumbed into
+    /// them at all, so they must be reported as "not covered" instead
+    /// of "enabled" (the old code printed "use_flash_attn=true" for
+    /// them while never passing the flag anywhere).
+    pub(crate) fn supports_flash_attn(self) -> bool {
+        matches!(
+            self,
+            FlashAttnArch::Qwen2
+                | FlashAttnArch::Qwen3
+                | FlashAttnArch::Llama
+                | FlashAttnArch::Mistral
+        )
+    }
+
+    /// The architecture name, for the operator-facing message.
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            FlashAttnArch::Qwen2 => "qwen2",
+            FlashAttnArch::Qwen3 => "qwen3",
+            FlashAttnArch::Llama => "llama",
+            FlashAttnArch::Phi3 => "phi3",
+            FlashAttnArch::Mistral => "mistral",
+            FlashAttnArch::ChatGlm => "chatglm",
         }
-    })
+    }
+}
+
+/// The effective FlashAttention state of the candle leg.
+///
+/// "asked for" and "in use" are two different facts, and only the
+/// second one may reach the kernels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FlashAttnStatus {
+    /// Never asked for ⇒ the sdpa path.
+    NotRequested,
+    /// Explicitly turned off ⇒ the sdpa path.
+    DisabledByEnv,
+    /// The spelling was not recognized ⇒ the sdpa path, and the value
+    /// is reported.
+    UnknownValue,
+    /// Asked for, but this build has no `flash-attn` feature ⇒ sdpa.
+    FeatureNotCompiled,
+    /// Asked for, but this architecture has no FlashAttention path ⇒ sdpa.
+    ArchNotCovered,
+    /// Asked for, feature and architecture are fine, but the device is
+    /// not CUDA ⇒ sdpa.
+    DeviceNotCuda,
+    /// Asked for, feature / architecture / device are all fine, but the
+    /// weights are in a dtype the FlashAttention kernels do not accept
+    /// (they need f16/bf16 — **not** f32) ⇒ sdpa.
+    ///
+    /// ⚠ 这一条是**真机撞出来的**：f32 权重下 FA 会被照送进内核，然后在
+    /// forward pass 里炸成 `flash-attn is only supported for f16/bf16
+    /// (F32)` ⇒ ⇒ 那时模型**已经加载**、显存**已经占了** ⇒ ⇒ 一个只在
+    /// 内核里才暴露的前提，就得**在建模之前**查。
+    DtypeNotSupported,
+    /// FlashAttention-2 is actually in use.
+    Enabled,
+}
+
+impl FlashAttnStatus {
+    /// Whether FlashAttention-2 is **in use** — as opposed to merely
+    /// requested.
+    ///
+    /// Only this flag may reach the kernels: every other status means
+    /// the sdpa path runs, so the model must be built accordingly.
+    pub(crate) fn is_enabled(self) -> bool {
+        matches!(self, FlashAttnStatus::Enabled)
+    }
+}
+
+/// Resolve `NEURON_USE_FLASH_ATTN`.
+///
+/// Accepted truthy values: `1`, `true`, `yes`, `on`.
+/// Accepted falsy values: `0`, `false`, `no`, `off`.
+/// Case-insensitive; surrounding whitespace is ignored.
+/// Unset ⇒ `NotSet`. Anything else ⇒ `Unknown(raw)` — the same
+/// spellings the mistralrs leg's `NEURON_MISTRALRS_MTP` knob accepts,
+/// so the two legs speak one language.
+pub(crate) fn parse_use_flash_attn() -> FlashAttnRequest {
+    let Some(raw) = crate::config::env_var("USE_FLASH_ATTN") else {
+        return FlashAttnRequest::NotSet;
+    };
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => FlashAttnRequest::Enabled,
+        "0" | "false" | "no" | "off" => FlashAttnRequest::Disabled,
+        _ => FlashAttnRequest::Unknown(raw),
+    }
+}
+
+/// The architecture of a loaded model, in the terms the FlashAttention
+/// message needs.
+pub(crate) fn flash_attn_arch_of(arch: &CausalArch) -> FlashAttnArch {
+    match arch {
+        CausalArch::Qwen2(_) => FlashAttnArch::Qwen2,
+        CausalArch::Qwen3(_) => FlashAttnArch::Qwen3,
+        CausalArch::Llama(_) => FlashAttnArch::Llama,
+        CausalArch::Phi3(_) => FlashAttnArch::Phi3,
+        CausalArch::Mistral(_) => FlashAttnArch::Mistral,
+        CausalArch::ChatGlm(_) => FlashAttnArch::ChatGlm,
+    }
+}
+
+/// Everything FlashAttention-2 needs, in one place.
+///
+/// **四个前提全齐**才行。第四个（`dtype_supported`）是**真机撞出来的**：
+/// f32 权重下 FA 会被照送进内核，然后在 forward pass 里炸成
+/// `flash-attn is only supported for f16/bf16 (F32)` ⇒ ⇒ 那时模型**已经
+/// 加载**、显存**已经占了**、加速**已经把服务带下去了** ⇒ ⇒ 一个只在
+/// 内核里才暴露的前提，就得**在建模之前**查。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FlashAttnPrereqs {
+    /// 本 build 编了 `flash-attn` feature。
+    pub feature_compiled: bool,
+    /// 这个架构在 candle 腿里有 FA 路径。
+    pub arch_covered: bool,
+    /// 设备是 CUDA。
+    pub device_is_cuda: bool,
+    /// 权重 dtype 是 FA 内核认的（f16/bf16 —— **不是** f32）。
+    pub dtype_supported: bool,
+}
+
+/// Decide what the candle leg will actually do.
+///
+/// The order matters: a missing feature is reported before a missing
+/// architecture, and a missing architecture before a missing device —
+/// each is a different thing to fix, and the first one found is the
+/// cheapest to explain. The dtype comes last: it is the **newest**
+/// prerequisite, and the one the operator can fix with a single knob.
+pub(crate) fn resolve_flash_attn(
+    request: &FlashAttnRequest,
+    prereqs: FlashAttnPrereqs,
+) -> FlashAttnStatus {
+    match request {
+        FlashAttnRequest::NotSet => FlashAttnStatus::NotRequested,
+        FlashAttnRequest::Disabled => FlashAttnStatus::DisabledByEnv,
+        FlashAttnRequest::Unknown(_) => FlashAttnStatus::UnknownValue,
+        FlashAttnRequest::Enabled => {
+            if !prereqs.feature_compiled {
+                return FlashAttnStatus::FeatureNotCompiled;
+            }
+            if !prereqs.arch_covered {
+                return FlashAttnStatus::ArchNotCovered;
+            }
+            if !prereqs.device_is_cuda {
+                return FlashAttnStatus::DeviceNotCuda;
+            }
+            if !prereqs.dtype_supported {
+                return FlashAttnStatus::DtypeNotSupported;
+            }
+            FlashAttnStatus::Enabled
+        }
+    }
+}
+
+/// The operator-facing line for a FlashAttention status.
+///
+/// Returns `None` when there is nothing to report (never asked for,
+/// explicitly off, or genuinely enabled). **Every degraded state must
+/// produce a line that names the missing prerequisite** — a silent
+/// fallback is the failure mode this whole thing exists to kill.
+pub(crate) fn flash_attn_status_message(
+    status: FlashAttnStatus,
+    request: &FlashAttnRequest,
+    arch: FlashAttnArch,
+) -> Option<String> {
+    match status {
+        FlashAttnStatus::NotRequested | FlashAttnStatus::DisabledByEnv => None,
+        FlashAttnStatus::Enabled => None,
+        FlashAttnStatus::UnknownValue => {
+            let raw = match request {
+                FlashAttnRequest::Unknown(raw) => raw,
+                _ => "",
+            };
+            Some(format!(
+                "NEURON_USE_FLASH_ATTN={raw:?} is not a recognized value — accepted spellings are \
+                 on/off (1/0, true/false, yes/no). The CUDA FlashAttention-2 path was NOT \
+                 enabled."
+            ))
+        }
+        FlashAttnStatus::FeatureNotCompiled => Some(
+            "NEURON_USE_FLASH_ATTN asked for the CUDA FlashAttention-2 path, but this build has no `flash-attn` \
+             feature (build with --features flash-attn). The CUDA FlashAttention-2 path is NOT in use."
+                .to_string(),
+        ),
+        FlashAttnStatus::ArchNotCovered => Some(format!(
+            "NEURON_USE_FLASH_ATTN asked for the CUDA FlashAttention-2 path, but the {} architecture has no \
+             FlashAttention path in the candle runtime (covered: qwen2, qwen3, llama, mistral). \
+             The CUDA FlashAttention-2 path is NOT in use.",
+            arch.name()
+        )),
+        FlashAttnStatus::DeviceNotCuda => Some(
+            "NEURON_USE_FLASH_ATTN asked for the CUDA FlashAttention-2 path, but the device is not CUDA (the \
+             FlashAttention kernels are CUDA-only). The CUDA FlashAttention-2 path is NOT in use."
+                .to_string(),
+        ),
+        FlashAttnStatus::DtypeNotSupported => Some(
+            "NEURON_USE_FLASH_ATTN asked for the CUDA FlashAttention-2 path, but the weights are f32 — the \
+             FlashAttention kernels only support f16/bf16. Set NEURON_LLM_DTYPE=bf16 (or f16). The CUDA \
+             FlashAttention-2 path is NOT in use."
+                .to_string(),
+        ),
+    }
 }
 
 struct LoadedModel {
@@ -107,20 +324,22 @@ struct LoadedModel {
 /// behaviour), `bf16` and `f16`. Anything unrecognised falls back to
 /// `f32` with a warning rather than failing the load: a typo in an
 /// env var should not take a whole model down.
-fn resolve_weight_dtype() -> DType {
-    match crate::config::env_var("LLM_DTYPE").as_deref() {
-        Some(raw) => match raw.trim().to_ascii_lowercase().as_str() {
-            "f32" | "float32" | "fp32" => DType::F32,
-            "bf16" | "bfloat16" => DType::BF16,
-            "f16" | "float16" | "fp16" | "half" => DType::F16,
-            other => {
-                eprintln!(
-                    "[neuron] NEURON_LLM_DTYPE={other:?} not recognised \
-                     (want f32 | bf16 | f16); falling back to f32"
-                );
-                DType::F32
-            }
-        },
+fn resolve_weight_dtype(override_dtype: Option<crate::accel::DTypeChoice>) -> DType {
+    // **一处解析，两处消费**：策略层（`accel::requested_dtype`，记账
+    // 用）与这条腿（真的物化）读的是**同一个**旋钮 ⇒ ⇒ 不许一个说 f32、
+    // 另一个说 bf16 —— 那会让记账比真实占用**少算一半**。
+    //
+    // ⚠ **条目带来的档位优先**（2026-11-25 刀 12）：策略层算出来的 dtype
+    // （可能是「装不下 ⇒ 无损降到 bf16」的结果）**必须到达这里** ⇒ ⇒
+    // 否则「自动降级」只是一句计划 —— 运行时仍按 f32 物化 ⇒ ⇒ 模型
+    // 照样装不下 ⇒ ⇒ **那个降级是假的**。
+    //
+    // 认不出来的值由 `requested_dtype()` 出声（原文照旧），这里只做映射。
+    let chosen = override_dtype.or_else(crate::accel::requested_dtype);
+    match chosen {
+        Some(crate::accel::DTypeChoice::F32) => DType::F32,
+        Some(crate::accel::DTypeChoice::BF16) => DType::BF16,
+        Some(crate::accel::DTypeChoice::F16) => DType::F16,
         None => DType::F32,
     }
 }
@@ -166,7 +385,38 @@ impl CandleLlmRuntime {
         }
     }
 
-    pub fn resolve_model_path(model: &str) -> Result<PathBuf, String> {
+    /// **纯函数**：在给定的根里找 LLM 权重目录 —— 布局是
+    /// `<root>/llm/<model_id>`（模型库布局，`/v1/models/pull` 落的那份）
+    /// **或** `<root>/<model_id>`（直接指路的那份）。
+    ///
+    /// ⚠️ **判据住在纯函数里**（零环境依赖）⇒ ⇒ 「布局对不对」与「根从哪儿来」
+    /// 是**两件可分别证的事** ⇒ ⇒ 不许把 env 读塞进来。
+    pub fn find_llm_model_dir(
+        roots: &[std::path::PathBuf],
+        model_id: &str,
+    ) -> Option<std::path::PathBuf> {
+        for root in roots {
+            for candidate in [root.join("llm").join(model_id), root.join(model_id)] {
+                if candidate.is_dir() {
+                    return Some(candidate);
+                }
+            }
+        }
+        None
+    }
+
+    /// 按**给定的根**解析模型目录（`NEURON_LLM_MODEL_PATH` 仍然优先）。
+    ///
+    /// ⚠️ **根从哪儿来**（2026-11-26 刀 16 续）：**注册面与加载面同一个真相源**
+    /// ⇒ ⇒ 注册面（boot 扫描／懒注册）走 `config.model_dirs`，加载面
+    /// 就必须走**同一份** ⇒ ⇒ 否则嵌脑形态里宿主给的目录只被用来**注册**，
+    /// 加载时却去 `./.neuron/models` 找 ⇒ ⇒ **引擎注册上了、权重找不到**
+    /// （真机逐字：`model 'qwen3-0.6b' not found under ./.neuron/models`
+    /// ⇒ ⇒ 失败长得像「模型没下载」）⇒ ⇒ 而盘上**明明有**那份权重。
+    pub fn resolve_model_path_in(
+        model: &str,
+        roots: &[std::path::PathBuf],
+    ) -> Result<PathBuf, String> {
         if let Ok(p) = crate::config::env_var_result("LLM_MODEL_PATH") {
             let path = PathBuf::from(p);
             ensure_dir(&path, "NEURON_LLM_MODEL_PATH")?;
@@ -175,20 +425,36 @@ impl CandleLlmRuntime {
 
         // No explicit env override: look the model up by id in the model
         // library that /v1/models/pull populates
-        // (`~/.neuron/models/llm/<id>`), so any downloaded model is
+        // (`<root>/llm/<id>`), so any downloaded model is
         // servable without extra configuration.
-        let root = crate::config::NeuronConfig::resolved_model_dir();
-        let candidates = [root.join("llm").join(model), root.join(model)];
-        for candidate in &candidates {
-            if candidate.is_dir() {
-                return Self::validate_model_dir(candidate);
-            }
+        if let Some(found) = Self::find_llm_model_dir(roots, model) {
+            return Self::validate_model_dir(&found);
         }
+        let tried: Vec<String> = roots
+            .iter()
+            .flat_map(|r| [r.join("llm").join(model), r.join(model)])
+            .map(|p| p.display().to_string())
+            .collect();
         Err(format!(
             "CandleLlmRuntime: model '{model}' not found under {} (set NEURON_LLM_MODEL_PATH \
-             to a directory containing config.json + tokenizer.json + *.safetensors)",
-            root.display()
+             to a directory containing config.json + tokenizer.json + *.safetensors; the embedded \
+             slot is NEURON_MODELS_DIR = <data_dir>/models)",
+            if tried.is_empty() {
+                "(no model root configured)".to_string()
+            } else {
+                tried.join(", ")
+            }
         ))
+    }
+
+    /// 按**进程级真相源**（`NeuronConfig::model_roots()`）解析模型目录。
+    ///
+    /// ⚠️ 那一格认 `NEURON_MODELS_DIR`（**嵌脑那一格**：端脑启动时把宿主
+    /// 给的 `<data_dir>/models` 指到那儿）⇒ ⇒ 与 ASR 那条腿**同一口径**
+    /// （那条腿早就有这个根）⇒ ⇒ 三条腿不许各说各话。
+    pub fn resolve_model_path(model: &str) -> Result<PathBuf, String> {
+        let roots = crate::config::NeuronConfig::model_roots();
+        Self::resolve_model_path_in(model, &roots)
     }
 
     /// Verify a directory holds a servable model (config + tokenizer +
@@ -329,8 +595,6 @@ impl CandleLlmRuntime {
             #[cfg(feature = "flash-attn")]
             CausalModel::Qwen2Flash(m) => m.clear_kv_cache(),
             CausalModel::Qwen3(m) => m.clear_kv_cache(),
-            #[cfg(feature = "flash-attn")]
-            CausalModel::Qwen3Flash(m) => m.clear_kv_cache(),
             CausalModel::Phi3(m) => m.clear_kv_cache(),
             CausalModel::Mistral(m) => m.clear_kv_cache(),
             // candle-transformers' ChatGlm exposes no cache-reset API;
@@ -508,11 +772,41 @@ impl Default for CandleLlmRuntime {
 
 #[async_trait]
 impl super::LlmRuntime for CandleLlmRuntime {
-    async fn load(model: &str, device: &DeviceSelection) -> Result<Box<dyn LlmRuntime>, NeuronError>
+    /// ⚠ 不带 dtype 的那一半 —— 走全局 env（`NEURON_LLM_DTYPE`）⇒ ⇒ 与
+    /// 策略层的起始档一致（刀 12：条目带来的档位由 `load_with_dtype` 负责）。
+    async fn load(
+        model: &str,
+        device: &DeviceSelection,
+    ) -> Result<Box<dyn LlmRuntime>, NeuronError>
     where
         Self: Sized,
     {
-        let path = Self::resolve_model_path(model).map_err(NeuronError::not_implemented)?;
+        let roots = crate::config::NeuronConfig::model_roots();
+        Self::load_with_dtype(
+            model,
+            device,
+            crate::accel::requested_dtype().unwrap_or(crate::accel::DTypeChoice::F32),
+            &roots,
+        )
+        .await
+    }
+
+    /// ⚠ **带 dtype 的那一半** —— 条目里的那一档在这里**真的**物化
+    /// （刀 12：决策必须到达执行者）。
+    async fn load_with_dtype(
+        model: &str,
+        device: &DeviceSelection,
+        dtype: crate::accel::DTypeChoice,
+        roots: &[std::path::PathBuf],
+    ) -> Result<Box<dyn LlmRuntime>, NeuronError>
+    where
+        Self: Sized,
+    {
+        // ⚠️ **按【给定的根】解析**（2026-11-26 刀 16 续）—— 那份根就是
+        // **注册面**用的那份（registry 把 `config.model_dirs` 递下来）
+        // ⇒ ⇒ 两面**结构上**同源 ⇒ ⇒ 「引擎注册上了、权重找不到」不再可能。
+        let path =
+            Self::resolve_model_path_in(model, roots).map_err(NeuronError::not_implemented)?;
         let dev = Self::map_device_selection(device).map_err(NeuronError::not_implemented)?;
 
         let (arch, model_type) = detect_arch(&path)
@@ -528,31 +822,88 @@ impl super::LlmRuntime for CandleLlmRuntime {
         // support is added in src/llm/vendor/ (requires the
         // --features flash-attn build + a CUDA device at runtime).
         // See `parse_use_flash_attn` for accepted values.
-        let use_flash_attn = parse_use_flash_attn().unwrap_or(false);
+        //
+        // "asked for" and "in use" are two different facts, and only
+        // the second one may reach the kernels. The flag handed to the
+        // model builder is therefore the EFFECTIVE one: the requested
+        // one used to build a FlashAttention model even when this
+        // build has no `flash-attn` feature or the device is not CUDA —
+        // and the old warning named only the missing feature, never
+        // the missing device (so a CPU run silently ran sdpa, and a
+        // CPU run with the feature compiled would have failed inside
+        // the attention kernel instead).
+        // 权重 dtype 必须**先**解析出来 —— FlashAttention 的四个前提里有
+        // 一个是 dtype（内核只认 f16/bf16），而它得在**建模之前**查。
+        //
+        // `bf16` halves peak weight memory versus the f32 default, which
+        // is the difference between fitting and paging out on a 16 GB host.
+        let weight_dtype = resolve_weight_dtype(Some(dtype));
+        eprintln!(
+            "[neuron] CandleLlmRuntime: weights dtype = {weight_dtype:?} (条目/策略给的档位优先；否则 NEURON_LLM_DTYPE=f32|bf16|f16)"
+        );
+
+        // ---- 「这一档跑得起来吗」—— 在**加载权重之前**就判 ----
+        //
+        // ⚠ **「装得下」不等于「跑得起来」** —— 真机撞过（qwen3-0.6b，CUDA，
+        // 本 build 编了 `flash-attn`）：f32 **加载成功**（显存真占着
+        // 2 460 MiB）⇒ ⇒ 然后炸在 forward pass（`flash-attn is only
+        // supported for f16/bf16 (F32)`）⇒ ⇒ 那是「加载成功、生成炸」——
+        // **服务会倒在最不该倒的地方**（用户要等到开口说话才看到）。
+        //
+        // ⚠ 所以这里在 **load 期**就拒 ⇒ ⇒ 服务不倒，用户拿到的是**一句真话**：
+        // 哪一档跑不了、为什么、怎么改 ⇒ ⇒ 不许「先加载上，炸了再说」。
+        //
+        // ⚠ **判据与策略层是同一个函数**（[`crate::accel::dtype_runnable_for_arch`]）
+        // ⇒ ⇒ 两边不许各说各话。
+        if !crate::accel::dtype_runnable_for_arch(
+            &model_type,
+            dtype,
+            dev.is_cuda(),
+            cfg!(feature = "flash-attn"),
+        ) {
+            return Err(NeuronError::invalid_input(format!(
+                "[neuron] 这一档（{}）**跑不起来** —— {} 族 ＋ CUDA 设备 ＋ 本 build 编了 \
+                 `flash-attn` ⇒ ⇒ 注意力会走 **CUDA flash 内核** ⇒ ⇒ 那颗内核**只认 \
+                 f16/bf16** ⇒ ⇒ f32 会**加载成功、前向炸**（不是加载时）⇒ ⇒ \
+                 请显式设 `NEURON_LLM_DTYPE=bf16`（或 f16）",
+                dtype.name(),
+                model_type,
+            )));
+        }
+
+        let fa_request = parse_use_flash_attn();
+        let fa_arch = flash_attn_arch_of(&arch);
+        let fa_status = resolve_flash_attn(
+            &fa_request,
+            FlashAttnPrereqs {
+                feature_compiled: cfg!(feature = "flash-attn"),
+                arch_covered: fa_arch.supports_flash_attn(),
+                device_is_cuda: dev.is_cuda(),
+                // FA 内核只接受 f16/bf16 ⇒ ⇒ 默认的 f32 **不能**进内核
+                // （真机实测：f32 下会炸在 forward pass —— 那时模型已加载、
+                // 显存已占）⇒ ⇒ 所以这里在 load 期就把它挡下来。
+                dtype_supported: !matches!(weight_dtype, DType::F32),
+            },
+        );
+        let use_flash_attn = fa_status.is_enabled();
         if use_flash_attn {
-            match &arch {
-                CausalArch::Qwen2(_) | CausalArch::Qwen3(_) => {
-                    #[cfg(feature = "flash-attn")]
-                    eprintln!(
-                        "[neuron] CandleLlmRuntime: Qwen2/3 use_flash_attn=true (requires CUDA)"
-                    );
-                    #[cfg(not(feature = "flash-attn"))]
-                    eprintln!(
-                        "[neuron] WARNING: NEURON_USE_FLASH_ATTN=1 is set but flash-attn feature \
-                         not enabled; re-build with --features flash-attn. Using sdpa."
-                    );
-                }
-                CausalArch::Mistral(_) => {
-                    eprintln!(
-                        "[neuron] CandleLlmRuntime: use_flash_attn=true (requires --features flash-attn and CUDA)"
-                    );
-                }
-                _ => {
-                    eprintln!(
-                        "[neuron] CandleLlmRuntime: use_flash_attn=true (requires --features flash-attn and CUDA)"
-                    );
-                }
-            }
+            // The positive half of the very same fact. "Asked for" is
+            // not "in use", so the state that IS in use has to be
+            // observable too — otherwise the only trace of FA in a log
+            // is the complaint about its absence, and a reader cannot
+            // tell "on" from "never asked".
+            eprintln!(
+                "[neuron] CandleLlmRuntime: FlashAttention-2 IS IN USE (feature compiled, device is CUDA, arch={}, dtype={:?})",
+                fa_arch.name(),
+                weight_dtype
+            );
+        }
+        if let Some(msg) = flash_attn_status_message(fa_status, &fa_request, fa_arch) {
+            // eprintln!, not tracing: neuron installs no tracing
+            // subscriber of its own, so a tracing event is a silent
+            // sink in a bare host — and "I asked for FA and got sdpa"
+            // is exactly the message that must not be lost.
+            eprintln!("[neuron] ERROR: {msg}");
         }
 
         let safetensors_files: Vec<PathBuf> = std::fs::read_dir(&path)
@@ -576,13 +927,6 @@ impl super::LlmRuntime for CandleLlmRuntime {
         let safetensors_paths: Vec<&std::path::Path> =
             safetensors_files.iter().map(|p| p.as_path()).collect();
 
-        // `bf16` halves peak weight memory versus the f32 default, which
-        // is the difference between fitting and paging out on a 16 GB host.
-        let weight_dtype = resolve_weight_dtype();
-        eprintln!(
-            "[neuron] CandleLlmRuntime: weights dtype = {weight_dtype:?} (NEURON_LLM_DTYPE=f32|bf16|f16)"
-        );
-
         let vb = unsafe {
             crate::candle_compat::from_mmaped_safetensors(safetensors_paths.as_slice(), weight_dtype, &dev)
         }
@@ -590,25 +934,47 @@ impl super::LlmRuntime for CandleLlmRuntime {
 
         let model = match &arch {
             CausalArch::Qwen2(cfg) => {
+                // The FA build of Qwen2 is the **vendored** module:
+                // upstream candle-transformers has no FlashAttention path
+                // for qwen2 at all.
+                //
+                // The flag that reaches the model builder is the EFFECTIVE
+                // one, and both branches have to fold into a single
+                // expression: the old code `return`ed a `CausalModel`
+                // out of a function whose return type is
+                // `Box<dyn LlmRuntime>` (E0308) — the `flash-attn`
+                // feature had never been compiled in this repo.
                 #[cfg(feature = "flash-attn")]
-                if use_flash_attn {
+                let model = if use_flash_attn {
                     let flash_cfg: vendor::qwen2::Config = cfg.clone().into();
                     let m = vendor::qwen2::ModelForCausalLM::new(&flash_cfg, vb)
                         .map_err(|e| NeuronError::not_implemented(format!("build Qwen2 (flash): {e}")))?;
-                    return Ok(CausalModel::Qwen2Flash(m));
-                }
-                let m = qwen2::ModelForCausalLM::new(cfg, vb)
-                    .map_err(|e| NeuronError::not_implemented(format!("build Qwen2: {e}")))?;
-                CausalModel::Qwen2(m)
+                    CausalModel::Qwen2Flash(m)
+                } else {
+                    let m = qwen2::ModelForCausalLM::new(cfg, vb)
+                        .map_err(|e| NeuronError::not_implemented(format!("build Qwen2: {e}")))?;
+                    CausalModel::Qwen2(m)
+                };
+                #[cfg(not(feature = "flash-attn"))]
+                let model = {
+                    let m = qwen2::ModelForCausalLM::new(cfg, vb)
+                        .map_err(|e| NeuronError::not_implemented(format!("build Qwen2: {e}")))?;
+                    CausalModel::Qwen2(m)
+                };
+                model
             }
             CausalArch::Qwen3(cfg) => {
-                #[cfg(feature = "flash-attn")]
-                if use_flash_attn {
-                    let flash_cfg: vendor::qwen3::Config = cfg.clone().into();
-                    let m = vendor::qwen3::ModelForCausalLM::new(&flash_cfg, vb)
-                        .map_err(|e| NeuronError::not_implemented(format!("build Qwen3/3.5 (flash): {e}")))?;
-                    return Ok(CausalModel::Qwen3Flash(m));
-                }
+                // Qwen3 needs NO vendored module: the pinned
+                // candle-transformers (rev 66a8cf1, 0.11) already ships a
+                // FlashAttention path for qwen3 — the fused **CPU** kernel
+                // when the `flash-attn` feature is off, and the **CUDA**
+                // FA2 kernel when it is on and the device is a GPU.
+                //
+                // The vendored copy was a leftover from an older pin
+                // (0.9.2), it duplicated what upstream now does, and it
+                // never compiled against the pinned candle-flash-attn
+                // API (`softmax_scale` changed from `Option<f64>` to
+                // `f32`).
                 let m = qwen3::ModelForCausalLM::new(cfg, vb)
                     .map_err(|e| NeuronError::not_implemented(format!("build Qwen3/3.5: {e}")))?;
                 CausalModel::Qwen3(m)

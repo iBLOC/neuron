@@ -26,6 +26,8 @@ pub mod contract;
 pub mod dit;
 pub mod model;
 pub mod runtime;
+#[cfg(feature = "ming3-clone")]
+pub mod spkemb;
 pub mod tasks;
 pub mod weights;
 

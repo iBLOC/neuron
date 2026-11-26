@@ -1,5 +1,5 @@
 use crate::canonical::{
-    CanonicalLlmRequest, CanonicalLlmResponse, ContentBlock, ImageSource,
+    AudioSource, CanonicalLlmRequest, CanonicalLlmResponse, ContentBlock, ImageSource,
     MediaAttachment, MessageRole, StopReason, TextBlock, UsageInfo,
 };
 use crate::llm::{ChatMessage, ChatRequest, ChatResponse};
@@ -16,7 +16,8 @@ pub fn canonical_to_chat_request(req: &CanonicalLlmRequest) -> Result<ChatReques
             MessageRole::Tool => "tool",
             MessageRole::System => "system",
         };
-        let content = blocks_to_text(&m.content);
+        let content = blocks_to_text(&m.content)
+            .map_err(|e| format!("canonical->chat: {e}"))?;
         // The canonical message's reasoning slot carries a prior
         // assistant turn's chain-of-thought; forward it so the backend
         // can re-wrap it per its own template. (Reasoning that arrived
@@ -78,6 +79,31 @@ pub fn canonical_to_chat_request_with_media(
                     text.push(' ');
                     media.push(attachment);
                 }
+                ContentBlock::Audio(aud) => {
+                    let attachment = audio_block_to_media(aud)?;
+                    text.push(' ');
+                    text.push_str(marker);
+                    text.push(' ');
+                    media.push(attachment);
+                }
+                ContentBlock::Video(vid) => {
+                    let attachment = video_block_to_media(vid)?;
+                    text.push(' ');
+                    text.push_str(marker);
+                    text.push(' ');
+                    media.push(attachment);
+                }
+                // ⚠️ **文档不许被折成 JSON** —— 折进去模型就会对着那堆引号
+                // 胡言乱语（而不是读文档）⇒ ⇒ **失败长得像成功** ⇒ ⇒
+                // 明确拒绝（与音频／视频同一条纪律）。
+                ContentBlock::Document(_) => {
+                    return Err(
+                        "document input only works on a backend that can read \
+                         documents (none today) - refusing to fold it into the \
+                         prompt as JSON"
+                            .to_string(),
+                    );
+                }
                 other => {
                     if let Ok(j) = serde_json::to_string(other) {
                         text.push_str(&j);
@@ -132,16 +158,89 @@ fn use_base64_decode(data: &str) -> Result<Vec<u8>, String> {
         .map_err(|e| format!("base64 decode failed: {e}"))
 }
 
-fn blocks_to_text(blocks: &[ContentBlock]) -> String {
+/// Convert a canonical AudioBlock into a MediaAttachment ready to hand to a
+/// multimodal backend. Only the Base64 source variant is supported in v1.
+fn audio_block_to_media(aud: &crate::canonical::AudioBlock) -> Result<MediaAttachment, String> {
+    match &aud.source {
+        AudioSource::Base64 { media_type, data } => Ok(MediaAttachment {
+            bytes: use_base64_decode(data)?,
+            mime_type: media_type.clone(),
+            detail: None,
+        }),
+        AudioSource::Url(u) => Err(format!(
+            "AudioSource::Url not supported in v1 (pre-decode to a data URI in the \
+             adapter): {u}"
+        )),
+    }
+}
+
+/// Convert a canonical VideoBlock into a MediaAttachment ready to hand to a
+/// multimodal backend. Only the Base64 source variant is supported.
+///
+/// ⚠️ **Frames is NOT a video payload** —— 帧是**视觉那条路**（枕叶）的东西
+/// ⇒ ⇒ 在 chat 载荷里明确报错，不许悄悄把它当成一段视频。
+fn video_block_to_media(vid: &crate::canonical::VideoBlock) -> Result<MediaAttachment, String> {
+    match &vid.source {
+        crate::canonical::VideoSource::Base64 { media_type, data } => Ok(MediaAttachment {
+            bytes: use_base64_decode(data)?,
+            mime_type: media_type.clone(),
+            detail: None,
+        }),
+        crate::canonical::VideoSource::Url(u) => Err(format!(
+            "VideoSource::Url not supported in v1 (pre-decode to a data URI in the \
+             adapter): {u}"
+        )),
+        crate::canonical::VideoSource::Frames(_) => Err(
+            "VideoSource::Frames is a frame list (the visual lane owns frames) - \
+             refusing to treat it as one video payload"
+                .to_string(),
+        ),
+    }
+}
+
+/// Fold the canonical blocks into the text-only wire shape.
+///
+/// Audio is REFUSED here, on purpose: folding a base64 blob into the prompt
+/// makes the model narrate about the blob instead of listening to it \
+/// (a failure that looks like success). Audio only works on a multimodal
+/// backend (llama.cpp + mtmd) — see canonical_to_chat_request_with_media.
+fn blocks_to_text(blocks: &[ContentBlock]) -> Result<String, String> {
     let mut out = String::new();
     for b in blocks {
         match b {
             ContentBlock::Text(t) => out.push_str(&t.text),
             ContentBlock::Reasoning(r) => out.push_str(&r.text),
+            ContentBlock::Audio(_) => {
+                return Err(
+                    "audio input only works on a multimodal backend (llama.cpp + mtmd): \
+                     this backend does not eat audio - refusing to fold it into the \
+                     prompt as JSON"
+                        .to_string(),
+                );
+            }
+            ContentBlock::Video(_) => {
+                return Err(
+                    "video input only works on a backend that can decode video \
+                     (there is none today) - refusing to fold it into the prompt \
+                     as JSON"
+                        .to_string(),
+                );
+            }
+            // ⚠️ **文档与音频／视频是**同一族**问题** —— 折成 JSON 塞进 prompt
+            // ⇒ ⇒ 模型会**对着那堆引号胡言乱语**（而不是读文档）⇒ ⇒
+            // **失败长得像成功** ⇒ ⇒ 明确拒绝（**不许**折）。
+            ContentBlock::Document(_) => {
+                return Err(
+                    "document input only works on a backend that can read \
+                     documents (none today) - refusing to fold it into the \
+                     prompt as JSON"
+                        .to_string(),
+                );
+            }
             other => { if let Ok(j) = serde_json::to_string(other) { out.push_str(&j); } }
         }
     }
-    out
+    Ok(out)
 }
 
 pub fn chat_response_to_canonical(model_id: &str, resp: ChatResponse) -> CanonicalLlmResponse {
@@ -197,6 +296,194 @@ mod tests {
         CanonicalLlmRequest, ContentBlock, ImageBlock, ImageSource, MediaAttachment,
         MessageRole, SamplingParams, SystemBlock, TextBlock,
     };
+
+    fn make_request_with_audio() -> CanonicalLlmRequest {
+        CanonicalLlmRequest {
+            model: "qwen2-audio".into(),
+            system: vec![],
+            messages: vec![crate::canonical::CanonicalMessage {
+                role: MessageRole::User,
+                content: vec![
+                    ContentBlock::Text(TextBlock { text: "listen".into() }),
+                    ContentBlock::Audio(crate::canonical::AudioBlock {
+                        source: crate::canonical::AudioSource::Base64 {
+                            media_type: "audio/wav".into(),
+                            data: "aGVsbG8=".into(),
+                        },
+                    }),
+                ],
+                tool_calls: vec![],
+                tool_call_id: None,
+                reasoning_content: None,
+            }],
+            tools: vec![],
+            sampling: SamplingParams::default(),
+            stop_sequences: vec![],
+            stream: false,
+            cache_control: None,
+            metadata: Default::default(),
+            extensions: Default::default(),
+        }
+    }
+
+    /// Audio becomes an ATTACHMENT (bytes + mime), and the prompt gets the
+    /// media marker instead of the base64 blob. The blob must NOT be in the
+    /// text: a base64 payload inside the prompt makes the model narrate about
+    /// the blob instead of listening to it (failure that looks like success).
+    #[test]
+    fn an_audio_block_becomes_a_media_attachment_not_a_json_blob() {
+        let req = make_request_with_audio();
+        let (chat_req, media) =
+            canonical_to_chat_request_with_media(&req).expect("media path");
+        assert_eq!(media.len(), 1);
+        assert_eq!(media[0].bytes, b"hello".to_vec());
+        assert_eq!(media[0].mime_type, "audio/wav");
+        let text = &chat_req.messages[0].content;
+        assert!(
+            !text.contains("aGVsbG8="),
+            "the base64 payload must not be folded into the prompt: {text}"
+        );
+        assert!(
+            text.contains(crate::canonical::mtmd_marker()),
+            "the media marker must be in the prompt: {text}"
+        );
+    }
+
+
+    /// 一份**文档载荷**（PDF）—— 与视频／音频同一族形状。
+    fn make_request_with_document() -> CanonicalLlmRequest {
+        CanonicalLlmRequest {
+            model: "qwen3-0.6b".into(),
+            system: vec![],
+            messages: vec![crate::canonical::CanonicalMessage {
+                role: MessageRole::User,
+                content: vec![
+                    ContentBlock::Text(TextBlock { text: "总结这份 PDF".into() }),
+                    ContentBlock::Document(crate::canonical::DocumentBlock {
+                        source: crate::canonical::ImageSource::Base64 {
+                            media_type: "application/pdf".into(),
+                            data: "aGVsbG8=".into(),
+                        },
+                        filename: Some("doc.pdf".into()),
+                    }),
+                ],
+                tool_calls: vec![],
+                tool_call_id: None,
+                reasoning_content: None,
+            }],
+            tools: vec![],
+            sampling: SamplingParams::default(),
+            stop_sequences: vec![],
+            stream: false,
+            cache_control: None,
+            metadata: Default::default(),
+            extensions: Default::default(),
+        }
+    }
+    fn make_request_with_video() -> CanonicalLlmRequest {
+        CanonicalLlmRequest {
+            model: "qwen2-video".into(),
+            system: vec![],
+            messages: vec![crate::canonical::CanonicalMessage {
+                role: MessageRole::User,
+                content: vec![
+                    ContentBlock::Text(TextBlock { text: "watch".into() }),
+                    ContentBlock::Video(crate::canonical::VideoBlock {
+                        source: crate::canonical::VideoSource::Base64 {
+                            media_type: "video/mp4".into(),
+                            data: "aGVsbG8=".into(),
+                        },
+                    }),
+                ],
+                tool_calls: vec![],
+                tool_call_id: None,
+                reasoning_content: None,
+            }],
+            tools: vec![],
+            sampling: SamplingParams::default(),
+            stop_sequences: vec![],
+            stream: false,
+            cache_control: None,
+            metadata: Default::default(),
+            extensions: Default::default(),
+        }
+    }
+
+    /// 视频载荷在**多模态腿**里必须变成**附件** —— 不是折进 prompt 的 JSON。
+    ///
+    /// ⚠️ 旧版把视频落进 `other =>` ⇒ ⇒ 整段 base64 JSON **混进 prompt**
+    /// ⇒ ⇒ 模型会照着那坨 JSON 编故事 ⇒ ⇒ **失败长得像成功**。
+    #[test]
+    fn a_video_block_becomes_a_media_attachment_not_a_json_blob() {
+        let req = make_request_with_video();
+        let (chat_req, media) =
+            canonical_to_chat_request_with_media(&req).expect("media path");
+        assert_eq!(media.len(), 1);
+        assert_eq!(media[0].bytes, b"hello".to_vec());
+        assert_eq!(media[0].mime_type, "video/mp4");
+        let text = &chat_req.messages[0].content;
+        assert!(
+            !text.contains("aGVsbG8="),
+            "the base64 payload must not be folded into the prompt: {text}"
+        );
+        assert!(
+            text.contains(crate::canonical::mtmd_marker()),
+            "the media marker must be in the prompt: {text}"
+        );
+    }
+
+    /// 纯文本腿**拒绝**视频 —— 与音频对称：不能吃就说，不能折。
+    #[test]
+    fn the_text_only_path_refuses_video_outright() {
+        let req = make_request_with_video();
+        let err = canonical_to_chat_request(&req)
+            .expect_err("the text-only path must refuse video");
+        assert!(
+            err.contains("video"),
+            "the error must name the culprit, got {err}"
+        );
+    }
+
+
+    /// 纯文本腿**拒绝**文档 —— 与音频／视频同一条纪律：不能吃就说，不许折。
+    ///
+    /// ⚠️ **这一条钉的是「折成 JSON」那条死路** —— 文档此前落进 `other`
+    /// 分支 ⇒ ⇒ 被折成 JSON 塞进 prompt ⇒ ⇒ 模型对着那堆引号胡言乱语 ⇒ ⇒
+    /// **失败长得像成功**。
+    #[test]
+    fn the_text_only_path_refuses_document_outright() {
+        let req = make_request_with_document();
+        let err = canonical_to_chat_request(&req)
+            .expect_err("the text-only path must refuse document");
+        assert!(
+            err.contains("document"),
+            "the error must name the culprit, got {err}"
+        );
+    }
+
+    /// 多模态腿**也**不许把文档折成 JSON —— 折进去模型看不见文档。
+    #[test]
+    fn a_document_block_is_never_folded_into_a_json_blob() {
+        let req = make_request_with_document();
+        let err = canonical_to_chat_request_with_media(&req)
+            .expect_err("the multimodal path must refuse document too");
+        assert!(
+            err.contains("document"),
+            "the error must name the culprit, got {err}"
+        );
+    }
+    /// The text-only leg REFUSES audio outright: a backend that cannot eat
+    /// audio must say so, not receive a base64 blob inside the prompt.
+    #[test]
+    fn the_text_only_path_refuses_audio_outright() {
+        let req = make_request_with_audio();
+        let err = canonical_to_chat_request(&req)
+            .expect_err("the text-only path must refuse audio");
+        assert!(
+            err.contains("audio"),
+            "the error must name the culprit, got {err}"
+        );
+    }
     use base64::Engine as _;
 
     fn make_request_with_image() -> CanonicalLlmRequest {

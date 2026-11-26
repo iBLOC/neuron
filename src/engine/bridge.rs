@@ -27,6 +27,19 @@ pub struct LlmRuntimeBridge {
     name: String,
 }
 
+/// 某个**旧运行时**的输入模态（读面与桥共用**同一条**判据）。
+///
+/// ⚠️ **不加载权重** —— 这是个纯函数（只看运行时自己报的 flag）⇒ ⇒
+/// 读面用它回答「这枚模型能不能吃音频」时**不会**把几 GB 权重拉进内存。
+pub fn input_modalities_of(
+    inner: &dyn ChatLlmRuntime,
+) -> std::collections::BTreeSet<crate::capabilities::Modality> {
+    crate::capabilities::audio_input::backend_input_modalities(
+        inner.supports_image(),
+        inner.supports_audio(),
+    )
+}
+
 impl LlmRuntimeBridge {
     pub fn new(inner: std::sync::Arc<dyn ChatLlmRuntime>, model_id: &str) -> Self {
         // The bridge can only promise what the wrapped runtime can do.
@@ -34,11 +47,13 @@ impl LlmRuntimeBridge {
         // inner (mistralrs, llama.cpp with an mmproj) gets image input
         // advertised — otherwise the capability surface would deny
         // exactly what the bridge forwards.
-        let mut input_modalities = std::collections::BTreeSet::new();
-        input_modalities.insert(crate::capabilities::Modality::TextInput);
-        if inner.supports_media() {
-            input_modalities.insert(crate::capabilities::Modality::ImageInput);
-        }
+        // ⚠️ **图与音分开** —— 旧判据一个 `supports_media()` 混了两件事
+        // ⇒ ⇒ 「能吃音频」在能力面上**根本看不见** ⇒ ⇒ 「评估 LLM 能否
+        // 输入音频」那一格**没有判据源**。
+        let input_modalities = crate::capabilities::audio_input::backend_input_modalities(
+            inner.supports_image(),
+            inner.supports_audio(),
+        );
         let capabilities = ModelCapabilities {
             engine_impl: "bridge".into(),
             model_id: model_id.into(),
@@ -368,6 +383,96 @@ mod tests {
 
     fn make_bridge() -> LlmRuntimeBridge {
         LlmRuntimeBridge::new(Arc::new(MockChatRuntime), "test-model")
+    }
+
+    /// 一个**只吃音频**的运行时（图不许被顺带宣称）。
+    struct MockAudioRuntime;
+
+    #[async_trait]
+    impl crate::llm::ChatLlmRuntime for MockAudioRuntime {
+        async fn load(
+            _model: &str,
+            _device: &crate::config::DeviceSelection,
+        ) -> crate::llm::ChatResult<Box<dyn crate::llm::ChatLlmRuntime>> {
+            Ok(Box::new(MockAudioRuntime))
+        }
+
+        async fn chat(
+            &self,
+            _req: ChatRequest,
+        ) -> crate::llm::ChatResult<crate::llm::ChatResponse> {
+            unreachable!("capability-only mock")
+        }
+
+        async fn chat_stream(
+            &self,
+            _req: ChatRequest,
+        ) -> crate::llm::ChatResult<BoxStream<'static, crate::llm::ChatChunk>> {
+            use futures_util::StreamExt;
+            Ok(futures_util::stream::iter(Vec::<crate::llm::ChatChunk>::new()).boxed())
+        }
+
+        fn list_models(&self) -> Vec<crate::llm::ModelInfo> {
+            vec![]
+        }
+
+        fn name(&self) -> &str {
+            "mock-audio"
+        }
+
+        fn supports_media(&self) -> bool {
+            true
+        }
+
+        fn supports_image(&self) -> bool {
+            false
+        }
+
+        fn supports_audio(&self) -> bool {
+            true
+        }
+    }
+
+    /// ⚠️ **能力面必须看得见「能吃音频」** —— 「评估 LLM 能否输入音频」
+    /// 那一格的**判据源**就在这里 ⇒ ⇒ 旧版（图/音混在一个 bool 里）⇒ ⇒
+    /// 那一格**永远判不出来**。
+    #[test]
+    fn test_bridge_advertises_audio_input_when_the_runtime_takes_audio() {
+        let bridge = LlmRuntimeBridge::new(Arc::new(MockAudioRuntime), "test-model");
+        let caps = bridge.capabilities();
+        assert!(
+            caps.input_modalities
+                .contains(&crate::capabilities::Modality::AudioInput),
+            "a runtime that really takes audio must be advertised as audio_input"
+        );
+    }
+
+    /// ⚠️ **「只吃音频」不许被顺带报成「也能吃图」** —— 旧判据一个
+    /// `supports_media()` 混了两件事 ⇒ ⇒ 音频专用投影器会被误报。
+    #[test]
+    fn test_bridge_does_not_advertise_image_for_an_audio_only_runtime() {
+        let bridge = LlmRuntimeBridge::new(Arc::new(MockAudioRuntime), "test-model");
+        let caps = bridge.capabilities();
+        assert!(
+            !caps
+                .input_modalities
+                .contains(&crate::capabilities::Modality::ImageInput),
+            "an audio-only runtime must not be advertised as taking pictures"
+        );
+    }
+
+    /// 视觉后端（mistral.rs 那条腿）**行为不许变** —— 它只报
+    /// `supports_media()` ⇒ ⇒ 默认委托 ⇒ ⇒ 图照旧、音照旧不报。
+    #[test]
+    fn test_a_vision_only_backend_keeps_its_image_advertisement() {
+        let bridge = make_media_bridge(Arc::new(std::sync::Mutex::new(Vec::new())));
+        let caps = bridge.capabilities();
+        assert!(caps
+            .input_modalities
+            .contains(&crate::capabilities::Modality::ImageInput));
+        assert!(!caps
+            .input_modalities
+            .contains(&crate::capabilities::Modality::AudioInput));
     }
 
     fn minimal_canonical_request() -> CanonicalLlmRequest {

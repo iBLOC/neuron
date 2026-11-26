@@ -7,6 +7,32 @@ name: rust
 #   3. all-features:  cargo build --all-features + cargo check --all-features --tests
 #   4. security:      cargo audit for security vulnerabilities
 #   5. coverage:      code coverage with cargo-tarpaulin
+#
+# ⚠⚠️⚠️ **布局：兄弟仓必须检出成同级**（刀 14，2026-11-25）—— 这一条是
+#    本仓 CI 能不能跑起来的**前提**，不是装饰：
+#
+# · 本仓有**路径依赖**指进兄弟仓 synapse：
+#     synapse-privacy    = { path = `../synapse/crates/privacy` }
+#     synapse-modalities = { path = `../synapse/crates/modalities` }
+# · 而 `actions/checkout` **拒绝工作区之外的路径**（父仓 release.yml 的注释记着这条）
+#   ⇒ ⇒ ⇒ 唯一可行的布局是：
+#     · **本仓检出到工作区的子目录**（`path: neuron`）
+#     · **兄弟仓检出成同级**（`path: synapse`）
+#   ⇒ ⇒ `../synapse` 才落得到（相对本仓目录 ⇒ 解析到工作区根下的 synapse）。
+#
+# ⚠ 此前本仓是**裸 checkout**（自己躺在工作区根）⇒ ⇒ `../synapse` 落在
+#   `/home/runner/work/neuron/synapse` ⇒ ⇒ 那儿没有东西 ⇒ ⇒ ⇒
+#   **4 个 job 全死在依赖解析**（连 fmt 那格也死：`cargo fmt` 要跑
+#   `cargo metadata` ⇒ ⇒ 它同样解析依赖）⇒ ⇒ 真因逐字是：
+#   error: no matching package named `synapse-privacy` found
+#   （location searched: /home/runner/work/neuron/synapse/crates/privacy）
+# ⇒ ⇒ **本地副本演练（A/B）已实测**：没有兄弟仓 ⇒ 同一句报错（EXIT=101）；
+#   把 synapse 检出成同级 ⇒ `cargo metadata` 成功。
+#
+# ⚠ synapse 是**公开仓**（`gh repo view iBLOC/synapse --json isPrivate` ⇒ false）
+#   ⇒ ⇒ 不需要 IBLOC_TOKEN（本仓没有这个 secret，也不需要新增）。
+# ⚠ **不钉 commit** —— 与端脑／大脑的 CI 同一口径（它们也不钉）；
+#   钉版是**发行链**的要求（release.yml），不是 CI 的要求。
 
 on:
   push:
@@ -32,15 +58,61 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: short
+  # ⚠⚠️ **CUDA 架构钉版（刀 17，2026-11-25）** —— 这一条**必须在 workflow 级**，
+  #   不是只在某一条 job 里 ⇒ ⇒ 因为 `--all-features` 那两条 job（`fmt-clippy`／
+  #   `all-features`）现在**也**会编 llama.cpp 的 CUDA 内核（neuron's `cuda` 档
+  #   转发了 `llama-cpp-2?/cuda`）⇒ ⇒ 而 llama.cpp 的 CUDA **默认架构表是十个**
+  #   （`50-virtual;61-virtual;70-virtual;75-virtual;80-virtual;86-real;89-real;
+  #   90-virtual;120a-real;121a-real`）⇒ ⇒ ⇒ 在 CI 上是**小时级** ⇒ ⇒ ⇒
+  #   ⇒ ⇒ **超时** ⇒ ⇒ ⇒ 而 CI runner 上**没有 GPU** ⇒ ⇒ ⇒ 编十个架构
+  #   ⇒ ⇒ ⇒ **纯属浪费**（runner 只要能编过就行，产物不会在 runner 上跑）⇒ ⇒
+  #   ⇒ ⇒ ⇒ 钉**一个**真实架构（`86` ＝ Ampere／RTX 3000 系）⇒ ⇒ ⇒ 分钟级。
+  #
+  # ⚠ **这颗旋钮原生可用** —— `llama-cpp-sys-2` 的 build.rs **把所有 `CMAKE_*`
+  #   环境变量透传给 cmake**（实测 build.rs 源码）⇒ ⇒ ⇒ 不必 patch 依赖。
+  # ⚠ **它只影响 llama.cpp 的 CUDA** —— candle 的 CUDA 内核不走 cmake ⇒ ⇒
+  #   ⇒ ⇒ 不影响 `flash-attn` 那一档的编译面 ⇒ ⇒ ⇒ 只压缩了**新增**的那一段。
+  CMAKE_CUDA_ARCHITECTURES: "86"
+  # ⚠⚠️ **candle-kernels 的 CUDA 13 绕法（刀 17 补记，2026-11-25）** ——
+  #   candle-kernels@66a8cf1（neuron 钉的那个 rev）的 build.rs **少了 CUDA 13
+  #   需要的 `/Zc:preprocessor`** ⇒ ⇒ nvcc 在 MSVC 传统预处理器下 `#error C1189`
+  #   **硬报错** ⇒ ⇒ ⇒ 而**报错是空的**（看不出来是预处理器的问题）⇒ ⇒ ⇒
+  #   ⇒ ⇒ 仓里早就有这个绕法（`scripts/cuda-build.bat` 第 53 行）⇒ ⇒ ⇒ 但
+  #   ⇒ ⇒ ⇒ **CI 里没有** ⇒ ⇒ ⇒ 而 CI runner 的 CUDA 版本更高 ⇒ ⇒ ⇒
+  #   ⇒ ⇒ ⇒ **凡是编 cuda 档的 CI job 都要带这两行** ⇒ ⇒ ⇒
+  #   ⇒ ⇒ ⇒ `-include string`（candle-kernels 缺 `<string>`）＋
+  #   ⇒ ⇒ ⇒ `-Xcompiler /Zc:preprocessor`（CUDA 13 的预处理器模式）。
+  # ⚠ **本机实测**：带这两行 ⇒ ⇒ candle-kernels 的 11 个 PTX 内核编过 ⇒ ⇒
+  #   ⇒ ⇒ **不带 ⇒ ⇒ build.rs 阶段就死** ⇒ ⇒ ⇒ 而那一格是**编译级**判据 ⇒ ⇒
+  #   ⇒ ⇒ ⇒ 不带就永远红在别人的欠账上 ⇒ ⇒ ⇒ **必须带**。
+  NVCC_PREPEND_FLAGS: "-include string -Xcompiler /Zc:preprocessor"
 
 jobs:
   fmt-clippy:
     name: Format + Clippy
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # ⚠ 这条 job 跑 `clippy --all-features` ⇒ ⇒ **会真编 CUDA 内核**
+    # ⇒ ⇒ 15 分钟不够（刀 13）⇒ ⇒ 45。
+    timeout-minutes: 45
     steps:
-      - name: Checkout
+      # ⚠⚠️ **本仓检出到子目录**（刀 14）—— 因为本仓有**路径依赖**指向兄弟仓
+      #    （`../synapse/...`）⇒ ⇒ 而 actions/checkout **拒绝工作区之外的路径**
+      #    ⇒ ⇒ ⇒ 本仓必须躺在工作区的**子目录**里，兄弟仓才检得出**同级**。
+      - name: Checkout neuron
         uses: actions/checkout@v4
+        with:
+          path: neuron
+
+      # ⚠ **兄弟仓必须检出成同级** —— neuron 仓的 `synapse-privacy` 与
+      #    `synapse-modalities` 是**路径依赖** ⇒ ⇒ 不检出它，cargo 连
+      #    manifest 都读不到 ⇒ ⇒ 依赖解析阶段就挂（真因：no matching package
+      #    named `synapse-privacy` found）⇒ ⇒ 这一格**早于**任何编译。
+      #    ⚠ synapse 是**公开仓** ⇒ ⇒ 不需要 token。
+      - name: Checkout synapse
+        uses: actions/checkout@v4
+        with:
+          repository: ibloc/synapse
+          path: synapse
 
       - name: Install Rust toolchain (with rustfmt + clippy)
         uses: dtolnay/rust-toolchain@stable
@@ -50,7 +122,7 @@ jobs:
       - name: Cache cargo registry + build artifacts
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: . -> target
+          workspaces: neuron -> target
 
       - name: Show toolchain versions
         run: |
@@ -59,10 +131,68 @@ jobs:
           cargo fmt --version
           cargo clippy --version
 
-      - name: Check formatting (rustfmt)
-        run: cargo fmt --all -- --check
+      # ⚠⚠️ **范围要收窄到本仓**（刀 14）—— `cargo fmt --all` 的 `--all` 是
+      #    「**本包 ＋ 它的本地路径依赖**」（cargo-fmt 的原话）⇒ ⇒ 本仓有两个
+      #    路径依赖（synapse）⇒ ⇒ `--all` 会把 **synapse 与 ziti-rust 三个仓的
+      #    源码**一并纳入格式检查（实测：几百个文件的 diff）⇒ ⇒ ⇒
+      #    ① 那一格会红在**别的仓的格式欠账**上（红得莫名其妙，判不到自己头上）；
+      #    ② 它还会把**兄弟仓的兄弟仓**（ziti-rust，私有仓）拖进依赖闭包
+      #       ⇒ ⇒ 而本仓没有 IBLOC_TOKEN ⇒ ⇒ ⇒ 那一格**根本跑不起来**。
+      # ⇒ ⇒ 正确的口径是「**本仓 CI 只判本仓的码**」⇒ ⇒ `-p neuron`。
+      - name: Check formatting (rustfmt) — 本仓口径（-p neuron）
+        working-directory: neuron
+        run: cargo fmt -p neuron -- --check
+
+      # ⚠ **GPU 档要 nvcc**（刀 13）—— `--all-features` 必然带 neuron's
+      # `flash-attn` ⇒ ⇒ candle 的 **CUDA 内核要真编** ⇒ ⇒ 没有 nvcc 就**编不过**
+      # ⇒ ⇒ 这一格**不许**用「把 GPU 档从扫描里去掉」来变绿（那是**静默缩小**覆盖面）
+      # ⇒ ⇒ 正确做法是**接上工具链 ＋ 断言它真的在**。
+      - name: CUDA toolkit (nvcc) — GPU 档要它
+        run: |
+          set -euo pipefail
+          if ! ls /usr/local/cuda*/bin/nvcc >/dev/null 2>&1; then
+            echo "::warning::runner 镜像里没有预装的 nvcc ⇒ ⇒ 退回 apt 装一份"
+            sudo apt-get update -qq
+            sudo apt-get install -y --no-install-recommends nvidia-cuda-toolkit || true
+          fi
+          for d in /usr/local/cuda /usr/local/cuda-*/; do
+            if [ -x "${d}bin/nvcc" ]; then
+              echo "${d}bin" >> "$GITHUB_PATH"
+              echo "CUDA_HOME=${d%/}" >> "$GITHUB_ENV"
+              break
+            fi
+          done
+      - name: Assert nvcc is really there（GPU 档**必须**真编 ⇒ ⇒ 没有它就红）
+        run: |
+          set -euo pipefail
+          command -v nvcc
+          nvcc --version
+
+      # ⚠ **llama.cpp 档要 cmake ＋ libclang**（刀 15）—— `--all-features`
+      # 必然带 neuron's `llamacpp` ⇒ ⇒ `llama-cpp-sys-2` 的 build.rs 要用
+      # **cmake** 编 llama.cpp、要用 **bindgen**（要 libclang）⇒ ⇒ 缺一个就
+      # 在 **build.rs 阶段**挂 ⇒ ⇒ **连 Rust 层的错误都到不了** ⇒ ⇒
+      # 正确做法同样是**接上工具链 ＋ 断言它真的在**。
+      - name: llama.cpp build toolchain (cmake ＋ libclang) — llamacpp 档要它
+        run: |
+          set -euo pipefail
+          command -v cmake
+          cmake --version
+          if ! ls /usr/lib/llvm-*/lib/libclang.so* >/dev/null 2>&1; then
+            echo "::warning::runner 镜像里没有预装 libclang ⇒ ⇒ apt 装一份"
+            sudo apt-get update -qq
+            sudo apt-get install -y --no-install-recommends libclang-dev clang
+          fi
+          LIB="$(ls /usr/lib/llvm-*/lib/libclang.so* /usr/lib/x86_64-linux-gnu/libclang*.so* 2>/dev/null | head -n1 || true)"
+          if [ -z "${LIB}" ]; then
+            echo "::error::找不到 libclang.so ⇒ ⇒ llama-cpp-sys-2 的 bindgen 必挂"
+            exit 1
+          fi
+          echo "libclang: ${LIB}"
+          echo "LIBCLANG_PATH=$(dirname "${LIB}")" >> "$GITHUB_ENV"
 
       - name: Run clippy (deny warnings)
+        working-directory: neuron
         run: cargo clippy --all-targets --all-features -- -D warnings
 
   test:
@@ -70,8 +200,24 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - name: Checkout
+      # ⚠⚠️ **本仓检出到子目录**（刀 14）—— 因为本仓有**路径依赖**指向兄弟仓
+      #    （`../synapse/...`）⇒ ⇒ 而 actions/checkout **拒绝工作区之外的路径**
+      #    ⇒ ⇒ ⇒ 本仓必须躺在工作区的**子目录**里，兄弟仓才检得出**同级**。
+      - name: Checkout neuron
         uses: actions/checkout@v4
+        with:
+          path: neuron
+
+      # ⚠ **兄弟仓必须检出成同级** —— neuron 仓的 `synapse-privacy` 与
+      #    `synapse-modalities` 是**路径依赖** ⇒ ⇒ 不检出它，cargo 连
+      #    manifest 都读不到 ⇒ ⇒ 依赖解析阶段就挂（真因：no matching package
+      #    named `synapse-privacy` found）⇒ ⇒ 这一格**早于**任何编译。
+      #    ⚠ synapse 是**公开仓** ⇒ ⇒ 不需要 token。
+      - name: Checkout synapse
+        uses: actions/checkout@v4
+        with:
+          repository: ibloc/synapse
+          path: synapse
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -79,7 +225,7 @@ jobs:
       - name: Cache cargo registry + build artifacts
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: . -> target
+          workspaces: neuron -> target
 
       - name: Show toolchain versions
         run: |
@@ -87,21 +233,41 @@ jobs:
           cargo --version
 
       - name: Build library (default features)
+        working-directory: neuron
         run: cargo build --lib
 
       - name: Build tests (default features)
+        working-directory: neuron
         run: cargo test --lib --no-run
 
       - name: Run unit tests (default features)
+        working-directory: neuron
         run: cargo test --lib
 
   all-features:
     name: Full-feature build + test
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # ⚠ **真编 CUDA 内核**（刀 13）⇒ ⇒ 30 分钟不够 ⇒ ⇒ 60。
+    timeout-minutes: 60
     steps:
-      - name: Checkout
+      # ⚠⚠️ **本仓检出到子目录**（刀 14）—— 因为本仓有**路径依赖**指向兄弟仓
+      #    （`../synapse/...`）⇒ ⇒ 而 actions/checkout **拒绝工作区之外的路径**
+      #    ⇒ ⇒ ⇒ 本仓必须躺在工作区的**子目录**里，兄弟仓才检得出**同级**。
+      - name: Checkout neuron
         uses: actions/checkout@v4
+        with:
+          path: neuron
+
+      # ⚠ **兄弟仓必须检出成同级** —— neuron 仓的 `synapse-privacy` 与
+      #    `synapse-modalities` 是**路径依赖** ⇒ ⇒ 不检出它，cargo 连
+      #    manifest 都读不到 ⇒ ⇒ 依赖解析阶段就挂（真因：no matching package
+      #    named `synapse-privacy` found）⇒ ⇒ 这一格**早于**任何编译。
+      #    ⚠ synapse 是**公开仓** ⇒ ⇒ 不需要 token。
+      - name: Checkout synapse
+        uses: actions/checkout@v4
+        with:
+          repository: ibloc/synapse
+          path: synapse
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -109,14 +275,63 @@ jobs:
       - name: Cache cargo registry + build artifacts
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: . -> target
+          workspaces: neuron -> target
 
       - name: Show toolchain versions
         run: |
           rustc --version
           cargo --version
 
+      # ⚠ **GPU 档要 nvcc**（刀 13）—— `--all-features` 必然带 neuron's
+      # `flash-attn` ⇒ ⇒ candle 的 **CUDA 内核要真编** ⇒ ⇒ 没有 nvcc 就**编不过**
+      # ⇒ ⇒ 这一格**不许**用「把 GPU 档从扫描里去掉」来变绿（那是**静默缩小**覆盖面）
+      # ⇒ ⇒ 正确做法是**接上工具链 ＋ 断言它真的在**。
+      - name: CUDA toolkit (nvcc) — GPU 档要它
+        run: |
+          set -euo pipefail
+          if ! ls /usr/local/cuda*/bin/nvcc >/dev/null 2>&1; then
+            echo "::warning::runner 镜像里没有预装的 nvcc ⇒ ⇒ 退回 apt 装一份"
+            sudo apt-get update -qq
+            sudo apt-get install -y --no-install-recommends nvidia-cuda-toolkit || true
+          fi
+          for d in /usr/local/cuda /usr/local/cuda-*/; do
+            if [ -x "${d}bin/nvcc" ]; then
+              echo "${d}bin" >> "$GITHUB_PATH"
+              echo "CUDA_HOME=${d%/}" >> "$GITHUB_ENV"
+              break
+            fi
+          done
+      - name: Assert nvcc is really there（GPU 档**必须**真编 ⇒ ⇒ 没有它就红）
+        run: |
+          set -euo pipefail
+          command -v nvcc
+          nvcc --version
+
+      # ⚠ **llama.cpp 档要 cmake ＋ libclang**（刀 15）—— `--all-features`
+      # 必然带 neuron's `llamacpp` ⇒ ⇒ `llama-cpp-sys-2` 的 build.rs 要用
+      # **cmake** 编 llama.cpp、要用 **bindgen**（要 libclang）⇒ ⇒ 缺一个就
+      # 在 **build.rs 阶段**挂 ⇒ ⇒ **连 Rust 层的错误都到不了** ⇒ ⇒
+      # 正确做法同样是**接上工具链 ＋ 断言它真的在**。
+      - name: llama.cpp build toolchain (cmake ＋ libclang) — llamacpp 档要它
+        run: |
+          set -euo pipefail
+          command -v cmake
+          cmake --version
+          if ! ls /usr/lib/llvm-*/lib/libclang.so* >/dev/null 2>&1; then
+            echo "::warning::runner 镜像里没有预装 libclang ⇒ ⇒ apt 装一份"
+            sudo apt-get update -qq
+            sudo apt-get install -y --no-install-recommends libclang-dev clang
+          fi
+          LIB="$(ls /usr/lib/llvm-*/lib/libclang.so* /usr/lib/x86_64-linux-gnu/libclang*.so* 2>/dev/null | head -n1 || true)"
+          if [ -z "${LIB}" ]; then
+            echo "::error::找不到 libclang.so ⇒ ⇒ llama-cpp-sys-2 的 bindgen 必挂"
+            exit 1
+          fi
+          echo "libclang: ${LIB}"
+          echo "LIBCLANG_PATH=$(dirname "${LIB}")" >> "$GITHUB_ENV"
+
       - name: Build library (all features)
+        working-directory: neuron
         run: cargo build --all-features --lib
 
       # `--tests` ensures unit-test binaries compile too. We don't run
@@ -124,32 +339,44 @@ jobs:
       # require the full feature set up; the build-check is what
       # catches feature-flag interactions.
       - name: Build tests (all features)
+        working-directory: neuron
         run: cargo check --all-features --tests
 
       - name: Run unit tests (all features)
+        working-directory: neuron
         run: cargo test --lib --all-features
 
-  security:
-    name: Security audit
+  # ⚠⚠️ **llamacpp 档单独一条 job**（刀 15）—— 这条腿此前**从来没被编过**：
+  # 36 个 API 漂移错误就藏在里面（那套 API 在 crates.io 的 0.1.161 与上游
+  # git master 上**都不存在**）⇒ ⇒ 而 CI **也从来没编过它** ⇒ ⇒ 两道门都关着：
+  #   ① `--all-features` 那格**先**要 CUDA 工具链、**后**要 llama.cpp 的
+  #      cmake ＋ libclang ⇒ ⇒ 工具链缺一个就在 **build.rs 阶段**挂
+  #      ⇒ ⇒ **Rust 层的错根本到不了**；
+  #   ② 就算工具链齐了，那 36 个错也会把那一格染红 ⇒ ⇒ 「源码里有」不等于
+  #      「编得过」。
+  # ⇒ ⇒ 所以给它一条**点名**这一档、**只**要 cmake ＋ libclang 的 job ⇒ ⇒
+  #      这一格的红**就是这一格的红**，不再被别人的欠账盖住。
+  llamacpp:
+    name: llama.cpp backend build + test
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 45
     steps:
-      - name: Checkout
+      # ⚠⚠️ **本仓检出到子目录**（刀 14）—— 因为本仓有**路径依赖**指向兄弟仓
+      #    （`../synapse/...`）⇒ ⇒ 而 actions/checkout **拒绝工作区之外的路径**
+      #    ⇒ ⇒ ⇒ 本仓必须躺在工作区的**子目录**里，兄弟仓才检得出**同级**。
+      - name: Checkout neuron
         uses: actions/checkout@v4
+        with:
+          path: neuron
 
-      - name: Install cargo-audit
-        run: cargo install cargo-audit
-
-      - name: Run security audit
-        run: cargo audit
-
-  coverage:
-    name: Code coverage
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - name: Checkout
+      # ⚠ **兄弟仓必须检出成同级**（刀 14）—— 否则 cargo 连 manifest 都读不到
+      #    ⇒ ⇒ 依赖解析阶段就挂 ⇒ ⇒ 这一格**早于**任何编译。
+      #    ⚠ synapse 是**公开仓** ⇒ ⇒ 不需要 token。
+      - name: Checkout synapse
         uses: actions/checkout@v4
+        with:
+          repository: ibloc/synapse
+          path: synapse
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -157,16 +384,264 @@ jobs:
       - name: Cache cargo registry + build artifacts
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: . -> target
+          workspaces: neuron -> target
+
+      - name: Show toolchain versions
+        run: |
+          rustc --version
+          cargo --version
+
+      # ⚠ **llama.cpp 档要 cmake ＋ libclang**（刀 15）—— `--all-features`
+      # 必然带 neuron's `llamacpp` ⇒ ⇒ `llama-cpp-sys-2` 的 build.rs 要用
+      # **cmake** 编 llama.cpp、要用 **bindgen**（要 libclang）⇒ ⇒ 缺一个就
+      # 在 **build.rs 阶段**挂 ⇒ ⇒ **连 Rust 层的错误都到不了** ⇒ ⇒
+      # 正确做法同样是**接上工具链 ＋ 断言它真的在**。
+      - name: llama.cpp build toolchain (cmake ＋ libclang) — llamacpp 档要它
+        run: |
+          set -euo pipefail
+          command -v cmake
+          cmake --version
+          if ! ls /usr/lib/llvm-*/lib/libclang.so* >/dev/null 2>&1; then
+            echo "::warning::runner 镜像里没有预装 libclang ⇒ ⇒ apt 装一份"
+            sudo apt-get update -qq
+            sudo apt-get install -y --no-install-recommends libclang-dev clang
+          fi
+          LIB="$(ls /usr/lib/llvm-*/lib/libclang.so* /usr/lib/x86_64-linux-gnu/libclang*.so* 2>/dev/null | head -n1 || true)"
+          if [ -z "${LIB}" ]; then
+            echo "::error::找不到 libclang.so ⇒ ⇒ llama-cpp-sys-2 的 bindgen 必挂"
+            exit 1
+          fi
+          echo "libclang: ${LIB}"
+          echo "LIBCLANG_PATH=$(dirname "${LIB}")" >> "$GITHUB_ENV"
+
+      - name: Build library (llamacpp feature)
+        working-directory: neuron
+        run: cargo build --features llamacpp --lib
+
+      - name: Build + run unit tests (llamacpp feature)
+        working-directory: neuron
+        run: cargo test --features llamacpp --lib
+
+  # ⚠⚠️ **llamacpp ＋ CUDA 档单独一条 job**（刀 17，2026-11-25）——
+  #
+  # ⚠ **为什么必须有这一条** —— 刀 17 的真因：neuron 的 `llamacpp` 档
+  #   **从来没编进 llama.cpp 的 CUDA 后端** ⇒ ⇒ 实测（`cargo tree -e features`）：
+  #   那条 feature 链给 `llama-cpp-sys-2` 开出的 feature 集里**没有 `cuda`**
+  #   ⇒ ⇒ `GGML_CUDA` 没开 ⇒ ⇒ build 出来的 llama.cpp **一个 GPU 后端都没有**
+  #   ⇒ ⇒ ⇒ 「降级阶梯的第三档」（专家在系统内存、**其余在显存**）在 neuron
+  #   ⇒ ⇒ ⇒ 里**只剩一半** ⇒ ⇒ 「显存」那一半**无处安放**。
+  #   ⇒ ⇒ 修法＝`cuda` 档转发 `llama-cpp-2?/cuda`（**`?` 是承重的** ⇒ ⇒
+  #   ⇒ ⇒ `llamacpp` 没开时不拖 CUDA 进来 ⇒ ⇒ 「默认档不带 GPU」不受影响）。
+  #
+  # ⚠ **架构必须钉版** —— llama.cpp 的 CUDA 默认架构表是
+  #   `50-virtual;61-virtual;70-virtual;75-virtual;80-virtual;86-real;
+  #   89-real;90-virtual;120a-real;121a-real` ⇒ ⇒ **十个架构** ⇒ ⇒ 在 CI 上
+  #   是**小时级** ⇒ ⇒ ⇒ 必须用 `CMAKE_CUDA_ARCHITECTURES` 钉一个 ⇒ ⇒
+  #   ⇒ ⇒ **`llama-cpp-sys-2` 的 build.rs 会把所有 `CMAKE_*` 环境变量透传给
+  #   ⇒ ⇒ ⇒ cmake**（实测 build.rs 源码）⇒ ⇒ ⇒ 这颗旋钮**原生可用** ⇒ ⇒
+  #   ⇒ ⇒ 不必 patch 依赖 ⇒ ⇒ ⇒ 钉 `86`（Ampere／RTX 3000 系）⇒ ⇒ 一份
+  #   ⇒ ⇒ ⇒ 真实代码（`-real`，不是 `-virtual`）⇒ ⇒ ⇒ 分钟级而不是小时级。
+  llamacpp-cuda:
+    name: llama.cpp backend build (CUDA offload)
+    runs-on: ubuntu-latest
+    # ⚠ 这一格要**真编** llama.cpp 的 CUDA 内核 ⇒ ⇒ 单架构也要十几分钟
+    # ⇒ ⇒ 45 分钟起（刀 13/15 的同款口径）。
+    timeout-minutes: 45
+    steps:
+      # ⚠⚠️ **本仓检出到子目录**（刀 14）—— 因为本仓有**路径依赖**指向兄弟仓
+      #    （`../synapse/...`）⇒ ⇒ 而 actions/checkout **拒绝工作区之外的路径**
+      #    ⇒ ⇒ ⇒ 本仓必须躺在工作区的**子目录**里，兄弟仓才检得出**同级**。
+      - name: Checkout neuron
+        uses: actions/checkout@v4
+        with:
+          path: neuron
+
+      # ⚠ **兄弟仓必须检出成同级**（刀 14）—— 否则 cargo 连 manifest 都读不到
+      #    ⇒ ⇒ 依赖解析阶段就挂 ⇒ ⇒ 这一格**早于**任何编译。
+      #    ⚠ synapse 是**公开仓** ⇒ ⇒ 不需要 token。
+      - name: Checkout synapse
+        uses: actions/checkout@v4
+        with:
+          repository: ibloc/synapse
+          path: synapse
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry + build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: neuron -> target
+
+      - name: Show toolchain versions
+        run: |
+          rustc --version
+          cargo --version
+
+      # ⚠ **llama.cpp 档要 cmake ＋ libclang**（刀 15）—— `llama-cpp-sys-2`
+      #    的 build.rs 要用 **cmake** 编 llama.cpp、要用 **bindgen**（要 libclang）
+      #    ⇒ ⇒ 缺一个就在 **build.rs 阶段**挂 ⇒ ⇒ **连 Rust 层的错误都到不了**。
+      - name: llama.cpp build toolchain (cmake ＋ libclang) — llamacpp 档要它
+        run: |
+          set -euo pipefail
+          command -v cmake
+          cmake --version
+          if ! ls /usr/lib/llvm-*/lib/libclang.so* >/dev/null 2>&1; then
+            echo "::warning::runner 镜像里没有预装 libclang ⇒ ⇒ apt 装一份"
+            sudo apt-get update -qq
+            sudo apt-get install -y --no-install-recommends libclang-dev clang
+          fi
+          LIB="$(ls /usr/lib/llvm-*/lib/libclang.so* /usr/lib/x86_64-linux-gnu/libclang*.so* 2>/dev/null | head -n1 || true)"
+          if [ -z "${LIB}" ]; then
+            echo "::error::找不到 libclang.so ⇒ ⇒ llama-cpp-sys-2 的 bindgen 必挂"
+            exit 1
+          fi
+          echo "libclang: ${LIB}"
+          echo "LIBCLANG_PATH=$(dirname "${LIB}")" >> "$GITHUB_ENV"
+
+      # ⚠ **GPU 档要 nvcc**（刀 13 的同款口径）—— llama.cpp 的 CUDA 内核是
+      #    **真 nvcc 编的** ⇒ ⇒ 没有 nvcc 就**编不过** ⇒ ⇒ 这一格不许用
+      #    「把 CUDA 档从扫描里去掉」来换绿（那是**静默缩小**覆盖面）。
+      - name: CUDA toolkit (nvcc) — llama.cpp 的 CUDA 内核要它
+        run: |
+          set -euo pipefail
+          if ! ls /usr/local/cuda*/bin/nvcc >/dev/null 2>&1; then
+            echo "::warning::runner 镜像里没有预装的 nvcc ⇒ ⇒ 退回 apt 装一份"
+            sudo apt-get update -qq
+            sudo apt-get install -y --no-install-recommends nvidia-cuda-toolkit || true
+          fi
+          for d in /usr/local/cuda /usr/local/cuda-*/; do
+            if [ -x "${d}bin/nvcc" ]; then
+              echo "${d}bin" >> "$GITHUB_PATH"
+              echo "CUDA_HOME=${d%/}" >> "$GITHUB_ENV"
+              break
+            fi
+          done
+      - name: Assert nvcc is really there（GPU 档**必须**真编 ⇒ ⇒ 没有它就红）
+        run: |
+          set -euo pipefail
+          command -v nvcc
+          nvcc --version
+
+      # ⚠⚠️ **架构钉版**（刀 17）—— 钉在 **workflow 级 env**（见文件头）⇒ ⇒
+      #    这一步只**断言它真的生效** ⇒ ⇒ ⇒ 「钉了」与「钉住了」是两件事。
+      #
+      # ⚠ **为什么必须是 workflow 级而不是 job 级** —— `--all-features` 那
+      #    两条 job（`fmt-clippy`／`all-features`）现在**也**会编 llama.cpp 的
+      #    CUDA 内核 ⇒ ⇒ 只在新 job 里钉 ⇒ ⇒ 那两条仍是**十个架构**（小时级）
+      #    ⇒ ⇒ ⇒ 会**超时** ⇒ ⇒ ⇒ 而 runner 上没有 GPU ⇒ ⇒ 编十个纯属浪费。
+      - name: Assert the pinned CUDA architecture is in effect
+        run: |
+          set -euo pipefail
+          echo "CMAKE_CUDA_ARCHITECTURES=${CMAKE_CUDA_ARCHITECTURES}"
+          if [ "${CMAKE_CUDA_ARCHITECTURES}" != "86" ]; then
+            echo "::error::CUDA 架构没钉住 ⇒ ⇒ llama.cpp 的 CUDA 会按默认的十个架构编 ⇒ ⇒ 小时级 ⇒ ⇒ 会超时"
+            exit 1
+          fi
+
+      # ⚠ **这一格是刀 17 的判据面** —— 它证明的是「neuron 的 llamacpp 档
+      #    **真能编出带 CUDA 后端的 llama.cpp**」⇒ ⇒ 也就是「第三档的『其余
+      #    在显存』那一半**有落点**」⇒ ⇒ ⚠ 注意：**编得过 ≠ 跑得过**（runner
+      #    上没有 GPU ⇒ ⇒ 那一格永远是**编译级**读数）。
+      - name: Build library (llamacpp + cuda features)
+        working-directory: neuron
+        run: cargo build --features llamacpp,cuda --lib
+
+      # ⚠ **刀 18：探针也要编得过** —— `examples/moe_cpu_moe_probe.rs` 是
+      #    「MoE 专家下沉」那族唯一的 **neuron 进程级** 读数入口（它走 neuron
+      #    自己的 llamacpp 腿 ⇒ ⇒ 读回 neuron 那条 eprintln ＋ 量显存差）⇒ ⇒
+      #    ⇒ ⇒ 它若编不过 ⇒ ⇒ 那一格在 CI 上**永远没有读数** ⇒ ⇒ ⇒ ⇒
+      #    ⇒ ⇒ 所以它也得被这条 job 真编一次。⚠ runner 上没有 GPU ⇒ ⇒ 只能
+      #    ⇒ ⇒ 编译、不能跑 ⇒ ⇒ 这一格永远是**编译级**读数。
+      #
+      # ⚠⚠️ **为什么这一条用 `llamacpp,llamacpp-cuda` 而不是 `llamacpp,cuda`**
+      #    —— 上面那一步（`--lib`）用的是 `llamacpp,cuda`（**candle 的 CUDA 也开**）
+      #    ⇒ ⇒ 而**那两档在 Windows 上链不到一起**（candle-kernels 的 `libmoe.a`
+      #    是 nvcc 默认的 **/MT**，llama.cpp 是 **/MD** ⇒ ⇒ `LNK2038`）⇒ ⇒ ⇒
+      #    ⇒ ⇒ 而**探针这一格恰恰要在 Windows 上跑**（真机读数）⇒ ⇒ ⇒ ⇒ ⇒ ⇒
+      #    ⇒ ⇒ ⇒ 所以它必须走 **`llamacpp-cuda`**（只给 llama.cpp 开 CUDA ⇒ ⇒
+      #    ⇒ ⇒ candle-kernels **不在依赖图里** ⇒ ⇒ ⇒ ⇒ ⇒ /MT 那个源头消失 ⇒ ⇒
+      #    ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ 链得过）。
+      #    ⇒ ⇒ ⚠ **这一格是「平台盲区」的证据**：CI 跑在 ubuntu ⇒ ⇒ `/MT` vs `/MD`
+      #    ⇒ ⇒ **在 Linux 上根本不存在** ⇒ ⇒ ⇒ ⇒ 上面那一步在 ubuntu 上永远绿 ⇒ ⇒
+      #    ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ 绿灯不等于
+      #    ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ 「Windows 上能链」。
+      - name: Build the MoE probe (llamacpp + llamacpp-cuda features)
+        working-directory: neuron
+        run: cargo build --features llamacpp,llamacpp-cuda --example moe_cpu_moe_probe
+
+  security:
+    name: Security audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # ⚠⚠️ **本仓检出到子目录**（刀 14）—— 因为本仓有**路径依赖**指向兄弟仓
+      #    （`../synapse/...`）⇒ ⇒ 而 actions/checkout **拒绝工作区之外的路径**
+      #    ⇒ ⇒ ⇒ 本仓必须躺在工作区的**子目录**里，兄弟仓才检得出**同级**。
+      - name: Checkout neuron
+        uses: actions/checkout@v4
+        with:
+          path: neuron
+
+      # ⚠ **兄弟仓必须检出成同级** —— neuron 仓的 `synapse-privacy` 与
+      #    `synapse-modalities` 是**路径依赖** ⇒ ⇒ 不检出它，cargo 连
+      #    manifest 都读不到 ⇒ ⇒ 依赖解析阶段就挂（真因：no matching package
+      #    named `synapse-privacy` found）⇒ ⇒ 这一格**早于**任何编译。
+      #    ⚠ synapse 是**公开仓** ⇒ ⇒ 不需要 token。
+      - name: Checkout synapse
+        uses: actions/checkout@v4
+        with:
+          repository: ibloc/synapse
+          path: synapse
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit
+
+      - name: Run security audit
+        working-directory: neuron
+        run: cargo audit
+
+  coverage:
+    name: Code coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      # ⚠⚠️ **本仓检出到子目录**（刀 14）—— 因为本仓有**路径依赖**指向兄弟仓
+      #    （`../synapse/...`）⇒ ⇒ 而 actions/checkout **拒绝工作区之外的路径**
+      #    ⇒ ⇒ ⇒ 本仓必须躺在工作区的**子目录**里，兄弟仓才检得出**同级**。
+      - name: Checkout neuron
+        uses: actions/checkout@v4
+        with:
+          path: neuron
+
+      # ⚠ **兄弟仓必须检出成同级** —— neuron 仓的 `synapse-privacy` 与
+      #    `synapse-modalities` 是**路径依赖** ⇒ ⇒ 不检出它，cargo 连
+      #    manifest 都读不到 ⇒ ⇒ 依赖解析阶段就挂（真因：no matching package
+      #    named `synapse-privacy` found）⇒ ⇒ 这一格**早于**任何编译。
+      #    ⚠ synapse 是**公开仓** ⇒ ⇒ 不需要 token。
+      - name: Checkout synapse
+        uses: actions/checkout@v4
+        with:
+          repository: ibloc/synapse
+          path: synapse
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry + build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: neuron -> target
 
       - name: Install cargo-tarpaulin
         run: cargo install cargo-tarpaulin
 
       - name: Run code coverage
+        working-directory: neuron
         run: cargo tarpaulin --lib --out xml --output-dir coverage
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v4
         with:
-          files: coverage/cobertura.xml
+          files: neuron/coverage/cobertura.xml
           fail_ci_if_error: false

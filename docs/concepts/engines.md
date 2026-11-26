@@ -78,7 +78,7 @@ See [Environment Variables](/reference/env-vars) for the full matrix.
 Since `f643c1c` (2026-09-26), the **candle** runtime auto-registers every LLM in your model library on startup, and `with_llm_model("...")` resolves a downloaded model by id with no env-var plumbing. Two pieces of behavior:
 
 1. **`ServerState::new` scans `NEURON_MODEL_DIRS`** — and falls back to `~/.neuron/models/` when `HOME` (or `USERPROFILE` on Windows GUI-launched processes) is unset — for every `llm/<id>/model.safetensors` subdirectory. Each match is registered as a `LlmImpl::Candle` runtime with an 8 GB lazy-load budget. So a model pulled via `POST /v1/models/pull` is servable by id on the next start with no further configuration.
-2. **`CandleLlmRuntime::resolve_model_path`** resolves `<id>` against the model library when `NEURON_LLM_MODEL_PATH` is unset, in the order `<resolved_model_dir>/llm/<id>` then `<resolved_model_dir>/<id>`. The explicit `NEURON_LLM_MODEL_PATH` env var still wins.
+2. **`CandleLlmRuntime::resolve_model_path`** resolves `<id>` against the model library when `NEURON_LLM_MODEL_PATH` is unset, in the order `<root>/llm/<id>` then `<root>/<id>`, where `<root>` walks **the very roots the registration face used** (`config.model_dirs`: `NEURON_MODEL_DIRS` → `NEURON_MODEL_DIR` → `NEURON_MODELS_DIR` → `~/.neuron/models`). The explicit `NEURON_LLM_MODEL_PATH` env var still wins.
 
 This means the canonical candle-LLM flow is now:
 

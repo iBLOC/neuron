@@ -223,10 +223,21 @@ impl Attention {
             candle_transformers::utils::repeat_kv(value_states, self.num_kv_groups)?.contiguous()?;
 
         let attn_output = if self.use_flash_attn {
-            // flash-attn-2 path: requires --features flash-attn and CUDA runtime
-            candle_flash_attn::flash_attn(
-                &query_states, &key_states, &value_states, None, true,
-            )?
+            // FlashAttention-2 path: requires the `flash-attn` build feature
+            // AND a CUDA device (the kernels are CUDA-only).
+            //
+            // candle-flash-attn takes (B, L, H, D) and returns
+            // (B, L, H, D), while the tensors below are (B, H, L, D) — hence
+            // the transpose in and the transpose back out. `softmax_scale`
+            // is a plain f32 (the `None` of the 0.9-era API is gone), and
+            // `causal` must be OFF for a single decoding step: with the KV
+            // cache the past keys already sit in k/v, and a causal mask
+            // aligned to the right would hide them.
+            let q = query_states.transpose(1, 2)?.contiguous()?;
+            let k = key_states.transpose(1, 2)?.contiguous()?;
+            let v = value_states.transpose(1, 2)?.contiguous()?;
+            let scale = 1.0 / (self.head_dim as f32).sqrt();
+            candle_flash_attn::flash_attn(&q, &k, &v, scale, q_len > 1)?.transpose(1, 2)?
         } else {
             // Standard SDPA path (CPU / Metal / no flash-attn feature)
             let scale = 1f64 / f64::sqrt(self.head_dim as f64);

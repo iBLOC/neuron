@@ -78,7 +78,7 @@ NEURON_RERANK_RUNTIME=cohere NEURON_COHERE_API_KEY=... neuron-host-binary
 自 `f643c1c`（2026-09-26）起，**candle** 运行时会在启动时自动注册模型库中的每个 LLM，而 `with_llm_model("...")` 无需任何环境变量配置即可按 id 解析已下载的模型。包含两块行为：
 
 1. **`ServerState::new` 扫描 `NEURON_MODEL_DIRS`**——在 `HOME`（Windows GUI 启动的进程则为 `USERPROFILE`）未设置时回退到 `~/.neuron/models/`——寻找每个 `llm/<id>/model.safetensors` 子目录。每个匹配项都会注册为一个带 8 GB 惰性加载预算的 `LlmImpl::Candle` 运行时。因此经 `POST /v1/models/pull` 拉取的模型，下次启动即可按 id 提供服务，无需更多配置。
-2. **`CandleLlmRuntime::resolve_model_path`** 在 `NEURON_LLM_MODEL_PATH` 未设置时，按 `<resolved_model_dir>/llm/<id>` 再 `<resolved_model_dir>/<id>` 的顺序对照模型库解析 `<id>`。显式的 `NEURON_LLM_MODEL_PATH` 环境变量仍然优先。
+2. **`CandleLlmRuntime::resolve_model_path`** 在 `NEURON_LLM_MODEL_PATH` 未设置时，按 `<root>/llm/<id>` 再 `<root>/<id>` 的顺序对照模型库解析 `<id>`；其中 `<root>` 走的是**注册面用的同一批根**（`config.model_dirs`：`NEURON_MODEL_DIRS` → `NEURON_MODEL_DIR` → `NEURON_MODELS_DIR` → `~/.neuron/models`）。显式的 `NEURON_LLM_MODEL_PATH` 环境变量仍然优先。
 
 这意味着 candle-LLM 的规范流程现在是：
 

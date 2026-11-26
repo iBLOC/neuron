@@ -126,6 +126,56 @@ impl NeuronConfig {
         current
     }
 
+    /// **模型库根目录**（按优先级）—— `NEURON_MODEL_DIRS`（多根，平台分隔符）
+    /// → `NEURON_MODEL_DIR` → **`NEURON_MODELS_DIR`**（**嵌脑那一格**：端脑启动时
+    /// 把它指向宿主给的 `<data_dir>/models`）→ 默认 [`Self::resolved_model_dir`]。
+    ///
+    /// ⚠️ **为什么必须有这一个真相源**（2026-11-26 刀 16 续）：**注册面**（boot
+    /// 扫描／懒注册）与**加载面**（`CandleLlmRuntime::resolve_model_path`）各
+    /// 有一套 ⇒ ⇒ 同一个模型在同一个决策里被判成两个相反的结论 ⇒ ⇒ 嵌脑
+    /// 形态里表现为「**引擎注册上了、权重找不到**」（真机逐字：`model
+    /// 'qwen3-0.6b' not found under ./.neuron/models`）⇒ ⇒ 而盘上**明明
+    /// 有**那份权重 ⇒ ⇒ 失败长得像「模型没下载」。
+    ///
+    /// ⚠️ 默认那一档**永远排在最后**（不是「env 有就不看默认」）⇒ ⇒ 桌面端
+    /// 指了 `NEURON_MODELS_DIR` 也不会丢掉 `~/.neuron/models` 里
+    /// 已下载的模型。
+    ///
+    /// ⚠️ 多根分隔符走 `std::env::split_paths`（Windows `;`／Unix
+    /// `:`）⇒ ⇒ **Windows 的盘符 `C:` 不会被当成分隔符**
+    /// （`split(':')` 会）⇒ ⇒ 单根那两格**不拆**。
+    pub fn model_roots() -> Vec<PathBuf> {
+        Self::model_roots_from(|var| std::env::var(var).ok(), Self::resolved_model_dir())
+    }
+
+    /// **纯函数那一半**：根的解析只依赖**传入的 env 取值函数**与**传入的默认根**
+    /// ⇒ ⇒ 判据可以在**不碰进程环境**的前提下证「优先级与布局」⇒ ⇒
+    /// **不与别的判据抢环境变量**（共享工作树上并行测试互抢 env 是已量过的事：
+    /// 三条 ASR 判据就是这么红的 ⇒ ⇒ 本刀不许再添一个 racer）。
+    pub fn model_roots_from(
+        get: impl Fn(&str) -> Option<String>,
+        default_root: PathBuf,
+    ) -> Vec<PathBuf> {
+        let mut roots = Vec::new();
+        // 多根那一格：平台分隔符（Windows `;`／Unix `:`）。
+        if let Some(v) = get("NEURON_MODEL_DIRS") {
+            roots.extend(std::env::split_paths(&v).filter(|p| !p.as_os_str().is_empty()));
+        }
+        // 单根那两格：**不拆**（一个目录本来就不含第二个分隔符；拆了
+        // Windows 的 `C:` 就断了）。
+        for var in ["NEURON_MODEL_DIR", "NEURON_MODELS_DIR"] {
+            if let Some(v) = get(var) {
+                if !v.is_empty() {
+                    roots.push(PathBuf::from(v));
+                }
+            }
+        }
+        if !roots.iter().any(|r| r == &default_root) {
+            roots.push(default_root);
+        }
+        roots
+    }
+
     /// Default candle device for inference. Returns CPU since
     /// the chronos2 WIP path uses this and candle's CPU device
     /// is always available; explicit CUDA / Metal selection
@@ -148,7 +198,7 @@ impl NeuronConfig {
             default_tts_model: None,
             default_asr_model: None,
             default_rerank_model: None,
-            model_dirs: vec![Self::resolved_model_dir()],
+            model_dirs: Self::model_roots(),
             default_source_id: "modelscope".to_string(),
             per_engine_source: HashMap::new(),
             per_model_source: HashMap::new(),
@@ -639,21 +689,63 @@ pub fn ensure_dir(path: &std::path::Path, label: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// 兜底常量 —— **不是测到的值**。
+///
+/// 只在探测失败时用 ⇒ ⇒ 而且必须**自报家门**（`TotalsSource::Fallback`）。
+/// 它的代价已经被量出来过：8 GB 的 GPU 兜底在一张 24 GiB 的卡上，把一个
+/// **真放得下**的 3B 模型（f32 物化 12 GiB）**拒了** ⇒ ⇒ 所以兜底不是
+/// 「保守的默认值」，是**一条会犯错的债** ⇒ ⇒ 越少用越好，用了就得说。
+const FALLBACK_CPU_BYTES: u64 = 16_000_000_000;
+const FALLBACK_GPU_BYTES: u64 = 8_000_000_000;
+
+/// 账本上那两个总数是**从哪儿来**的。
+///
+/// 「设备环境」写死在代码里（CPU 16 GB／GPU 8 GB）不是一个小事：在
+/// 「15.9 GB 内存 ＋ 24 GB 显存」的机器上，GPU 那一半被**少算了三倍**
+/// ⇒ ⇒ 而账本还不说自己用的是兜底常量 ⇒ ⇒ 这一栏就是给这件事留的证词。
+///
+/// ⚠ 2026-11-25 起**分栏**（`cpu_source`／`gpu_source`）：以前只有一个
+/// 总开关，内存测到了、显存没测到，也只说一句「Fallback」⇒ ⇒ 说不清是
+/// **哪一半**在兜底 ⇒ ⇒ 而那一半正是会被算错的那一半。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TotalsSource {
+    /// 探测到的（或调用方明确给的）真值。
+    Measured,
+    /// 探测不到 ⇒ 用了兜底常量。
+    Fallback,
+}
+
 #[derive(Debug, Clone)]
 pub struct ResourceTracker {
     total_cpu_bytes: u64,
     total_gpu_bytes: u64,
     used_cpu_bytes: u64,
     used_gpu_bytes: u64,
+    /// `Auto` 解析成的具体设备（记账用）。
+    ///
+    /// 「Auto」不是一个设备，是一个**问句** ⇒ ⇒ 旧代码把它当成 CPU
+    /// ⇒ ⇒ 一台「内存小、显存大」的机器上，Auto 连**显存里放得下**的模型
+    /// 都准入不了（只查了 CPU 池）⇒ ⇒ 现在先问成答案再记账。
+    resolved: DeviceSelection,
+    /// 两个总数**整体**是测来的还是兜底的（两个都测到才算 `Measured`）。
+    source: TotalsSource,
+    /// **内存**那一半是测来的还是兜底的。
+    cpu_source: TotalsSource,
+    /// **显存**那一半是测来的还是兜底的。
+    gpu_source: TotalsSource,
 }
 
 impl Default for ResourceTracker {
     fn default() -> Self {
         Self {
-            total_cpu_bytes: 16_000_000_000,
-            total_gpu_bytes: 8_000_000_000,
+            total_cpu_bytes: FALLBACK_CPU_BYTES,
+            total_gpu_bytes: FALLBACK_GPU_BYTES,
             used_cpu_bytes: 0,
             used_gpu_bytes: 0,
+            resolved: DeviceSelection::Cpu,
+            source: TotalsSource::Fallback,
+            cpu_source: TotalsSource::Fallback,
+            gpu_source: TotalsSource::Fallback,
         }
     }
 }
@@ -665,12 +757,108 @@ impl ResourceTracker {
             total_gpu_bytes,
             used_cpu_bytes: 0,
             used_gpu_bytes: 0,
+            resolved: DeviceSelection::Cpu,
+            source: TotalsSource::Measured,
+            cpu_source: TotalsSource::Measured,
+            gpu_source: TotalsSource::Measured,
+        }
+    }
+
+    /// 按**探测到的环境**建账本。
+    ///
+    /// 旧的两个常量（CPU 16 GB／GPU 8 GB）是把「设备环境」写死在代码里
+    /// ⇒ ⇒ 现在它来自探测；**探测不到就标记成兜底**，不装作是测到的。
+    ///
+    /// ⚠ 探测**只做一次**（`detect_cached`）—— 探测会开 CUDA 上下文、
+    /// 还会 spawn 一个 `nvidia-smi` ⇒ ⇒ 不便宜 ⇒ ⇒ 而注册面要对**每个**
+    /// 模型目录问一次 ⇒ ⇒ 必须缓存。
+    ///
+    /// ⚠ 显存那一半现在**真的测得到**了（CUDA driver API／`nvidia-smi`）
+    /// ⇒ ⇒ 那个 8 GB 的兜底常量在这台机器上**不再被使用** ⇒ ⇒ 上一刀量
+    /// 出来的代价（真放得下的 3B 模型被账本拒掉）就此消失。
+    pub fn detect() -> Self {
+        let caps = crate::accel::HostCapabilities::detect_cached();
+        let cpu = caps.ram_bytes.unwrap_or(FALLBACK_CPU_BYTES);
+        let gpu = caps.vram_bytes.unwrap_or(FALLBACK_GPU_BYTES);
+        let cpu_source = if caps.ram_bytes.is_some() {
+            TotalsSource::Measured
+        } else {
+            TotalsSource::Fallback
+        };
+        let gpu_source = if caps.vram_bytes.is_some() {
+            TotalsSource::Measured
+        } else {
+            TotalsSource::Fallback
+        };
+        let source = if cpu_source == TotalsSource::Measured
+            && gpu_source == TotalsSource::Measured
+        {
+            TotalsSource::Measured
+        } else {
+            TotalsSource::Fallback
+        };
+        Self {
+            total_cpu_bytes: cpu,
+            total_gpu_bytes: gpu,
+            used_cpu_bytes: 0,
+            used_gpu_bytes: 0,
+            resolved: caps.resolved_device(),
+            source,
+            cpu_source,
+            gpu_source,
+        }
+    }
+
+    /// `Auto` 在这本账上解析成的设备。
+    pub fn resolved_device(&self) -> DeviceSelection {
+        self.resolved
+    }
+
+    /// 两个总数**整体**是测来的还是兜底的。
+    pub fn totals_source(&self) -> TotalsSource {
+        self.source
+    }
+
+    /// **内存**那一半是测来的还是兜底的。
+    pub fn cpu_source(&self) -> TotalsSource {
+        self.cpu_source
+    }
+
+    /// **显存**那一半是测来的还是兜底的。
+    ///
+    /// ⚠ 以前这一栏**永远是** `Fallback`（显存测不到）⇒ ⇒ 而那个 8 GB 的
+    /// 兜底在 24 GiB 的卡上拒了真放得下的模型 ⇒ ⇒ 现在它可以是 `Measured`
+    /// —— 但**测不到时仍要老实说 Fallback**，不许假装。
+    pub fn gpu_source(&self) -> TotalsSource {
+        self.gpu_source
+    }
+
+    /// 账本上的**显存池**有多大（字节）。
+    pub fn total_gpu_bytes(&self) -> u64 {
+        self.total_gpu_bytes
+    }
+
+    /// 账本上的**内存池**有多大（字节）。
+    pub fn total_cpu_bytes(&self) -> u64 {
+        self.total_cpu_bytes
+    }
+
+    /// 记账用的设备：`Auto` 先问成答案。
+    ///
+    /// 问不出答案时保守按 CPU —— 宁可少准入，也别把显存那份白算。
+    fn effective_device(&self, device: &DeviceSelection) -> DeviceSelection {
+        match device {
+            DeviceSelection::Auto => match self.resolved {
+                DeviceSelection::Auto => DeviceSelection::Cpu,
+                d => d,
+            },
+            d => *d,
         }
     }
 
     pub fn can_load(&self, required: u64, device: &DeviceSelection) -> bool {
-        match device {
-            DeviceSelection::Cpu | DeviceSelection::Auto => {
+        match self.effective_device(device) {
+            DeviceSelection::Cpu => {
                 self.total_cpu_bytes.saturating_sub(self.used_cpu_bytes) >= required
             }
             DeviceSelection::Nvidia
@@ -678,13 +866,14 @@ impl ResourceTracker {
             | DeviceSelection::Vulkan => {
                 self.total_gpu_bytes.saturating_sub(self.used_gpu_bytes) >= required
             }
+            DeviceSelection::Auto => false,
         }
     }
 
     pub fn allocate(&mut self, required: u64, device: &DeviceSelection) -> Result<(), String> {
         if !self.can_load(required, device) {
-            let (avail, total) = match device {
-                DeviceSelection::Cpu | DeviceSelection::Auto => {
+            let (avail, total) = match self.effective_device(device) {
+                DeviceSelection::Cpu => {
                     (self.total_cpu_bytes - self.used_cpu_bytes, self.total_cpu_bytes)
                 }
                 _ => (self.total_gpu_bytes - self.used_gpu_bytes, self.total_gpu_bytes),
@@ -693,16 +882,16 @@ impl ResourceTracker {
                 "insufficient memory: required={required}, available={avail}, total={total}"
             ));
         }
-        match device {
-            DeviceSelection::Cpu | DeviceSelection::Auto => self.used_cpu_bytes += required,
+        match self.effective_device(device) {
+            DeviceSelection::Cpu => self.used_cpu_bytes += required,
             _ => self.used_gpu_bytes += required,
         }
         Ok(())
     }
 
     pub fn release(&mut self, required: u64, device: &DeviceSelection) {
-        match device {
-            DeviceSelection::Cpu | DeviceSelection::Auto => {
+        match self.effective_device(device) {
+            DeviceSelection::Cpu => {
                 self.used_cpu_bytes = self.used_cpu_bytes.saturating_sub(required);
             }
             _ => {
@@ -1170,5 +1359,94 @@ mod tests {
         rt.allocate(500, &DeviceSelection::Cpu).unwrap();
         rt.release(300, &DeviceSelection::Cpu);
         assert_eq!(rt.available_cpu_bytes(), 800);
+    }
+
+    // ------------------------------------------------------------------
+    // 刀 16 续（2026-11-26）：**模型库根**的单一真相源。
+    // ------------------------------------------------------------------
+
+    /// **嵌脑那一格**：`NEURON_MODELS_DIR` 是模型库根 ⇒ ⇒ 端脑启动时
+    /// 把宿主给的 `<data_dir>/models` 指到那儿 ⇒ ⇒ 加载面就找得到。
+    ///
+    /// ⚠️ **不碰进程环境**（注入取值函数）⇒ ⇒ 不与别的判据抢环境变量。
+    #[test]
+    fn test_model_roots_include_the_embedded_slot() {
+        let root =
+            std::env::temp_dir().join(format!("neuron-roots-embedded-{}", std::process::id()));
+        let default_root = std::env::temp_dir().join("neuron-roots-default");
+        let roots = NeuronConfig::model_roots_from(
+            |var| {
+                if var == "NEURON_MODELS_DIR" {
+                    Some(root.display().to_string())
+                } else {
+                    None
+                }
+            },
+            default_root.clone(),
+        );
+        assert!(
+            roots.iter().any(|r| r == &root),
+            "NEURON_MODELS_DIR must be one of the model roots; got {roots:?}"
+        );
+        assert_eq!(
+            roots.last().cloned(),
+            Some(default_root),
+            "the default root must stay last; got {roots:?}"
+        );
+    }
+
+    /// **默认那一档永远在最后** ⇒ ⇒ 桌面端指了 env 也不会丢掉
+    /// `~/.neuron/models` 里已下载的模型。
+    ///
+    /// ⚠️ **不碰进程环境**（注入取值函数）⇒ ⇒ 不与别的判据抢环境变量。
+    #[test]
+    fn test_model_roots_keep_the_default_last() {
+        let root =
+            std::env::temp_dir().join(format!("neuron-roots-default-{}", std::process::id()));
+        let default_root = std::env::temp_dir().join("neuron-roots-default-last");
+        let roots = NeuronConfig::model_roots_from(
+            |var| {
+                if var == "NEURON_MODELS_DIR" {
+                    Some(root.display().to_string())
+                } else {
+                    None
+                }
+            },
+            default_root.clone(),
+        );
+        assert_eq!(
+            roots.last().cloned(),
+            Some(default_root),
+            "the default root must stay last; got {roots:?}"
+        );
+    }
+
+    /// **多根按平台分隔符拆** ⇒ ⇒ Windows 的盘符 `C:` **不被**当分隔符
+    /// （`split(':')` 会）⇒ ⇒ 用 `std::env::join_paths` 造夹具。
+    #[test]
+    fn test_model_roots_split_multi_root_on_the_platform_separator() {
+        let base = std::env::temp_dir().join(format!("neuron-roots-multi-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let a = base.join("a");
+        let b = base.join("b");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        let joined = std::env::join_paths([&a, &b]).unwrap();
+        let default_root = std::env::temp_dir().join("neuron-roots-multi-default");
+        let roots = NeuronConfig::model_roots_from(
+            |var| {
+                if var == "NEURON_MODEL_DIRS" {
+                    Some(joined.to_string_lossy().to_string())
+                } else {
+                    None
+                }
+            },
+            default_root,
+        );
+        assert!(
+            roots.iter().any(|r| r == &a) && roots.iter().any(|r| r == &b),
+            "both roots must be found; got {roots:?}"
+        );
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

@@ -27,6 +27,11 @@ tracing = "0.1"
 # every external-model path redacts identically. Kept in its own crate
 # so neuron does not inherit synapse's runtime dependencies.
 synapse-privacy = { path = "../synapse/crates/privacy" }
+# Canonical input-modality vocabulary + normalizer (the SAME file synapse
+# uses) — so neuron's engine-reported modality words land on one vocabulary
+# with the brain's read face. Its own tiny crate keeps synapse's runtime
+# dependencies out of this crate.
+synapse-modalities = { path = "../synapse/crates/modalities" }
 reqwest = { version = "0.12", features = ["json", "multipart", "rustls-tls", "stream"], default-features = false }
 axum = { version = "0.8", features = ["ws", "multipart"] }
 tower = "0.5"
@@ -61,7 +66,21 @@ candle = { git = "https://github.com/huggingface/candle.git", rev = "66a8cf184a5
 candle-nn = { git = "https://github.com/huggingface/candle.git", rev = "66a8cf184a5a519671454066b1b9efd446ec9f5c", optional = true }
 candle-transformers = { git = "https://github.com/huggingface/candle.git", rev = "66a8cf184a5a519671454066b1b9efd446ec9f5c", optional = true }
 candle-flash-attn = { git = "https://github.com/huggingface/candle.git", rev = "66a8cf184a5a519671454066b1b9efd446ec9f5c", optional = true }
-tokenizers = { version = "0.22", optional = true }
+# ⚠️ 2026-11-26（刀 18）：`tokenizers` **不许带默认 features**。
+# ⇒ ⇒ 默认 features 里有 `esaxx_fast` ⇒ ⇒ 它把 `esaxx-rs/cpp` 打开 ⇒ ⇒
+# ⇒ ⇒ esaxx-rs 的 build.rs 用 `cc::Build::…static_crt(true)` 编 C++ ⇒ ⇒
+# ⇒ ⇒ **那些 .obj 是 /MT** ⇒ ⇒ 而 `llama-cpp-sys-2` 的 CMake 默认 **/MD** ⇒ ⇒
+# ⇒ ⇒ Windows 上把两者链进同一份 neuron ⇒ ⇒ **LNK2038 / LNK1319**
+# ⇒ ⇒ （`esaxx_rs` × `llama_cpp_sys_2` 的 RuntimeLibrary 不匹配）⇒ ⇒ ⇒ ⇒
+# ⇒ ⇒ ⇒ **它会让 `cargo test --features llamacpp --lib` 死在最后一步链接**
+# ⇒ ⇒ （Rust 侧零 error、零 warning 之外的错，全在链接器那里）。
+# ⇒ ⇒ ⚠️ **上游 candle 是干净的**：它的工作区声明 `tokenizers = { version =
+# ⇒ ⇒ "0.23.1", default-features = false }` ⇒ ⇒ 那条腿**不开** `esaxx_fast`
+# ⇒ ⇒ ⇒ ⇒ 所以本仓这一行是**全图唯一**开着它的地方 ⇒ ⇒ ⇒ ⇒ ⇒ 改这一行 ⇒
+# ⇒ ⇒ ⇒ ⇒ ⇒ /MT 对象**根本不会被编出来** ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ （顺带少编一个 C++ crate）。
+# ⇒ ⇒ 代价：`esaxx_fast` 只是 tokenizers 里 BPE 预分词的**快路径** ⇒ ⇒ 纯 Rust 的
+# ⇒ ⇒ 兜底路径一直都在 ⇒ ⇒ ⇒ **功能不变**，只是慢一点。
+tokenizers = { version = "0.22", optional = true, default-features = false, features = ["onig", "progressbar"] }
 litert-lm = { version = "0.1", optional = true }
 # ⚠️ 2026-11-19（依赖升级那一刀）：mistralrs **v0.8.22 → v0.9.5**。
 # ⇒ ⇒ **为什么这一刀值**：v0.9.0 起 mistral.rs 把 candle 从 **0.10.2** 换成
@@ -82,6 +101,24 @@ mistralrs = { git = "https://github.com/EricLBuehler/mistral.rs", rev = "v0.9.5"
 # cmake; Linux → gcc/clang + cmake; macOS → Xcode + cmake. Default builds
 # (no `llamacpp` feature) do not touch this dep.
 llama-cpp-2 = { version = "0.1", optional = true, features = ["mtmd"] }
+# ⚠⚠️ **刀 17（2026-11-25）—— llama.cpp 那条腿原本拿不到 GPU 后端** ⇒ ⇒
+# ⇒ 「降级阶梯的第三档」在 neuron 里**只剩一半**：策略层说「专家在系统内存、
+# 其余在加速设备」⇒ ⇒ 但**这个 build 里 llama.cpp 根本没有加速设备** ⇒ ⇒
+# ⇒ `with_n_gpu_layers(u32::MAX)` 是个**空指令** ⇒ ⇒ 「其余在显存」那一半
+# ⇒ ⇒ **无处安放**（实测：`cargo tree -e features` 在 `--features llamacpp,cuda`
+# ⇒ 下给 `llama-cpp-sys-2` 开出的 feature 集里**没有 `cuda`** ⇒ ⇒ `GGML_CUDA`
+# ⇒ ⇒ 没开 ⇒ ⇒ build 出来的 llama.cpp **一个 CUDA 后端都没有**）。
+# ⇒ ⇒ 修法＝**把 cuda feature 转发给 llama.cpp**（见上面 `cuda = [...]` 里
+# ⇒ ⇒ 的 `llama-cpp-2?/cuda`）⇒ ⇒ **`?` 是承重的**：`llamacpp` 没开时
+# ⇒ ⇒ 不拖 CUDA 进来 ⇒ ⇒ 「默认档不带 GPU（构建期要 nvcc）」这条纪律不受影响。
+# ⇒ ⇒ ⚠ 代价（**不是免费的**）：llama.cpp 的 CUDA 内核**很重** ⇒ ⇒ ① 编译期
+# ⇒ ⇒ 要 nvcc（CI 与发行链都要接上，见 .github/workflows/rust.yml 的 llamacpp
+# ⇒ ⇒ job ＋ 闸 G27）；② **架构表**默认是 `50-virtual…121a-real` 那一长串 ⇒ ⇒
+# ⇒ ⇒ 在 CI 上是**小时级** ⇒ ⇒ 必须钉版（`CMAKE_CUDA_ARCHITECTURES`）⇒ ⇒
+# ⇒ ⇒ 否则那一格会因超时而红。
+# ⇒ ⇒ ⚠ **上游的机制在这一格是现成的**：llama.cpp 的 `--cpu-moe`（钉版的
+# ⇒ ⇒ `add_cpu_moe_override`）就是「专家钉 CPU、其余照常按 n_gpu_layers 走」
+# ⇒ ⇒ ⇒ ⇒ 所以「第三档」在**接上 CUDA 后端之后**才是真的那一档。
 
 burn = { version = "0.21", features = ["ndarray"], optional = true }
 burn-store = { version = "0.21", features = ["safetensors"], optional = true }
@@ -180,6 +217,13 @@ name = "llamacpp_speed"
 harness = false
 required-features = ["llamacpp"]
 
+# ⚠️ 刀 18：MoE 专家下沉的 **neuron 进程级** 真机探针（走 neuron 自己的
+# llamacpp 腿 ⇒ ⇒ 读回 neuron 那条 eprintln ＋ 量「专家钉 CPU vs 全在显存」
+# 的显存差 ⇒ ⇒ 这一格补的是「探针级」与「neuron 二进制级」之间的那一段）。
+[[example]]
+name = "moe_cpu_moe_probe"
+required-features = ["llamacpp"]
+
 # Per-capability x per-engine x per-device model matrix. Drives a running
 # neuron server (start with examples/neuron_server) and reports latency /
 # peak RSS / RTF per row.
@@ -228,6 +272,17 @@ required-features = ["mistralrs"]
 # passthrough is asserted, not assumed.
 [[example]]
 name = "qwen3_8_27b_smoke"
+required-features = ["mistralrs"]
+
+# A/B probe for the mistralrs leg's MTP wiring: runs the SAME real
+# checkpoint twice (NEURON_MISTRALRS_MTP=off / on) and reads the backend's
+# own "MTP accept …%" line out of the child's stdout. The accept rate is
+# the only trustworthy evidence that the built-in draft head really
+# engaged — a successful answer without that line means MTP did nothing.
+# Exit codes distinguish "measured" (0) from "failed" (1), "cannot decide"
+# (2) and "blocked by a backend prerequisite" (3).
+[[example]]
+name = "mtp_ab_probe"
 required-features = ["mistralrs"]
 
 # Real-weights verification that StreamingVaeDecoder reproduces the full
@@ -290,10 +345,50 @@ required-features = ["candle"]
 name = "ming3_smoke"
 required-features = ["ming3"]
 
+# Probe for the device-aware acceleration strategy: three columns
+# (what neuron thinks the environment is / what the memory ledger believes /
+# what the machine actually has) reconciled against each other, then the
+# strategy computed for a REAL checkpoint. Exit codes: 0 = measured,
+# 2 = could not run.
+[[example]]
+name = "accel_plan_probe"
+
+# Device A/B bench: the SAME real checkpoint on the CPU leg vs the GPU leg,
+# with nvidia-smi sampling the child's VRAM — so "the weights really are in
+# VRAM" is a measurement, not an inference. Exit codes: 0 = both legs
+# answered (comparison established), 1 = a leg failed, 2 = could not run,
+# 3 = a leg was refused by the platform (e.g. this build has no cuda
+# feature compiled).
+[[example]]
+name = "accel_device_bench"
+required-features = ["candle"]
+
+# Probe for the candle leg's `NEURON_USE_FLASH_ATTN` knob: runs the PRODUCT
+# path (real weights, `CandleLlmRuntime::load` + `chat`) once per spelling
+# of the knob and reads the child's stderr, so "asked for FlashAttention-2"
+# and "FlashAttention-2 is in use" can never be the same untested claim.
+# Exit codes distinguish "measured" (0), "behaved differently" (1) and
+# "could not run" (2).
+[[example]]
+name = "flash_attn_status_probe"
+required-features = ["candle"]
+
 [features]
+# ⚠⚠️ **neuron 自己不决定档**（2026-11-25 刀 9）—— 本仓的 feature 是**能力**的
+# 声明（candle／cuda／flash-attn…），而**谁能打开它们**由**渠道**决定：渠道＝
+# 大脑按宿主形态（桌面／手机／独立服务器）产出的不同产物 ⇒ ⇒ 端脑是 neuron 的
+# **唯一持有方** ⇒ ⇒ 渠道 ⇒ 端脑的档 ⇒ neuron 的档，**逐跳转发** ⇒ ⇒
+# 「源码里有」与「产品里有」之间隔着的就是这条链 ⇒ ⇒ 渠道表（唯一真相）：
+# 父仓 `shadow/scripts/neuron-channels.json`；闸：
+# `shadow/scripts/check-neuron-accel-chain.mjs`（G13～G16）。
 default = ["candle"]
 candle = ["dep:candle", "dep:candle-nn", "dep:candle-transformers", "dep:tokenizers", "dep:safetensors", "dep:wide"]
-flash-attn = ["candle-transformers/flash-attn", "dep:candle-flash-attn"]
+# `flash-attn` implies `cuda`: the FlashAttention-2 kernels are
+# CUDA-only, so a build with FA but without CUDA could never open a CUDA
+# device — the knob would be silently useless. (candle-transformers'
+# own `flash-attn` feature already pulls `candle/cuda` for the DEPENDENCIES;
+# this line is what lets NEURON's own `DeviceSelection::Nvidia` work.)
+flash-attn = ["candle-transformers/flash-attn", "dep:candle-flash-attn", "cuda"]
 metal = ["candle/metal", "candle-nn/metal", "candle-transformers/metal"]
 # The `?` in `mistralrs?/cuda` is load-bearing: it turns the
 # mistralrs backend's CUDA support on **only when that backend is already
@@ -302,13 +397,55 @@ metal = ["candle/metal", "candle-nn/metal", "candle-transformers/metal"]
 # all, `--features mistralrs,cuda` compiles the CUDA kernels for candle but
 # leaves `mistralrs-core` without its `cuda` feature ⇒ ⇒ the mistralrs leg
 # silently runs on the CPU even though the user asked for the GPU.
-cuda = ["candle/cuda", "candle-nn/cuda", "candle-transformers/cuda", "mistralrs?/cuda"]
+cuda = ["candle/cuda", "candle-nn/cuda", "candle-transformers/cuda", "mistralrs?/cuda", "llama-cpp-2?/cuda"]
+# ⚠⚠️ **刀 18（2026-11-26）—— `llamacpp-cuda`：只给 llama.cpp 开 CUDA，**不开 candle 的**
+# ⇒ ⇒ **为什么要有这一档** —— `cuda` 档会同时开 **candle 的 CUDA** 与 **llama.cpp 的 CUDA**
+# ⇒ ⇒ ⇒ 而这两个 GPU 后端在 **Windows 上链不到一起**（实测 `LNK2038` / `LNK1319`）：
+# ⇒ ⇒ ❶ **candle-kernels 是 candle 的「可选依赖」**（`cuda` 档才进依赖图）⇒ ⇒ 它的
+# ⇒ ⇒ 　 `build.rs` **不受任何 feature 门控**（实测 candle-kernels 0.11.0 的 build.rs
+# ⇒ ⇒ 　 **无条件**跑 nvcc）⇒ ⇒ **无条件**编出 `libmoe.a`；
+# ⇒ ⇒ ❷ `cudaforge`（0.1.6）**没有钉 MSVC runtime** ⇒ ⇒ nvcc 在 Windows 上的
+# ⇒ ⇒ 　 默认 CRT 是 **/MT** ⇒ ⇒ `libmoe.a` 里的 `.obj` 是 `MT_StaticRelease`；
+# ⇒ ⇒ ❸ `llama-cpp-sys-2` 的 CMake 默认 **/MD** ⇒ ⇒ `llama.cpp.obj` 是
+# ⇒ ⇒ 　 `MD_DynamicRelease`；
+# ⇒ ⇒ ❹ 两个库链进**同一份** neuron ⇒ ⇒ **LNK2038**（`RuntimeLibrary` 不匹配）。
+# ⇒ ⇒ ⚠ **Linux 上没有这一层概念** ⇒ ⇒ ⇒ CI 跑在 ubuntu ⇒ ⇒ ⇒ **那条 job 永远绿**
+# ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ **平台盲区**。
+# ⇒ ⇒
+# ⇒ ⇒ **这一档的用途**：**只要 llama.cpp 的 GPU 后端、不要 candle 的** ⇒ ⇒ candle 留在
+# ⇒ ⇒ CPU ⇒ ⇒ **candle-kernels 压根不在依赖图里** ⇒ ⇒ ⇒ ⇒ ⇒ /MT 那个源头**从图上
+# ⇒ ⇒ ⇒ ⇒ ⇒ 消失** ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ 链得过（实测链接级✔）。
+# ⇒ ⇒ ⚠ **代价（不是免费的）**：candle 那条腿（qwen／whisper 等）在这一档里**没有
+# ⇒ ⇒ GPU** ⇒ ⇒ ⇒ 想要 candle 也上 GPU ⇒ ⇒ ⇒ 那是 `cuda` 档 ⇒ ⇒ ⇒ 而那一档在
+# ⇒ ⇒ **Windows 上仍链不过** ⇒ ⇒ ⇒ **上游债**（candle-kernels 的 build.rs 没钉
+# ⇒ ⇒ ⇒ MSVC runtime ⇒ ⇒ ⇒ 绕法＝给 nvcc 传 `-Xcompiler /MD` ＋ **强制重编**
+# ⇒ ⇒ ⇒ 那个 build.rs（它**没有** `rerun-if-env-changed` ⇒ ⇒ ⇒ 改环境变量不会
+# ⇒ ⇒ ⇒ 触发重编 ⇒ ⇒ ⇒ ⇒ ⇒ ⇒ 拿到的是**陈旧的 /MT 产物**）。
+llamacpp-cuda = ["llama-cpp-2?/cuda"]
 chronos2 = ["candle"]
 voxcpm = ["dep:burn", "dep:burn-store", "dep:tokenizers"]
 # Ming-3.0-tts (inclusionAI dense 0.5B): contract/tasks/config layers plus
 # the burn model stack (backbone via minicpm4, DiT flow head, CFM sampler).
 # The AudioVAE + runtime wiring arrive with the runtime knife.
 ming3 = ["dep:tokenizers", "dep:burn", "dep:burn-store"]
+# Ming-3.0 voice cloning: the campplus.onnx speaker-embedding extractor
+# (own faithful povey fbank — the asr one is the SenseVoice Hamming
+# override and lives behind `tract`, which we do not want here).
+# 声纹嵌入（CAM++）—— **内置模型**，随发行包走（exe 同级 models/），
+# 用户零配置。与音色克隆共用同一套特征提取（两条腿一份实现）。
+# ⚠️ **纯 Rust 执行后端（tract）** ⇒ ⇒ **发行包不必带 onnxruntime.dll**
+# （18 MB／渠道；移动端还要 arm64 的 .so）⇒ ⇒ 「内置」在打包这一格才成立。
+# 实测：同一份权重＋同一份 fbank，tract 与 onnxruntime 1.30 的向量
+# **余弦 1.000000000**（max_abs 9e-06）⇒ ⇒ 纯 Rust 是忠实替身。
+# ⚠️ 只取 `dep:tract-onnx`（**不取整个 `tract` 档**）—— 那档会把 OCR／
+# 图像解码一起拖进来，而声纹这条腿只要 ONNX 执行器。
+speaker-embedding = ["dep:tract-onnx", "dep:rustfft"]
+ming3-clone = ["ming3", "speaker-embedding"]
+# 人脸识别（内置模型）—— YuNet 检脸 ＋ MobileFaceNet 嵌入。
+# **纯 Rust 执行后端（tract）** ⇒ ⇒ 发行包**不必带 onnxruntime.dll** ⇒ ⇒
+# 「打包进安装包」这条腿才真的能落地（实测：SCRFD 全系列在 tract 上卡在 FPN 的
+# Resize；YuNet 没有 Resize ⇒ 能跑）。
+face-embedding = ["dep:tract-onnx"]
 # Burn-side CUDA backend for the VoxCPM2 TTS runtime (CubeCL kernels).
 # Separate from the `cuda` feature above, which is candle's: pulling
 # burn/cuda in compiles the CubeCL stack, which is a heavy build. Combine

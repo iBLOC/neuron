@@ -10,6 +10,16 @@ pub mod modality;
 
 pub use modality::Modality;
 
+/// 「LLM 能不能输入音频」的可判事实（**纯函数模块** ⇒ ⇒ 默认档也能编、也能判
+/// ⇒ ⇒ 那条 llama.cpp 腿要 libclang ⇒ ⇒ 判据写在它里面就永远跑不到）。
+pub mod audio_input;
+pub use audio_input::AudioInputState;
+
+/// **四种载荷**（文本／图片／音频／视频）的规范名与**协议层**口径
+/// （**单一真相源** ⇒ ⇒ 别处不许各写各的载荷清单）。
+pub mod payloads;
+pub use payloads::{PayloadSupport, PAYLOADS};
+
 pub mod api_style;
 pub use api_style::ApiStyle;
 

@@ -14,6 +14,7 @@
 //! [`create_router`], which wires up all routes into a single
 //! axum [`Router`].
 
+mod capabilities;
 mod dispatch;
 mod error;
 mod handlers;
@@ -28,6 +29,7 @@ pub use dispatch::adapter_dispatch_at;
 pub use error::ServerError;
 pub use handlers::{
     audio_speech, audio_speech_stream, audio_transcriptions, chat_completions, decisions,
+    face_embeddings, speaker_embeddings,
     embedding_handler, forecast, health_handler, images_generations, info_handler,
     list_models, rerank, scheduler_evict,
     ocr_recognize, scheduler_status, vision_classify, vision_detect, vision_lora_list,
@@ -61,6 +63,12 @@ pub fn routes() -> Router<ServerState> {
     Router::new()
         .route("/health", get(health_handler))
         .route("/v1/info", get(info_handler))
+        // ⚠️ 「这枚 chat 模型能不能吃音频」的可读面 ⇒ ⇒ 颞叶那一格
+        // 「评估 LLM 能否输入音频」才有判据源。
+        .route(
+            "/v1/capabilities/llm",
+            get(crate::server::capabilities::llm_capabilities),
+        )
         .route("/v1/models", get(crate::models::handlers::list_models))
         .route("/v1/models/pull", post(crate::models::handlers::pull_model).get(crate::models::handlers::list_pull_jobs))
         .route(
@@ -78,6 +86,8 @@ pub fn routes() -> Router<ServerState> {
         .route("/v1/audio/speech", post(audio_speech))
         .route("/v1/audio/speech/stream", post(audio_speech_stream))
         .route("/v1/audio/transcriptions", post(audio_transcriptions))
+        .route("/v1/audio/speaker-embeddings", post(speaker_embeddings))
+        .route("/v1/vision/faces/embed", post(face_embeddings))
         .route("/v1/rerank", post(rerank))
         .route("/v1/embeddings", post(embedding_handler))
         .route("/v1/images/generations", post(images_generations))

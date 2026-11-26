@@ -8,6 +8,18 @@ use super::{LlmRuntime, LlmImpl, ModelInfo, NeuronError, RegisteredLlm, Registry
 use crate::config::{DeviceSelection, NeuronConfig, ResourceTracker};
 use crate::llm::{ChatRequest, ChatResponse, ChatChunk};
 
+/// **懒注册失败的两种形状**（2026-11-26 刀 16 续）—— 「盘上没这份模型」
+/// 与「**策略层拒了**」是**两件事** ⇒ ⇒ 混成一句 `Err` ⇒ ⇒ 调用方只能说
+/// 「没注册」⇒ ⇒ 失败长得像「模型没下载」⇒ ⇒ 而真相是「内存装不下」。
+#[derive(Debug, Clone)]
+pub enum TryRegisterDownloaded {
+    /// 盘上压根没有这份模型（**真·没注册**）—— 这一档**不说**是「被拒」。
+    NotOnDisk,
+    /// **注册被拒** —— 策略层算完了、然后拒绝（例如内存装不下）⇒ ⇒ 这一句
+    /// **必须**原样透给调用方。
+    Refused(String),
+}
+
 pub struct LlmRuntimeRegistry {
     pub registered: Arc<Mutex<Vec<RegisteredLlm>>>,
     // std (not tokio) mutex: the load itself runs *outside* the lock
@@ -22,6 +34,14 @@ pub struct LlmRuntimeRegistry {
     /// the boot-time auto-scan already ran — without the dirs there is
     /// no way to turn `ModelNotRegistered` into a loadable entry.
     config: Arc<NeuronConfig>,
+    /// **为什么这个 id 没注册**（2026-11-26 刀 16 续）—— 键＝model_id。
+    ///
+    /// ⚠️ **为什么要有这一栏**：「**没注册**」与「**注册被拒**」是**两件事**
+    /// ⇒ ⇒ 只说前者 ⇒ ⇒ 失败长得像「模型没下载」⇒ ⇒ 而真相是「内存装不下」
+    /// （真机逐字：`no engine registered for model 'qwen3-0.6b'` —— 盘上
+    /// **明明有**那份权重，策略层也**已经算出了**为什么 ⇒ ⇒ 那句话在骗人）。
+    /// ⇒ ⇒ 真实原因**留着**（typed ⇒ ⇒ 不靠解析字符串）⇒ ⇒ 调用方能照实说。
+    registration_refusals: Arc<Mutex<HashMap<String, String>>>,
 }
 
 impl Clone for LlmRuntimeRegistry {
@@ -31,6 +51,7 @@ impl Clone for LlmRuntimeRegistry {
             loaded: self.loaded.clone(),
             resources: self.resources.clone(),
             config: self.config.clone(),
+            registration_refusals: self.registration_refusals.clone(),
         }
     }
 }
@@ -40,16 +61,26 @@ impl LlmRuntimeRegistry {
         Self {
             registered: Arc::new(Mutex::new(Vec::new())),
             loaded: Arc::new(std::sync::Mutex::new(HashMap::new())),
-            resources: Arc::new(Mutex::new(ResourceTracker::default())),
+            // 账本按**探测到的环境**建，而不是两个写死的常量
+            // （旧的 CPU 16 GB／GPU 8 GB 在「15.9 GB 内存 ＋ 24 GB 显存」的
+            // 机器上把 GPU 那一半少算了三倍）⇒ ⇒ 而且「Auto」现在先问成
+            // 答案再记账，不再被当成 CPU。
+            resources: Arc::new(Mutex::new(ResourceTracker::detect())),
             config,
+            registration_refusals: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
+    /// 注册一个模型。
+    ///
+    /// ⚠ **dtype 跟着条目走**（刀 12）：策略算出来的那一档必须**原样**交给
+    /// 运行时 ⇒ ⇒ 否则「自动降级」只停在计划里，运行时仍按 f32 物化。
     pub fn register(
         &self,
         model_id: String,
         impl_id: LlmImpl,
         device: DeviceSelection,
+        dtype: crate::accel::DTypeChoice,
         required_memory_bytes: u64,
     ) -> Result<(), NeuronError> {
         // Check resources before registering
@@ -70,6 +101,7 @@ impl LlmRuntimeRegistry {
             model_id,
             impl_id,
             device,
+            dtype,
             required_memory_bytes,
         });
         Ok(())
@@ -89,7 +121,7 @@ impl LlmRuntimeRegistry {
     /// duplicate ids: `runtime_for` takes the first match and the
     /// loaded-cache dedup keeps one runtime.
     #[cfg(feature = "candle")]
-    fn try_register_downloaded(&self, model_id: &str) -> Result<(), String> {
+    fn try_register_downloaded(&self, model_id: &str) -> Result<(), TryRegisterDownloaded> {
         for dir in &self.config.model_dirs {
             let candidate = dir.join("llm").join(model_id);
             if !candidate.join("model.safetensors").exists() {
@@ -98,16 +130,51 @@ impl LlmRuntimeRegistry {
             if self.is_registered(model_id) {
                 return Ok(());
             }
+            // 与**启动扫描**同一口径：同一份策略、同一份预算 ⇒ ⇒
+            // 免得「重启能起来、拉下来就用」这种两副面孔。
+            let caps = crate::accel::HostCapabilities::detect_cached();
+            let req = crate::accel::StrategyRequest {
+                device: match self.config.device {
+                    crate::config::DeviceSelection::Auto => None,
+                    d => Some(d),
+                },
+                dtype: crate::accel::requested_dtype(),
+                flash_attn: crate::accel::requested_flash_attn(),
+            };
+            let plan = crate::accel::plan_with(&caps, &candidate, &req).map_err(|e| {
+                TryRegisterDownloaded::Refused(format!("{model_id}: {e}"))
+            })?;
             return self
                 .register(
-                    model_id.to_string(),
-                    LlmImpl::Candle,
-                    DeviceSelection::Auto,
-                    8_000_000_000,
+                    plan.model_id,
+                    plan.engine,
+                    plan.device,
+                    plan.dtype,
+                    plan.required_bytes,
                 )
-                .map_err(|e| e.to_string());
+                .map_err(|e| TryRegisterDownloaded::Refused(e.to_string()));
         }
-        Err(format!("no downloaded model at llm/{model_id} under model_dirs"))
+        Err(TryRegisterDownloaded::NotOnDisk)
+    }
+
+    /// **为什么这个 id 没注册** —— `None` ＝「压根没找到这份模型」（真·没注册）。
+    ///
+    /// ⚠️ 这一栏是**给调用方照实说的**（刀 16 续）⇒ ⇒ 「注册被拒」不许被
+    /// 说成「没注册」⇒ ⇒ 失败不许长得像「模型没下载」。
+    pub fn registration_refusal(&self, model_id: &str) -> Option<String> {
+        self.registration_refusals
+            .lock()
+            .ok()
+            .and_then(|m| m.get(model_id).cloned())
+    }
+
+    /// **记下「注册被拒」的原因**（只有被拒才记 ⇒ ⇒ 「盘上没有」不记）。
+    pub fn record_registration_refusal(&self, model_id: &str, e: TryRegisterDownloaded) {
+        if let TryRegisterDownloaded::Refused(why) = e
+            && let Ok(mut refusals) = self.registration_refusals.lock()
+        {
+            refusals.insert(model_id.to_string(), why);
+        }
     }
 
     pub async fn runtime_for(&self, model_id: &str) -> Result<Arc<dyn LlmRuntime>, NeuronError> {
@@ -121,7 +188,10 @@ impl LlmRuntimeRegistry {
         if !self.is_registered(model_id)
             && let Err(e) = self.try_register_downloaded(model_id)
         {
-            tracing::debug!(model = %model_id, error = %e, "lazy registration did not apply");
+            tracing::debug!(model = %model_id, error = ?e, "lazy registration did not apply");
+            // ⚠️ **被拒的原因要留着**（2026-11-26 刀 16 续）—— 只有「**被拒**」
+            // 才记；「盘上没有」是**真·没注册** ⇒ ⇒ 不记（那句话说对了）。
+            self.record_registration_refusal(model_id, e);
         }
 
         let entry = {
@@ -139,6 +209,7 @@ impl LlmRuntimeRegistry {
             model_id: entry.model_id.clone(),
             impl_id: entry.impl_id,
             device: entry.device,
+            dtype: entry.dtype,
         };
 
         {
@@ -154,11 +225,19 @@ impl LlmRuntimeRegistry {
         let rt: Arc<dyn LlmRuntime> = match entry.impl_id {
             #[cfg(feature = "candle")]
             LlmImpl::Candle => {
-                let loaded = super::CandleLlmRuntime::load(&entry.model_id, &entry.device)
-                    .await
-                    .map_err(|e| {
-                        NeuronError::new(format!("CandleLlmRuntime load failed: {e}"))
-                    })?;
+                // ⚠️ **把【注册面用的那份根】原样递给加载面**（刀 16 续）——
+                // 注册刚在 `config.model_dirs` 里找到这份权重 ⇒ ⇒ 加载
+                // 就必须读**同一份** ⇒ ⇒ 否则「引擎注册上了、权重找不到」
+                // （真机逐字：`model 'qwen3-0.6b' not found under
+                // ./.neuron/models` ⇒ ⇒ 失败长得像「模型没下载」）。
+                let loaded = super::CandleLlmRuntime::load_with_dtype(
+                    &entry.model_id,
+                    &entry.device,
+                    entry.dtype,
+                    &self.config.model_dirs,
+                )
+                .await
+                .map_err(|e| NeuronError::new(format!("CandleLlmRuntime load failed: {e}")))?;
                 Arc::from(loaded)
             }
             #[cfg(feature = "litert")]
@@ -252,6 +331,19 @@ impl LlmRuntimeRegistry {
         ids.sort();
         ids.dedup();
         ids
+    }
+
+    /// **已加载**的运行时（**只读，不加载**）。
+    ///
+    /// ⚠️ **为什么不用 `runtime_for`** —— 它**会加载权重** ⇒ ⇒ 读面为了
+    /// 回答「这枚模型能不能吃音频」把几 GB 权重拉进内存 ⇒ ⇒ 那是**副作用**，
+    /// 不是读。⇒ ⇒ 权重没加载 ⇒ ⇒ 那一格诚实地是「判不了」。
+    pub fn loaded_runtime(&self, model_id: &str) -> Option<Arc<dyn LlmRuntime>> {
+        let loaded = self.loaded.lock().unwrap();
+        loaded
+            .iter()
+            .find(|(k, _)| k.model_id == model_id)
+            .map(|(_, rt)| rt.clone())
     }
 
     pub fn list_registered(&self) -> Vec<String> {
@@ -360,6 +452,7 @@ mod tests {
             "stub-model-a".into(),
             LlmImpl::Stub,
             DeviceSelection::Cpu,
+            crate::accel::DTypeChoice::F32,
             0,
         )
         .unwrap();
@@ -389,6 +482,7 @@ mod tests {
             "stub-only".into(),
             LlmImpl::Stub,
             DeviceSelection::Cpu,
+            crate::accel::DTypeChoice::F32,
             0,
         )
         .unwrap();
@@ -417,6 +511,7 @@ mod tests {
             "model-x".into(),
             LlmImpl::Stub,
             DeviceSelection::Cpu,
+            crate::accel::DTypeChoice::F32,
             0,
         )
         .unwrap();
@@ -454,6 +549,7 @@ mod tests {
             "model-y".into(),
             LlmImpl::Stub,
             DeviceSelection::Cpu,
+            crate::accel::DTypeChoice::F32,
             0,
         )
         .unwrap();
@@ -477,6 +573,7 @@ mod tests {
             "model-z".into(),
             LlmImpl::Stub,
             DeviceSelection::Cpu,
+            crate::accel::DTypeChoice::F32,
             0,
         )
         .unwrap();
@@ -497,6 +594,14 @@ mod tests {
         let model_dir = tmp.path().join("llm").join("dl-model");
         std::fs::create_dir_all(&model_dir).unwrap();
         std::fs::write(model_dir.join("model.safetensors"), b"not-real-weights").unwrap();
+        // 真实模型快照里**一定有** config.json（架构从那儿读）⇒ ⇒ 夹具
+        // 也得长成那样，否则策略层读不出事实就无从决策（这正是这次改动
+        // 暴露出来的：**没读出事实 ⇒ 注册期就该说清，而不是猜一个腿**）。
+        std::fs::write(
+            model_dir.join("config.json"),
+            r#"{"model_type":"qwen2","torch_dtype":"bfloat16"}"#,
+        )
+        .unwrap();
 
         let config = Arc::new(NeuronConfig::new().with_model_dirs(vec![tmp.path().to_path_buf()]));
         let reg = LlmRuntimeRegistry::new(config);
@@ -522,6 +627,14 @@ mod tests {
         let model_dir = tmp.path().join("llm").join("dl-model");
         std::fs::create_dir_all(&model_dir).unwrap();
         std::fs::write(model_dir.join("model.safetensors"), b"not-real-weights").unwrap();
+        // 真实模型快照里**一定有** config.json（架构从那儿读）⇒ ⇒ 夹具
+        // 也得长成那样，否则策略层读不出事实就无从决策（这正是这次改动
+        // 暴露出来的：**没读出事实 ⇒ 注册期就该说清，而不是猜一个腿**）。
+        std::fs::write(
+            model_dir.join("config.json"),
+            r#"{"model_type":"qwen2","torch_dtype":"bfloat16"}"#,
+        )
+        .unwrap();
 
         let config = Arc::new(NeuronConfig::new().with_model_dirs(vec![tmp.path().to_path_buf()]));
         let reg = LlmRuntimeRegistry::new(config);
@@ -539,5 +652,46 @@ mod tests {
             reg.is_registered("dl-model"),
             "the lazy registration must have applied"
         );
+    }
+
+    /// **「盘上没有」不是「被拒」** ⇒ ⇒ 不许记成被拒（那句话说对了）。
+    #[test]
+    fn a_model_that_is_not_on_disk_is_not_a_refusal() {
+        let tmp = std::env::temp_dir().join(format!("neuron-reg-notondisk-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let config = Arc::new(NeuronConfig::new().with_model_dirs(vec![tmp.clone()]));
+        let reg = LlmRuntimeRegistry::new(config);
+        let err = reg.try_register_downloaded("never-downloaded").unwrap_err();
+        assert!(
+            matches!(err, TryRegisterDownloaded::NotOnDisk),
+            "a model that is not on disk must be NotOnDisk; got {err:?}"
+        );
+        // 不记 ⇒ ⇒ 调用方仍然只能说「没注册」（那句话说对了）。
+        reg.record_registration_refusal("never-downloaded", err);
+        assert_eq!(
+            reg.registration_refusal("never-downloaded"),
+            None,
+            "「盘上没有」不许被记成「被拒」"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// **「被拒」的原因要留着** ⇒ ⇒ 调用方能照实说（不许只剩「没注册」）。
+    #[test]
+    fn a_refusal_keeps_its_reason() {
+        let config = Arc::new(NeuronConfig::new());
+        let reg = LlmRuntimeRegistry::new(config);
+        let why = "内存装不下 f32（要 3 006 600 656 字节，而内存只有 1 021 844 字节）";
+        reg.record_registration_refusal(
+            "qwen3-0.6b",
+            TryRegisterDownloaded::Refused(why.to_string()),
+        );
+        assert_eq!(
+            reg.registration_refusal("qwen3-0.6b"),
+            Some(why.to_string()),
+            "the refusal reason must survive — otherwise the caller can only say「没注册」"
+        );
+        assert_eq!(reg.registration_refusal("other-model"), None);
     }
 }

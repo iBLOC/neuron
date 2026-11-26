@@ -11,15 +11,8 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use crate::config::{DeviceSelection, NeuronConfig};
-use crate::llm::{LlmImpl, LlmRuntime, LlmRuntimeRegistry, ModelInfo, RegisteredLlm};
+use crate::llm::{LlmImpl, LlmRuntime, LlmRuntimeRegistry, ModelInfo};
 use crate::models::EngineType;
-
-use crate::chronos2::{Chronos2Registry, RegisteredChronos2};
-use crate::embedding::RegisteredEmbedding;
-use crate::rerank::RegisteredRerank;
-use crate::tts::RegisteredTts;
-use crate::asr::RegisteredAsr;
-use crate::vision::RegisteredVision;
 
 /// Shared application state injected into every axum handler.
 #[derive(Clone)]
@@ -61,6 +54,11 @@ pub struct ServerState {
     pub embedding: Arc<dyn crate::embedding::EmbeddingRuntime>,
     pub vision: Arc<dyn crate::vision::VisionRuntime>,
     pub ocr: Arc<dyn crate::ocr::OcrRuntime>,
+    /// **声纹运行时**（CAM++，内置权重）—— 懒加载：第一次调用才开 ONNX 会话。
+    pub spkemb: Arc<dyn crate::spk::SpeakerEmbeddingRuntime>,
+    /// **人脸运行时**（YuNet 检脸 ＋ MobileFaceNet 嵌入，内置权重）—— 懒加载：
+    /// 第一次调用才开 ONNX 会话。
+    pub face: Arc<dyn crate::face::FaceEmbeddingRuntime>,
     pub decision: Arc<dyn crate::decision::DecisionRuntime>,
     pub imagegen: Arc<dyn crate::imagegen::ImageGenRuntime>,
 
@@ -93,7 +91,7 @@ impl ServerState {
         let device = config.device;
 
         // ---- LLM registry -------------------------------------------------
-        let mut llm_registry = LlmRuntimeRegistry::new(config_arc.clone());
+        let llm_registry = LlmRuntimeRegistry::new(config_arc.clone());
 
         // New-dispatch engines (state.engines.llm). Built as a
         // mutable local first so the env match below can register
@@ -110,7 +108,12 @@ impl ServerState {
                     let model_id = crate::config::env_var_result("LLM_DEFAULT_MODEL")
                         .unwrap_or_else(|_| "qwen3-0.6b".to_string());
                     if let Err(e) = llm_registry.register(
-                        model_id.clone(), LlmImpl::Candle, device.clone(), 8_000_000_000,
+                        model_id.clone(),
+                        LlmImpl::Candle,
+                        device,
+                        crate::accel::requested_dtype()
+                            .unwrap_or(crate::accel::DTypeChoice::F32),
+                        8_000_000_000,
                     ) {
                         eprintln!("[neuron] Candle LLM register failed for model={model_id:?} device={device:?}: {e}");
                     } else {
@@ -126,7 +129,12 @@ impl ServerState {
                 #[cfg(feature = "litert")]
                 {
                     if let Err(e) = llm_registry.register(
-                        "litert-model".into(), LlmImpl::Litert, device.clone(), 1_000_000_000,
+                        "litert-model".into(),
+                        LlmImpl::Litert,
+                        device,
+                        crate::accel::requested_dtype()
+                            .unwrap_or(crate::accel::DTypeChoice::F32),
+                        1_000_000_000,
                     ) {
                         eprintln!("[neuron] Litert LLM register failed: {e}");
                     }
@@ -144,7 +152,9 @@ impl ServerState {
                     if let Err(e) = llm_registry.register(
                         model_id.clone(),
                         LlmImpl::MistralRs,
-                        device.clone(),
+                        device,
+                        crate::accel::requested_dtype()
+                            .unwrap_or(crate::accel::DTypeChoice::F32),
                         8_000_000_000,
                     ) {
                         eprintln!(
@@ -175,7 +185,9 @@ impl ServerState {
                     if let Err(e) = llm_registry.register(
                         model_id.clone(),
                         LlmImpl::LlamaCpp,
-                        device.clone(),
+                        device,
+                        crate::accel::requested_dtype()
+                            .unwrap_or(crate::accel::DTypeChoice::F32),
                         8_000_000_000,
                     ) {
                         eprintln!(
@@ -245,46 +257,46 @@ impl ServerState {
         // endpoint verbatim — tools included. This is what lets the
         // stack container serve cloud-quality models for benchmarking
         // the full production stack without local weights.
-        if let Ok(base) = std::env::var("NEURON_REMOTE_BASE_URL") {
-            if !base.trim().is_empty() {
-                if let Ok(ids) = std::env::var("NEURON_REMOTE_MODELS") {
-                    let key = std::env::var("NEURON_REMOTE_API_KEY").unwrap_or_default();
-                    // Opt-in outbound PII pseudonymization. Only applied to
-                    // genuinely external endpoints — a local remote (LAN
-                    // gateway, loopback) is not an egress.
-                    let redact = std::env::var("NEURON_REMOTE_REDACT_PII")
-                        .map(|v| {
-                            let v = v.trim().to_ascii_lowercase();
-                            v == "1" || v == "true" || v == "yes" || v == "on"
-                        })
-                        .unwrap_or(false)
-                        && synapse_privacy::is_external_url(base.trim());
-                    for id in ids.split(',').map(str::trim).filter(|s| !s.is_empty()) {
-                        let mut engine = crate::engine::remote::RemoteLlmEngine::new(
-                            base.trim().to_string(),
-                            key.clone(),
-                            id.to_string(),
-                        );
-                        if redact {
-                            engine = engine.with_privacy();
-                        }
-                        let engine: std::sync::Arc<dyn crate::engine::AnyCapabilityEngine> =
-                            std::sync::Arc::new(engine);
-                        engines.llm.register(id.to_string(), engine.clone());
-                        if engines.llm.default().is_none() {
-                            engines.llm.set_default(engine);
-                        }
-                        eprintln!(
-                            "[neuron] registered remote model {id} → {}{}",
-                            base.trim(),
-                            if redact { " (PII redaction on)" } else { "" }
-                        );
+        if let Ok(base) = std::env::var("NEURON_REMOTE_BASE_URL")
+            && !base.trim().is_empty()
+        {
+            if let Ok(ids) = std::env::var("NEURON_REMOTE_MODELS") {
+                let key = std::env::var("NEURON_REMOTE_API_KEY").unwrap_or_default();
+                // Opt-in outbound PII pseudonymization. Only applied to
+                // genuinely external endpoints — a local remote (LAN
+                // gateway, loopback) is not an egress.
+                let redact = std::env::var("NEURON_REMOTE_REDACT_PII")
+                    .map(|v| {
+                        let v = v.trim().to_ascii_lowercase();
+                        v == "1" || v == "true" || v == "yes" || v == "on"
+                    })
+                    .unwrap_or(false)
+                    && synapse_privacy::is_external_url(base.trim());
+                for id in ids.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                    let mut engine = crate::engine::remote::RemoteLlmEngine::new(
+                        base.trim().to_string(),
+                        key.clone(),
+                        id.to_string(),
+                    );
+                    if redact {
+                        engine = engine.with_privacy();
                     }
-                } else {
+                    let engine: std::sync::Arc<dyn crate::engine::AnyCapabilityEngine> =
+                        std::sync::Arc::new(engine);
+                    engines.llm.register(id.to_string(), engine.clone());
+                    if engines.llm.default().is_none() {
+                        engines.llm.set_default(engine);
+                    }
                     eprintln!(
-                        "[neuron] NEURON_REMOTE_BASE_URL set but NEURON_REMOTE_MODELS missing — no remote models registered"
+                        "[neuron] registered remote model {id} → {}{}",
+                        base.trim(),
+                        if redact { " (PII redaction on)" } else { "" }
                     );
                 }
+            } else {
+                eprintln!(
+                    "[neuron] NEURON_REMOTE_BASE_URL set but NEURON_REMOTE_MODELS missing — no remote models registered"
+                );
             }
         }
 
@@ -298,6 +310,8 @@ impl ServerState {
                         reg.model_id.clone(),
                         impl_id,
                         reg.device,
+                        crate::accel::requested_dtype()
+                            .unwrap_or(crate::accel::DTypeChoice::F32),
                         reg.required_memory_bytes,
                     );
                 } else {
@@ -319,6 +333,17 @@ impl ServerState {
         {
             let known: std::collections::HashSet<String> =
                 llm_registry.list_registered().into_iter().collect();
+            // 探测一次就够（探测要问 candle 能不能开 CUDA ⇒ 不便宜）；
+            // 用户显式指定的设备／dtype 优先，Auto 才交给策略。
+            let caps = crate::accel::HostCapabilities::detect_cached();
+            let req = crate::accel::StrategyRequest {
+                device: match device {
+                    crate::config::DeviceSelection::Auto => None,
+                    d => Some(d),
+                },
+                dtype: crate::accel::requested_dtype(),
+                flash_attn: crate::accel::requested_flash_attn(),
+            };
             for dir in &config.model_dirs {
                 let Ok(entries) = std::fs::read_dir(dir.join("llm")) else {
                     continue;
@@ -328,17 +353,58 @@ impl ServerState {
                     if known.contains(&id) || !entry.path().join("model.safetensors").exists() {
                         continue;
                     }
-                    match llm_registry.register(
-                        id.clone(),
-                        LlmImpl::Candle,
-                        device.clone(),
-                        8_000_000_000,
-                    ) {
-                        Ok(()) => eprintln!(
-                            "[neuron] auto-registered downloaded llm model={id:?} (candle)"
-                        ),
-                        Err(e) => {
-                            eprintln!("[neuron] auto-register failed for {id:?}: {e}")
+                    // 策略面：这条腿能不能读它、跑在哪个设备、要占多少字节
+                    // —— 全部从**盘上的事实**算出来，不写死（旧的 8 GB 是
+                    // 编出来的数字：0.92 GiB 的模型也按 8 GB 记）。
+                    match crate::accel::plan_with(&caps, &entry.path(), &req) {
+                        Ok(plan) => {
+                            match llm_registry.register(
+                                plan.model_id.clone(),
+                                plan.engine,
+                                plan.device,
+                                plan.dtype,
+                                plan.required_bytes,
+                            ) {
+                                Ok(()) => eprintln!(
+                                    "[neuron] auto-registered downloaded llm model={id:?} engine={} device={:?} dtype={} bytes={} | 策略：{}",
+                                    plan.engine.as_str(),
+                                    plan.device,
+                                    plan.dtype.name(),
+                                    plan.required_bytes,
+                                    plan.reasons.join("；"),
+                                ),
+                                Err(e) => {
+                                    // ⚠️ **拒绝的理由要留给调用方**（2026-11-26 刀 16 续）
+                                    // —— 只 eprintln ⇒ ⇒ 到了请求那一层就只剩
+                                    // 「没注册」⇒ ⇒ 失败长得像「模型没下载」⇒ ⇒
+                                    // 而盘上**明明有**那份权重。
+                                    llm_registry.record_registration_refusal(
+                                        &id,
+                                        crate::llm::TryRegisterDownloaded::Refused(
+                                            e.to_string(),
+                                        ),
+                                    );
+                                    eprintln!(
+                                        "[neuron] auto-register failed for {id:?}: {e} | 策略：{}",
+                                        plan.unavailable.join("；"),
+                                    );
+                                }
+                            }
+                        }
+                        Err(why) => {
+                            // **没有腿能读它 ⇒ 注册期就说清**，不注册一个
+                            // 注定在 load 时才炸的条目。
+                            //
+                            // ⚠️ **而且要【记住】为什么**（2026-11-26 刀 16 续）
+                            // —— 否则请求那一层只能说「没注册」⇒ ⇒ 失败长得
+                            // 像「模型没下载」⇒ ⇒ 而盘上**明明有**那份权重
+                            // （真机逐字：`no engine registered for model
+                            // 'qwen3-0.6b'` —— 那句话在骗人）。
+                            llm_registry.record_registration_refusal(
+                                &id,
+                                crate::llm::TryRegisterDownloaded::Refused(why.clone()),
+                            );
+                            eprintln!("[neuron] auto-register skipped for {id:?}: {why}");
                         }
                     }
                 }
@@ -359,14 +425,14 @@ impl ServerState {
         //   - `/v1/audio/speech` defaults `model` to `"echo-tts"` (which is
         //     unregistered), so omitting `model` continues to fall through to
         //     `state.tts` shortcut — no behavior regression there.
-        let mut tts_registry = crate::tts::TtsRuntimeRegistry::new(config_arc.clone());
+        let tts_registry = crate::tts::TtsRuntimeRegistry::new(config_arc.clone());
         let tts_runtime_env = crate::config::env_var("TTS_RUNTIME");
         match tts_runtime_env.as_deref() {
             Some("voxcpm") | Some("burn") => {
                 #[cfg(feature = "voxcpm")]
                 {
                     let _ = tts_registry.register(
-                        "voxcpm-model".into(), crate::tts::TtsImpl::Burn, device.clone(), 2_000_000_000,
+                        "voxcpm-model".into(), crate::tts::TtsImpl::Burn, device, 2_000_000_000,
                     );
                 }
                 #[cfg(not(feature = "voxcpm"))]
@@ -379,7 +445,7 @@ impl ServerState {
                 {
                     // 2B params materialized as f32 ≈ 9.2 GB + activations.
                     let _ = tts_registry.register(
-                        "voxcpm2".into(), crate::tts::TtsImpl::Burn, device.clone(), 10_000_000_000,
+                        "voxcpm2".into(), crate::tts::TtsImpl::Burn, device, 10_000_000_000,
                     );
                 }
                 #[cfg(not(feature = "voxcpm"))]
@@ -394,7 +460,7 @@ impl ServerState {
                     // AudioVAE + aggregator) materialized as f32 ≈ 6 GB +
                     // activations.
                     let _ = tts_registry.register(
-                        "ming3".into(), crate::tts::TtsImpl::Burn, device.clone(), 7_000_000_000,
+                        "ming3".into(), crate::tts::TtsImpl::Burn, device, 7_000_000_000,
                     );
                 }
                 #[cfg(not(feature = "ming3"))]
@@ -431,7 +497,7 @@ impl ServerState {
         let tts_shortcut = tts_registry.lazy_default_runtime();
 
         // ---- ASR registry -------------------------------------------------
-        let mut asr_registry = crate::asr::AsrRuntimeRegistry::new(config_arc.clone());
+        let asr_registry = crate::asr::AsrRuntimeRegistry::new(config_arc.clone());
         let asr_runtime_env = crate::config::env_var("ASR_RUNTIME");
         match asr_runtime_env.as_deref() {
             Some("whisper") | Some("candle") => {
@@ -502,7 +568,7 @@ impl ServerState {
         let asr_shortcut = asr_registry.lazy_default_runtime();
 
         // ---- Rerank registry ----------------------------------------------
-        let mut rerank_registry = crate::rerank::RerankRuntimeRegistry::new(config_arc.clone());
+        let rerank_registry = crate::rerank::RerankRuntimeRegistry::new(config_arc.clone());
         let rerank_runtime_env = crate::config::env_var("RERANK_RUNTIME");
         match rerank_runtime_env.as_deref() {
             Some("bge") | Some("candle") => {
@@ -643,7 +709,7 @@ impl ServerState {
         let decision_shortcut = decision_registry.default_runtime();
 
         // ---- Embedding registry -------------------------------------------
-        let mut embedding_registry = crate::embedding::EmbeddingRuntimeRegistry::new(config_arc.clone());
+        let embedding_registry = crate::embedding::EmbeddingRuntimeRegistry::new(config_arc.clone());
         let embedding_runtime_env = crate::config::env_var("EMBEDDING_RUNTIME");
         if let Some("candle") = embedding_runtime_env.as_deref() {
             #[cfg(feature = "candle")]
@@ -704,7 +770,7 @@ impl ServerState {
         //      embedded hosts that build a `NeuronEmbedConfig`.
         // With neither, the registry hands out `UnavailableVisionRuntime`
         // and every vision request fails with a clear 501.
-        let mut vision_registry = crate::vision::VisionRuntimeRegistry::new(config_arc.clone());
+        let vision_registry = crate::vision::VisionRuntimeRegistry::new(config_arc.clone());
         for reg in &config.registrations {
             if reg.capability == EngineType::Vision {
                 if let Ok(impl_id) = crate::vision::VisionImpl::parse(&reg.engine) {
@@ -732,7 +798,7 @@ impl ServerState {
                     match vision_registry.register(
                         model_id.clone(),
                         impl_id,
-                        device.clone(),
+                        device,
                         500_000_000,
                     ) {
                         Ok(()) => eprintln!(
@@ -760,7 +826,7 @@ impl ServerState {
         // OCR is opt-in via config.registrations (capability = "ocr", engine
         // = "paddle-ocr"). Defaults to no models registered (the registry
         // hands out UnavailableOcrRuntime, which surfaces a 501 per request).
-        let mut ocr_registry = crate::ocr::OcrRuntimeRegistry::new(config_arc.clone());
+        let ocr_registry = crate::ocr::OcrRuntimeRegistry::new(config_arc.clone());
         for reg in &config.registrations {
             if reg.capability == EngineType::Ocr {
                 if let Ok(impl_id) = crate::ocr::OcrImpl::parse(&reg.engine) {
@@ -779,6 +845,19 @@ impl ServerState {
             }
         }
         let ocr_shortcut = ocr_registry.default_runtime();
+
+        // ---- Speaker embedding (声纹) --------------------------------------
+        // 内置模型（CAM++，随发行包走 ⇒ 用户零配置）—— **懒加载**：第一次调用
+        // 才开 ONNX 会话（28 MB 的图，eager 加载会拖慢每一次启动与每一个测试）。
+        // 权重找不到时，端点**明确报「模型没找到」**，不返回零向量。
+        let spkemb: Arc<dyn crate::spk::SpeakerEmbeddingRuntime> =
+            Arc::new(crate::spk::LazySpeakerEmbeddingRuntime::new("campplus"));
+
+        // ---- Face embeddings (人脸) -------------------------------------------
+        // 内置模型（YuNet ＋ MobileFaceNet，随发行包走 ⇒ 用户零配置）—— **懒加载**。
+        // 权重找不到时，端点**明确报「模型没找到」**，不返回零向量。
+        let face: Arc<dyn crate::face::FaceEmbeddingRuntime> =
+            Arc::new(crate::face::LazyFaceEmbeddingRuntime::new());
 
         // ---- Vision LoRA registry (empty by default) -----------------------
         let vision_lora_registry = Arc::new(crate::vision::LoraRegistry::new());
@@ -806,7 +885,7 @@ impl ServerState {
         // encoder + FLUX.2 decoder VAE, served on candle). The
         // registered memory estimate is the peak residency (~18 GB in
         // the staged mode, ~28 GB when everything stays resident).
-        let mut imagegen_registry = crate::imagegen::ImageGenRuntimeRegistry::new(config_arc.clone());
+        let imagegen_registry = crate::imagegen::ImageGenRuntimeRegistry::new(config_arc.clone());
         match crate::config::env_var("IMAGEGEN_RUNTIME").as_deref() {
             Some("moss-image") | Some("moss_image") | Some("mossimage") | Some("moss") => {
                 #[cfg(feature = "candle")]
@@ -832,7 +911,7 @@ impl ServerState {
                     if let Err(e) = imagegen_registry.register(
                         "moss-image".into(),
                         crate::imagegen::ImageGenImpl::MossImage,
-                        device.clone(),
+                        device,
                         estimate,
                     ) {
                         eprintln!(concat!(
@@ -1005,6 +1084,8 @@ impl ServerState {
             embedding: embedding_shortcut,
             vision: vision_shortcut,
             ocr: ocr_shortcut,
+            spkemb,
+            face,
             decision: decision_shortcut,
             imagegen: imagegen_shortcut,
             engines: Arc::new(engines),
@@ -1180,7 +1261,13 @@ impl ServerState {
                 let reg = self.llm_registry_lock.lock().await;
                 let impl_id = LlmImpl::parse(&engine)
                     .map_err(|e| crate::llm::NeuronError::new(format!("Invalid LLM engine: {e}")))?;
-                reg.register(model_id, impl_id, device, required_memory_bytes)?;
+                reg.register(
+                    model_id,
+                    impl_id,
+                    device,
+                    crate::accel::requested_dtype().unwrap_or(crate::accel::DTypeChoice::F32),
+                    required_memory_bytes,
+                )?;
             }
             "tts" => {
                 let reg = self.tts_registry_lock.lock().await;

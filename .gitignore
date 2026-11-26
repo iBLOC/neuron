@@ -1,5 +1,6 @@
 /target
 /target-bench
+/target-android
 .worktrees/
 .sisyphus/
 .zcode/
@@ -17,3 +18,8 @@ __pycache__/
 *.pyc
 # Windows shell redirect artifact (a `> nul` that created a file named "nul")
 /nul
+# Windows redirect artifact: a 152 MB linker PDB written to a file named "NONE"
+/NONE
+# Local probe checkpoints / weights (several GB) and probe logs
+/.local/
+/probe-quality.log

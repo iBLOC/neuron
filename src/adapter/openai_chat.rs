@@ -8,9 +8,10 @@ use std::collections::HashMap;
 use super::ApiAdapter;
 use crate::api_error::{ApiError, ApiResult};
 use crate::canonical::{
-    CanonicalLlmRequest, CanonicalLlmResponse, CanonicalLlmStreamEvent,
+    AudioSource, CanonicalLlmRequest, CanonicalLlmResponse, CanonicalLlmStreamEvent,
     CanonicalMessage, CanonicalRequest, CanonicalResponse, CanonicalStreamEvent,
-    ContentBlock, ContentDelta, MessageRole, SamplingParams, StopReason, TextBlock,
+    ContentBlock, ContentDelta, ImageSource, MessageRole, SamplingParams, StopReason,
+    TextBlock,
 };
 use crate::capabilities::AdapterCapabilities;
 
@@ -174,6 +175,118 @@ pub fn openai_to_canonical(req: OpenAiChatRequest) -> Result<CanonicalRequest, S
                 }
             }
         }
+        // Audio parts: OpenAI input_audio entries become ContentBlock::Audio.
+        // BOTH wire shapes are accepted (each side of the chain sends one):
+        //   (1) {"data": "data:audio/wav;base64,...", "format": "wav"} — the brain sends this
+        //   (2) {"data": "<base64>", "format": "wav"}                 — OpenAI official
+        // (1) takes the mime from the data-URI header; (2) derives it from
+        // format. An unknown format is REFUSED, never guessed: a wrong mime
+        // would make the backend decode with the wrong decoder and the error
+        // would then lie about the cause.
+        let mut audios = Vec::new();
+        if let Some(Value::Array(parts)) = &m.content {
+            for p in parts {
+                if p.get("type").and_then(|t| t.as_str()) != Some("input_audio") {
+                    continue;
+                }
+                let Some(ia) = p.get("input_audio") else { continue; };
+                let data = ia.get("data").and_then(|d| d.as_str()).unwrap_or_default();
+                let format = ia.get("format").and_then(|f| f.as_str()).unwrap_or_default();
+                if let Some(rest) = data.strip_prefix("data:") {
+                    let Some((header, payload)) = rest.split_once(";base64,") else {
+                        return Err("malformed input_audio data URI (missing ;base64,)".to_string());
+                    };
+                    let media_type = header
+                        .split(';')
+                        .next()
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or("audio/wav")
+                        .to_string();
+                    audios.push(ContentBlock::Audio(crate::canonical::AudioBlock {
+                        source: crate::canonical::AudioSource::Base64 {
+                            media_type,
+                            data: payload.to_string(),
+                        },
+                    }));
+                    continue;
+                }
+                if data.is_empty() {
+                    return Err("input_audio carries no data".to_string());
+                }
+                let media_type = match format.to_ascii_lowercase().as_str() {
+                    "wav" => "audio/wav",
+                    "mp3" => "audio/mpeg",
+                    "flac" => "audio/flac",
+                    "ogg" => "audio/ogg",
+                    "webm" => "audio/webm",
+                    other => {
+                        return Err(format!(
+                            "input_audio format {other:?} is not recognized \
+                             (wav/mp3/flac/ogg/webm) - refusing to guess a mime type"
+                        ))
+                    }
+                };
+                audios.push(ContentBlock::Audio(crate::canonical::AudioBlock {
+                    source: crate::canonical::AudioSource::Base64 {
+                        media_type: media_type.to_string(),
+                        data: data.to_string(),
+                    },
+                }));
+            }
+        }
+        // Video parts: `video_url` entries become ContentBlock::Video.
+        //
+        // ⚠️ **这是本仓的自有形状** —— OpenAI 官方的 chat 至今**没有**视频
+        // part（视频走它的 Responses API）⇒ ⇒ 这里按与 `image_url` 对称的
+        // 形状定义（`{"type":"video_url","video_url":{"url":…}}`）⇒ ⇒
+        // 端脑／客户端将来发视频时照这个形状走。
+        //
+        // ⚠️ **不许静默丢** —— 旧版只认 `image_url`／`input_audio` ⇒ ⇒
+        // 视频 part 被**整段跳过**（连 prompt 文本里都没有）⇒ ⇒
+        // 「失败长得像成功」。
+        let mut videos = Vec::new();
+        if let Some(Value::Array(parts)) = &m.content {
+            for p in parts {
+                if p.get("type").and_then(|t| t.as_str()) != Some("video_url") {
+                    continue;
+                }
+                let Some(vu) = p.get("video_url") else { continue; };
+                let url = vu.get("url").and_then(|u| u.as_str()).unwrap_or_default();
+                if url.is_empty() {
+                    return Err("video_url carries no url".to_string());
+                }
+                if let Some(rest) = url.strip_prefix("data:") {
+                    let Some((header, payload)) = rest.split_once(";base64,") else {
+                        return Err(
+                            "malformed video_url data URI (missing ;base64,)".to_string()
+                        );
+                    };
+                    let media_type = header.split(';').next().unwrap_or_default().to_string();
+                    // ⚠️ mime 推不出来就报错，不许猜（猜错 ⇒ 上游按错解码器解
+                    // ⇒ ⇒ 错误信息会撒谎）。
+                    if !media_type.starts_with("video/") {
+                        return Err(format!(
+                            "video_url data URI declares {media_type:?} - \
+                             refusing to guess a video mime type"
+                        ));
+                    }
+                    videos.push(ContentBlock::Video(crate::canonical::VideoBlock {
+                        source: crate::canonical::VideoSource::Base64 {
+                            media_type,
+                            data: payload.to_string(),
+                        },
+                    }));
+                } else if url.starts_with("http://") || url.starts_with("https://") {
+                    videos.push(ContentBlock::Video(crate::canonical::VideoBlock {
+                        source: crate::canonical::VideoSource::Url(url.to_string()),
+                    }));
+                } else {
+                    return Err(format!(
+                        "video_url url is neither a data URI nor http(s): {url}"
+                    ));
+                }
+            }
+        }
         // Assistant tool calls: OpenAI wires them as
         // `{id, type: "function", function: {name, arguments: "<json str>"}}`.
         let mut tool_calls = Vec::new();
@@ -192,9 +305,73 @@ pub fn openai_to_canonical(req: OpenAiChatRequest) -> Result<CanonicalRequest, S
                 tool_calls.push(crate::canonical::ToolCall { id, name, arguments });
             }
         }
-        let mut content = Vec::with_capacity(1 + images.len());
+        // Document parts: OpenAI's `file` entries become ContentBlock::Document.
+        //
+        // ⚠️ **端脑早就在发这个形状**（`telencephalon/src/lobes/mod.rs` 的
+        // `AttachmentKind::Pdf` ⇒ `{"type":"file","file":{"filename",
+        // "file_data":"data:application/pdf;base64,…"}}`）⇒ ⇒ 而这一段
+        // **此前根本没解析它** ⇒ ⇒ 文档被**静默丢掉**（模型看不见那份 PDF，
+        // 但回话看着完全正常）⇒ ⇒ **失败长得像成功**。
+        //
+        // ⚠️ **线形照 OpenAI 官方**（不是本仓自有形状）⇒ ⇒ 与端脑那侧
+        // 逐字一致 ⇒ ⇒ 不自造。
+        let mut documents = Vec::new();
+        if let Some(Value::Array(parts)) = &m.content {
+            for p in parts {
+                if p.get("type").and_then(|t| t.as_str()) != Some("file") {
+                    continue;
+                }
+                let Some(f) = p.get("file") else {
+                    continue;
+                };
+                let filename = f
+                    .get("filename")
+                    .and_then(|n| n.as_str())
+                    .map(|s| s.to_string());
+                // ⚠️ **两种字节来源**：`file_data`（data URI）与 `file_id`
+                // （先上传后引用）⇒ ⇒ 后者要宿主存储，本进程没有 ⇒ ⇒ 明确
+                // 报错（**不许**假装收到了）。
+                if let Some(file_id) = f.get("file_id").and_then(|i| i.as_str()) {
+                    return Err(format!(
+                        "file part carries file_id {file_id:?} - \
+                         this host has no file storage backend ⇒ ⇒ \
+                         refusing to pretend the bytes are here"
+                    ));
+                }
+                let raw = f
+                    .get("file_data")
+                    .and_then(|d| d.as_str())
+                    .ok_or_else(|| "file part carries neither file_data nor file_id".to_string())?;
+                let rest = raw.strip_prefix("data:").ok_or_else(|| {
+                    "file part file_data is not a data URI (only inline data is supported)"
+                        .to_string()
+                })?;
+                let Some((header, payload)) = rest.split_once(";base64,") else {
+                    return Err("malformed file part file_data (missing ;base64,)".to_string());
+                };
+                let media_type = header.split(';').next().unwrap_or_default().to_string();
+                // ⚠️ **mime 推不出来就报错，不许猜**（第四刀那条纪律）。
+                if media_type.is_empty() || !media_type.contains('/') {
+                    return Err(format!(
+                        "file part declares {media_type:?} - refusing to guess a document mime type"
+                    ));
+                }
+                documents.push(ContentBlock::Document(crate::canonical::DocumentBlock {
+                    source: crate::canonical::ImageSource::Base64 {
+                        media_type,
+                        data: payload.to_string(),
+                    },
+                    filename,
+                }));
+            }
+        }
+        let mut content =
+            Vec::with_capacity(1 + images.len() + audios.len() + videos.len() + documents.len());
         content.push(ContentBlock::Text(TextBlock { text: content_text }));
         content.extend(images);
+        content.extend(audios);
+        content.extend(videos);
+        content.extend(documents);
         messages.push(CanonicalMessage {
             role,
             content,
@@ -250,12 +427,35 @@ pub fn openai_to_canonical(req: OpenAiChatRequest) -> Result<CanonicalRequest, S
     Ok(CanonicalRequest::Llm(canonical))
 }
 
+/// OpenAI's `input_audio.format` — the container the upstream decodes.
+///
+/// Only the containers the multimodal decoders actually accept are mapped
+/// (wav / mp3 / flac — the same set llama.cpp's mtmd decodes via
+/// miniaudio). An unknown mime is REFUSED, never guessed: a wrong format
+/// makes the upstream decode with the wrong decoder and the resulting
+/// error then lies about the cause.
+fn audio_format_of(media_type: &str) -> Result<&'static str, String> {
+    match media_type.to_ascii_lowercase().as_str() {
+        "audio/wav" | "audio/x-wav" | "audio/wave" => Ok("wav"),
+        "audio/mpeg" | "audio/mp3" => Ok("mp3"),
+        "audio/flac" | "audio/x-flac" => Ok("flac"),
+        other => Err(format!(
+            "audio mime {other:?} has no OpenAI input_audio format (wav/mp3/flac) \
+             - refusing to guess"
+        )),
+    }
+}
+
 /// Serialize a canonical LLM request back to OpenAI wire JSON — the
 /// request-direction counterpart of [`canonical_to_openai`]. Tools,
 /// assistant tool_calls and tool-result messages round-trip so a
 /// forwarding engine (see `engine::remote`) can proxy agentic
 /// conversations verbatim.
-pub fn canonical_request_to_openai_wire(req: &CanonicalLlmRequest) -> Value {
+///
+/// **Media (image / audio) rides along in the request** — as an OpenAI
+/// parts array (text first, then the attachments). A request without media
+/// keeps the plain string shape, so the text-only path is unchanged.
+pub fn canonical_request_to_openai_wire(req: &CanonicalLlmRequest) -> Result<Value, String> {
     let mut messages: Vec<Value> = Vec::new();
     if !req.system.is_empty() {
         let text = req
@@ -273,16 +473,111 @@ pub fn canonical_request_to_openai_wire(req: &CanonicalLlmRequest) -> Value {
             MessageRole::Assistant => "assistant",
             MessageRole::Tool => "tool",
         };
-        let text = m
-            .content
-            .iter()
-            .filter_map(|b| match b {
-                ContentBlock::Text(t) => Some(t.text.clone()),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        let mut msg = serde_json::json!({"role": role, "content": text});
+        // Media (image / audio) travels as an OpenAI **parts array**
+        // (text first, then the attachments - the same order the 端脑
+        // uses). A request without media keeps the plain **string**
+        // shape => => nothing about the text-only path changes.
+        let mut parts: Vec<Value> = Vec::new();
+        let mut plain: Vec<String> = Vec::new();
+        for b in &m.content {
+            match b {
+                ContentBlock::Text(t) => plain.push(t.text.clone()),
+                ContentBlock::Image(img) => match &img.source {
+                    ImageSource::Base64 { media_type, data } => parts.push(serde_json::json!({
+                        "type": "image_url",
+                        "image_url": { "url": format!("data:{media_type};base64,{data}") }
+                    })),
+                    ImageSource::Url(u) => {
+                        return Err(format!(
+                            "ImageSource::Url cannot be forwarded to an OpenAI-compatible \
+                             upstream (pre-decode to base64): {u}"
+                        ))
+                    }
+                    ImageSource::FileId(f) => {
+                        return Err(format!(
+                            "ImageSource::FileId cannot be forwarded to an OpenAI-compatible \
+                             upstream: {f}"
+                        ))
+                    }
+                },
+                ContentBlock::Audio(aud) => match &aud.source {
+                    AudioSource::Base64 { media_type, data } => {
+                        let format = audio_format_of(media_type)?;
+                        parts.push(serde_json::json!({
+                            "type": "input_audio",
+                            "input_audio": { "data": data, "format": format }
+                        }));
+                    }
+                    AudioSource::Url(u) => {
+                        return Err(format!(
+                            "AudioSource::Url cannot be forwarded to an OpenAI-compatible \
+                             upstream (pre-decode to base64): {u}"
+                        ))
+                    }
+                },
+                ContentBlock::Video(vid) => match &vid.source {
+                    crate::canonical::VideoSource::Base64 { media_type, data } => {
+                        parts.push(serde_json::json!({
+                            "type": "video_url",
+                            "video_url": { "url": format!("data:{media_type};base64,{data}") }
+                        }));
+                    }
+                    crate::canonical::VideoSource::Url(u) => {
+                        return Err(format!(
+                            "VideoSource::Url cannot be forwarded to an OpenAI-compatible \
+                             upstream (pre-decode to base64): {u}"
+                        ))
+                    }
+                    crate::canonical::VideoSource::Frames(_) => {
+                        return Err(
+                            "VideoSource::Frames is a frame list (the visual lane owns \
+                             frames) - it is not one video payload".to_string(),
+                        )
+                    }
+                },
+                // ⚠ **文档必须活着穿过转发** —— 旧的 `_ => {}` 会把它**静默
+                // 丢掉** ⇒ ⇒ 而**远端上游那腿正是走这条线**
+                // （`engine::remote` ⇒ ⇒ 端脑发给云供应商的 PDF 会凭空消失，
+                // 而回话看着完全正常）⇒ ⇒ **失败长得像成功** ⇒ ⇒
+                // 出站必须是 OpenAI 官方的 `file` part ⇒ ⇒ 与入站逐字对称。
+                ContentBlock::Document(doc) => match &doc.source {
+                    ImageSource::Base64 { media_type, data } => {
+                        let mut file = serde_json::json!({
+                            "file_data": format!("data:{media_type};base64,{data}")
+                        });
+                        if let Some(name) = &doc.filename {
+                            file["filename"] = Value::String(name.clone());
+                        }
+                        parts.push(serde_json::json!({"type": "file", "file": file}));
+                    }
+                    ImageSource::Url(u) => {
+                        return Err(format!(
+                            "a document's ImageSource::Url cannot be forwarded to an \
+                             OpenAI-compatible upstream (pre-decode to base64): {u}"
+                        ));
+                    }
+                    ImageSource::FileId(f) => {
+                        return Err(format!(
+                            "a document's ImageSource::FileId cannot be forwarded to an \
+                             OpenAI-compatible upstream: {f}"
+                        ));
+                    }
+                },
+                _ => {}
+            }
+        }
+        let content = if parts.is_empty() {
+            Value::String(plain.join("\n"))
+        } else {
+            let mut arr: Vec<Value> = Vec::new();
+            let text = plain.join("\n");
+            if !text.is_empty() {
+                arr.push(serde_json::json!({"type": "text", "text": text}));
+            }
+            arr.extend(parts);
+            Value::Array(arr)
+        };
+        let mut msg = serde_json::json!({"role": role, "content": content});
         if m.role == MessageRole::Tool {
             if let Some(id) = &m.tool_call_id {
                 msg["tool_call_id"] = Value::String(id.clone());
@@ -346,7 +641,7 @@ pub fn canonical_request_to_openai_wire(req: &CanonicalLlmRequest) -> Value {
     if !req.stop_sequences.is_empty() {
         wire["stop"] = serde_json::json!(req.stop_sequences);
     }
-    wire
+    Ok(wire)
 }
 
 /// Parse a remote OpenAI chat-completion response body into canonical
@@ -605,6 +900,315 @@ impl ApiAdapter for OpenAiChatAdapter {
 mod tests {
     use super::*;
 
+    /// One canonical request carrying a single audio clip ("hello" -> aGVsbG8=).
+    fn canonical_request_with_audio() -> CanonicalLlmRequest {
+        CanonicalLlmRequest {
+            model: "m".into(),
+            system: vec![],
+            messages: vec![CanonicalMessage {
+                role: MessageRole::User,
+                content: vec![
+                    ContentBlock::Text(TextBlock { text: "listen".into() }),
+                    ContentBlock::Audio(crate::canonical::AudioBlock {
+                        source: crate::canonical::AudioSource::Base64 {
+                            media_type: "audio/wav".into(),
+                            data: "aGVsbG8=".into(),
+                        },
+                    }),
+                ],
+                tool_calls: vec![],
+                tool_call_id: None,
+                reasoning_content: None,
+            }],
+            tools: vec![],
+            sampling: SamplingParams::default(),
+            stop_sequences: vec![],
+            stream: false,
+            cache_control: None,
+            metadata: Default::default(),
+            extensions: Default::default(),
+        }
+    }
+
+    /// Audio must reach the wire as an `input_audio` part (raw base64 +
+    /// format) — NOT folded into the text (the upstream would narrate the
+    /// blob instead of listening to it).
+    #[test]
+    fn an_audio_block_becomes_an_input_audio_part_on_the_wire() {
+        let wire =
+            canonical_request_to_openai_wire(&canonical_request_with_audio()).expect("wire");
+        let content = &wire["messages"][0]["content"];
+        assert!(content.is_array(), "media forces the parts array: {content}");
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[1]["type"], "input_audio");
+        assert_eq!(content[1]["input_audio"]["data"], "aGVsbG8=");
+        assert_eq!(content[1]["input_audio"]["format"], "wav");
+    }
+
+    /// 视频载荷在**线形**上必须是 `video_url` part —— 旧版的 `_ => {}`
+    /// 会把它**静默丢掉**（连 prompt 文本里都没有）⇒ ⇒ 「失败长得像成功」。
+    #[test]
+    fn a_video_block_becomes_a_video_url_part_on_the_wire() {
+        let mut req = canonical_request_with_audio();
+        req.messages[0].content = vec![ContentBlock::Video(crate::canonical::VideoBlock {
+            source: crate::canonical::VideoSource::Base64 {
+                media_type: "video/mp4".into(),
+                data: "aGVsbG8=".into(),
+            },
+        })];
+        let wire = canonical_request_to_openai_wire(&req).expect("wire");
+        let content = &wire["messages"][0]["content"];
+        assert!(content.is_array(), "media forces the parts array: {content}");
+        assert_eq!(content[0]["type"], "video_url");
+        assert_eq!(
+            content[0]["video_url"]["url"],
+            "data:video/mp4;base64,aGVsbG8="
+        );
+    }
+
+    /// **文档必须活着穿过转发** —— 出站是 OpenAI 官方的 `file` part ⇒ ⇒
+    /// 与入站那一侧逐字对称 ⇒ ⇒ 端脑发给云供应商的 PDF 不会凭空消失。
+    #[test]
+    fn a_document_block_becomes_a_file_part_on_the_wire() {
+        let mut req = canonical_request_with_audio();
+        req.messages[0].content = vec![ContentBlock::Document(crate::canonical::DocumentBlock {
+            source: crate::canonical::ImageSource::Base64 {
+                media_type: "application/pdf".into(),
+                data: "aGVsbG8=".into(),
+            },
+            filename: Some("report.pdf".into()),
+        })];
+        let wire = canonical_request_to_openai_wire(&req).expect("wire");
+        let content = &wire["messages"][0]["content"];
+        assert!(
+            content.is_array(),
+            "media forces the parts array: {content}"
+        );
+        assert_eq!(content[0]["type"], "file");
+        assert_eq!(content[0]["file"]["filename"], "report.pdf");
+        assert_eq!(
+            content[0]["file"]["file_data"],
+            "data:application/pdf;base64,aGVsbG8="
+        );
+    }
+
+    /// 文档的 `file_id` 源**不许**被悄悄丢掉 ⇒ ⇒ 明确报错（这一层没有文件
+    /// 存储 backend ⇒ ⇒ 假装字节在这儿就是撒谎）。
+    #[test]
+    fn a_document_block_with_a_file_id_is_refused_on_the_way_out() {
+        let mut req = canonical_request_with_audio();
+        req.messages[0].content = vec![ContentBlock::Document(crate::canonical::DocumentBlock {
+            source: crate::canonical::ImageSource::FileId("file-abc".into()),
+            filename: None,
+        })];
+        let err = canonical_request_to_openai_wire(&req).expect_err("must refuse");
+        assert!(
+            err.contains("FileId"),
+            "the error must name the culprit, got {err}"
+        );
+    }
+
+    /// 视频 part 必须**活着**穿过解析 —— 旧版只认 `image_url`／
+    /// `input_audio` ⇒ ⇒ 视频 part 被**整段跳过**。
+    #[test]
+    fn a_video_url_data_uri_becomes_a_canonical_video_block() {
+        let body = serde_json::to_vec(&serde_json::json!({
+            "model": "m",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "what is in this clip"},
+                    {"type": "video_url", "video_url": {
+                        "url": "data:video/mp4;base64,aGVsbG8="
+                    }}
+                ]
+            }]
+        })).unwrap();
+        let adapter = OpenAiChatAdapter;
+        let req = adapter.parse(&Bytes::from(body), &HeaderMap::new()).expect("parse");
+        let CanonicalRequest::Llm(llm) = req else { panic!("expected LLM") };
+        let video = llm.messages[0].content.iter().find_map(|b| match b {
+            ContentBlock::Video(v) => Some(v),
+            _ => None,
+        }).expect("the video part must survive the parse");
+        match &video.source {
+            crate::canonical::VideoSource::Base64 { media_type, data } => {
+                assert_eq!(media_type, "video/mp4");
+                assert_eq!(data, "aGVsbG8=");
+            }
+            other => panic!("expected a Base64 video source, got {other:?}"),
+        }
+        // the text part is untouched
+        assert!(llm.messages[0].content.iter().any(|b| matches!(b,
+            ContentBlock::Text(t) if t.text == "what is in this clip")));
+    }
+
+    /// **文档 part（`file`）要变成 `ContentBlock::Document`** ——
+    /// 端脑早就在发这个形状 ⇒ ⇒ 而此前**根本没解析** ⇒ ⇒ 文档被
+    /// **静默丢掉**（模型看不见那份 PDF，回话却看着正常）。
+    #[test]
+    fn a_file_part_becomes_a_document_block() {
+        let body = serde_json::to_vec(&serde_json::json!({
+            "model": "m",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "总结这份 PDF"},
+                    {"type": "file", "file": {
+                        "filename": "doc.pdf",
+                        "file_data": "data:application/pdf;base64,aGVsbG8="
+                    }}
+                ]
+            }]
+        }))
+        .unwrap();
+        let adapter = OpenAiChatAdapter;
+        let parsed = match adapter.parse(&Bytes::from(body), &HeaderMap::new()) {
+            Ok(r) => r,
+            Err(e) => panic!("the file part must parse: {e}"),
+        };
+        let CanonicalRequest::Llm(llm) = parsed else {
+            panic!("expected LLM")
+        };
+        let doc = llm.messages[0]
+            .content
+            .iter()
+            .find_map(|b| match b {
+                ContentBlock::Document(d) => Some(d),
+                _ => None,
+            })
+            .expect("the document part must survive the parse");
+        assert_eq!(doc.filename.as_deref(), Some("doc.pdf"));
+        match &doc.source {
+            crate::canonical::ImageSource::Base64 { media_type, data } => {
+                assert_eq!(media_type, "application/pdf");
+                assert_eq!(data, "aGVsbG8=");
+            }
+            other => panic!("expected a base64 source, got {other:?}"),
+        }
+    }
+
+    /// **文档的 mime 推不出来 ⇒ ⇒ 报错**（不许猜）—— 沿用第四刀那条纪律。
+    #[test]
+    fn a_file_part_with_a_malformed_mime_is_refused() {
+        let body = serde_json::to_vec(&serde_json::json!({
+            "model": "m",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "file", "file": {
+                        "filename": "doc.pdf",
+                        "file_data": "data:notamime;base64,aGVsbG8="
+                    }}
+                ]
+            }]
+        }))
+        .unwrap();
+        let adapter = OpenAiChatAdapter;
+        let err = match adapter.parse(&Bytes::from(body), &HeaderMap::new()) {
+            Ok(_) => panic!("a malformed document mime must be refused, not guessed"),
+            Err(e) => e,
+        };
+        assert!(
+            err.to_string().contains("mime"),
+            "the error must name the culprit, got {err}"
+        );
+    }
+
+    /// **`file_id`（先上传后引用）⇒ ⇒ 明确报错** —— 本进程没有文件存储
+    /// ⇒ ⇒ **不许假装字节在这儿**。
+    #[test]
+    fn a_file_part_with_a_file_id_is_refused_outright() {
+        let body = serde_json::to_vec(&serde_json::json!({
+            "model": "m",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "file", "file": {
+                        "filename": "doc.pdf",
+                        "file_id": "file-abc123"
+                    }}
+                ]
+            }]
+        })).unwrap();
+        let adapter = OpenAiChatAdapter;
+        let err = match adapter.parse(&Bytes::from(body), &HeaderMap::new()) {
+            Ok(_) => panic!("a file_id must be refused, not silently treated as empty"),
+            Err(e) => e,
+        };
+        assert!(
+            err.to_string().contains("file_id"),
+            "the error must name the culprit, got {err}"
+        );
+    }
+    /// mime 推不出来就**报错**，不许猜 —— 猜错 ⇒ ⇒ 上游按错解码器解 ⇒ ⇒
+    /// 错误信息会撒谎。
+    #[test]
+    fn a_video_url_with_a_non_video_mime_is_refused() {
+        let body = serde_json::to_vec(&serde_json::json!({
+            "model": "m",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "video_url", "video_url": {
+                        "url": "data:audio/wav;base64,aGVsbG8="
+                    }}
+                ]
+            }]
+        })).unwrap();
+        let adapter = OpenAiChatAdapter;
+        // ⚠️ 不用 `expect_err` —— `CanonicalRequest` 没实现 `Debug`
+        // ⇒ ⇒ 那条路编译不过。
+        let err = match adapter.parse(&Bytes::from(body), &HeaderMap::new()) {
+            Ok(_) => panic!("a non-video mime must be refused, not guessed"),
+            Err(e) => e,
+        };
+        assert!(
+            err.to_string().contains("video"),
+            "the error must name the culprit, got {err}"
+        );
+    }
+
+    /// Image rides the same way (data URI in `image_url`).
+    #[test]
+    fn an_image_block_becomes_an_image_url_part_on_the_wire() {
+        let mut req = canonical_request_with_audio();
+        req.messages[0].content = vec![ContentBlock::Image(crate::canonical::ImageBlock {
+            source: crate::canonical::ImageSource::Base64 {
+                media_type: "image/png".into(),
+                data: "AAAA".into(),
+            },
+            detail: None,
+        })];
+        let wire = canonical_request_to_openai_wire(&req).expect("wire");
+        let content = &wire["messages"][0]["content"];
+        assert_eq!(content[0]["type"], "image_url");
+        assert_eq!(content[0]["image_url"]["url"], "data:image/png;base64,AAAA");
+    }
+
+    /// The text-only shape does NOT change: a request without media keeps
+    /// a plain string content (the existing upstreams must not see a
+    /// different shape just because media support landed).
+    #[test]
+    fn a_text_only_request_keeps_the_string_content_shape() {
+        let mut req = canonical_request_with_audio();
+        req.messages[0].content = vec![ContentBlock::Text(TextBlock { text: "hi".into() })];
+        let wire = canonical_request_to_openai_wire(&req).expect("wire");
+        assert_eq!(wire["messages"][0]["content"], "hi");
+    }
+
+    /// Negative control: an audio URL is REFUSED, never silently dropped.
+    #[test]
+    fn an_audio_url_source_is_refused_outright() {
+        let mut req = canonical_request_with_audio();
+        req.messages[0].content = vec![ContentBlock::Audio(crate::canonical::AudioBlock {
+            source: crate::canonical::AudioSource::Url("https://example.test/y.wav".into()),
+        })];
+        let err = canonical_request_to_openai_wire(&req)
+            .expect_err("an audio URL must be refused, not dropped");
+        assert!(err.contains("AudioSource::Url"), "got {err}");
+    }
+
     #[test]
     fn test_parse_minimal_chat_request() {
         let body = serde_json::to_vec(&serde_json::json!({
@@ -622,6 +1226,96 @@ mod tests {
             }
             _ => panic!("expected LLM"),
         }
+    }
+
+    /// The audio part survives the parse: the brain sends the data-URI shape
+    /// ({"data": "data:audio/wav;base64,..."}), the mime comes from the URI
+    /// header and the payload is byte-identical to what was sent.
+    #[test]
+    fn an_input_audio_data_uri_becomes_a_canonical_audio_block() {
+        let body = serde_json::to_vec(&serde_json::json!({
+            "model": "m",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "what is this sound"},
+                    {"type": "input_audio", "input_audio": {
+                        "data": "data:audio/wav;base64,aGVsbG8=", "format": "wav"
+                    }}
+                ]
+            }]
+        })).unwrap();
+        let adapter = OpenAiChatAdapter;
+        let req = adapter.parse(&Bytes::from(body), &HeaderMap::new()).expect("parse");
+        let CanonicalRequest::Llm(llm) = req else { panic!("expected LLM") };
+        let audio = llm.messages[0].content.iter().find_map(|b| match b {
+            ContentBlock::Audio(a) => Some(a),
+            _ => None,
+        }).expect("the audio part must survive the parse");
+        match &audio.source {
+            crate::canonical::AudioSource::Base64 { media_type, data } => {
+                assert_eq!(media_type, "audio/wav");
+                assert_eq!(data, "aGVsbG8=");
+            }
+            other => panic!("expected a Base64 audio source, got {other:?}"),
+        }
+        // the text part is untouched
+        assert!(llm.messages[0].content.iter().any(|b| matches!(b,
+            ContentBlock::Text(t) if t.text == "what is this sound")));
+    }
+
+    /// The OpenAI-official shape (bare base64 + format) is accepted too,
+    /// otherwise the two sides of the chain would drift on the wire format.
+    #[test]
+    fn a_bare_base64_input_audio_part_becomes_an_audio_block_too() {
+        let body = serde_json::to_vec(&serde_json::json!({
+            "model": "m",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "input_audio", "input_audio": {"data": "aGVsbG8=", "format": "mp3"}}
+                ]
+            }]
+        })).unwrap();
+        let adapter = OpenAiChatAdapter;
+        let req = adapter.parse(&Bytes::from(body), &HeaderMap::new()).expect("parse");
+        let CanonicalRequest::Llm(llm) = req else { panic!("expected LLM") };
+        let audio = llm.messages[0].content.iter().find_map(|b| match b {
+            ContentBlock::Audio(a) => Some(a),
+            _ => None,
+        }).expect("the audio part must survive the parse");
+        match &audio.source {
+            crate::canonical::AudioSource::Base64 { media_type, data } => {
+                assert_eq!(media_type, "audio/mpeg");
+                assert_eq!(data, "aGVsbG8=");
+            }
+            other => panic!("expected a Base64 audio source, got {other:?}"),
+        }
+    }
+
+    /// Negative control: an unknown format is REFUSED, not guessed. A guessed
+    /// mime would make the backend decode with the wrong decoder and the
+    /// resulting error would lie about the cause.
+    #[test]
+    fn an_unrecognized_input_audio_format_is_refused_outright() {
+        let body = serde_json::to_vec(&serde_json::json!({
+            "model": "m",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "input_audio", "input_audio": {"data": "aGVsbG8=", "format": "amr"}}
+                ]
+            }]
+        })).unwrap();
+        let adapter = OpenAiChatAdapter;
+        let err = match adapter.parse(&Bytes::from(body), &HeaderMap::new()) {
+            Ok(_) => panic!("an unknown audio format must not be guessed"),
+            Err(e) => e,
+        };
+        assert!(
+            format!("{err:?}").contains("amr"),
+            "the error must name the offending format, got {err:?}"
+        );
     }
 
     #[test]

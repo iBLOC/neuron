@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::config::DeviceSelection;
 
 pub mod registry;
-pub use registry::LlmRuntimeRegistry;
+pub use registry::{LlmRuntimeRegistry, TryRegisterDownloaded};
 pub use ChatLlmRuntime as LlmRuntime;
 
 #[cfg(feature = "candle")]
@@ -274,14 +274,27 @@ pub struct RegisteredLlm {
     pub impl_id: LlmImpl,
     pub device: crate::config::DeviceSelection,
     pub required_memory_bytes: u64,
+    /// ⚠ **权重 dtype —— 策略选的那一档必须跟着条目走**（2026-11-25 刀 12）。
+    ///
+    /// ⚠️ 以前它**不在条目里** ⇒ ⇒ 运行时只能自己去读全局 env
+    /// （`NEURON_LLM_DTYPE`）⇒ ⇒ 于是策略层就算算出了「这个模型该用
+    /// bf16」，**运行时也听不到** ⇒ ⇒ 那条决策**到不了执行者**
+    /// ⇒ ⇒ 「自动降级」会变成一句空话（模型照样按 f32 物化 ⇒ ⇒ 照样装不下）
+    /// ⇒ ⇒ 而日志里两句都写着「dtype = f32」与「策略选了 bf16」
+    /// ⇒ ⇒ 谁也说不清到底用的哪一个。
+    pub dtype: crate::accel::DTypeChoice,
 }
 
 /// Key into the loaded-instance cache.
+/// ⚠ **dtype 也在键里**（刀 12）—— 同一个模型在 f32 与 bf16 下是**两份**
+/// 物化（占的字节不一样）⇒ ⇒ 键不许把它们当同一个 ⇒ ⇒ 否则缓存会把一份
+/// bf16 的运行时塞给要 f32 的调用方。
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
 pub struct RegistryKey {
     pub model_id: String,
     pub impl_id: LlmImpl,
     pub device: crate::config::DeviceSelection,
+    pub dtype: crate::accel::DTypeChoice,
 }
 
 #[async_trait]
@@ -289,6 +302,36 @@ pub trait ChatLlmRuntime: Send + Sync {
     async fn load(model: &str, device: &DeviceSelection) -> ChatResult<Box<dyn ChatLlmRuntime>>
     where
         Self: Sized;
+
+    /// 按**条目给的权重 dtype**装载（2026-11-25 刀 12）。
+    ///
+    /// ⚠ **为什么要有这一条**：策略层会算「这个模型该用 bf16」（装不下 ⇒
+    /// ⇒ 无损降精度）⇒ ⇒ 那条决策必须**到达真正物化权重的地方** ⇒ ⇒
+    /// 否则运行时只认全局 env ⇒ ⇒ 「自动降级」只是一句计划（模型照样按
+    /// f32 物化 ⇒ ⇒ 照样装不下）⇒ ⇒ **那个降级是假的**。
+    ///
+    /// 默认实现＝走 `load(model, device)` —— 不物化权重的腿（litert／
+    /// mistralrs／llamacpp）用不上 dtype ⇒ ⇒ 不必改它们。
+    ///
+    /// ⚠️ **`roots` —— 模型库根**（2026-11-26 刀 16 续）：**注册面**
+    /// （boot 扫描／懒注册）走 `config.model_dirs`（宿主交进来的那份），
+    /// **加载面**必须读**同一份** ⇒ ⇒ 否则同一个模型在同一个决策里被判成两个
+    /// 相反的结论 ⇒ ⇒ 嵌脑形态里表现为「**引擎注册上了、权重找不到**」
+    /// （真机逐字：`model 'qwen3-0.6b' not found under ./.neuron/models`）
+    /// ⇒ ⇒ 失败长得像「模型没下载」⇒ ⇒ 而盘上**明明有**那份权重。
+    ///
+    /// ⚠️ 默认实现**不认** roots（那两条腿不读模型库）⇒ ⇒ 不必改它们。
+    async fn load_with_dtype(
+        model: &str,
+        device: &DeviceSelection,
+        _dtype: crate::accel::DTypeChoice,
+        _roots: &[std::path::PathBuf],
+    ) -> ChatResult<Box<dyn ChatLlmRuntime>>
+    where
+        Self: Sized,
+    {
+        Self::load(model, device).await
+    }
 
     async fn chat(&self, req: ChatRequest) -> ChatResult<ChatResponse>;
 
@@ -335,6 +378,26 @@ pub trait ChatLlmRuntime: Send + Sync {
     /// as taking pictures — "listed but unreachable" is worse than an
     /// honest "text only".
     fn supports_media(&self) -> bool {
+        false
+    }
+
+    /// Does this runtime actually accept **image** attachments?
+    ///
+    /// ⚠️ **为什么从 `supports_media()` 里拆出来** —— 旧判据只有一个
+    /// bool（图与音混在一起）⇒ ⇒ 一个**音频专用**的投影器会被顺带
+    /// 报成「能吃图」⇒ ⇒ 「报得像知道」比「不知道」更坏。
+    ///
+    /// 默认**委托** `supports_media()` ⇒ ⇒ 既有后端（mistral.rs 那条
+    /// 视觉腿）的行为**逐字不变**。
+    fn supports_image(&self) -> bool {
+        self.supports_media()
+    }
+
+    /// Does this runtime actually accept **audio** attachments?
+    ///
+    /// 默认 `false` —— 纯文本后端不许被报成能吃音频（「列出来却到不了」
+    /// 比诚实的「只能文本」更坏）。
+    fn supports_audio(&self) -> bool {
         false
     }
 

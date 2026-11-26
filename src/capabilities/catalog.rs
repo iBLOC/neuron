@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::RwLock;
+use std::sync::{OnceLock, RwLock};
 
 use super::{ApiStyle, ModelCapabilities, Modality};
 
@@ -358,6 +358,42 @@ pub fn default_capabilities() -> Vec<ModelCapabilities> {
     ]
 }
 
+/// 全局默认能力清单（**只建一次**）—— 目录面与读面共用同一份 ⇒ ⇒
+/// 「这条模型吃什么」只有一处真源。
+static DEFAULT_CATALOG: OnceLock<CapabilityCatalog> = OnceLock::new();
+
+/// 默认能力清单（进程内共享的那一份）。
+pub fn default_catalog() -> &'static CapabilityCatalog {
+    DEFAULT_CATALOG.get_or_init(CapabilityCatalog::with_defaults)
+}
+
+/// 这枚模型**引擎自报**的输入模态（按 model_id 查）。
+///
+/// ⚠️ **空 = 引擎没说**（**不是**「只能吃文本」）⇒ ⇒ 消费方要能说「不知道」。
+///
+/// ⚠️ **这是「部署真相」那一轴**（2026-11-24）—— 官方模型卡说的是**模型**
+/// 能吃什么（synapse 出厂清单那一轴），这里说的是**这条实现**真的能吃什么
+/// ⇒ ⇒ 两个轴**不许混**：Mage-VL 的模型卡逐字写着 image and video，但本仓
+/// 的 chat 路径只吃文本＋图片 ⇒ ⇒ 部署真相是 text_input ＋ image_input。
+pub fn default_input_modalities(model_id: &str) -> Vec<&'static str> {
+    default_catalog()
+        .lookup(model_id)
+        .map(|c| {
+            // ⚠️ **引擎那套 `*_input` 枚举词 ⇒ ⇒ 归一到 canonical 词表**
+            // （唯一那份在 `synapse-modalities` ⇒ ⇒ 本仓／synapse／端脑**共用**
+            // ⇒ ⇒ **归一只有一处**）⇒ ⇒ 程序内、`/v1/models` 出仓、端脑读面
+            // **三处同一套拼法** ⇒ ⇒ 客户端只认一套词 ⇒ ⇒ 界面那一格不会空。
+            //
+            // ⚠️ **不是模态的词自动落空**（`tool_input` ⇒ ⇒ `None`）⇒ ⇒
+            // 工具与输出是**能力档那一轴** ⇒ ⇒ 归成 `text` 就是骗人。
+            c.input_modalities
+                .iter()
+                .filter_map(|m| synapse_modalities::normalize_modality(m.as_str()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 #[allow(clippy::too_many_arguments)]
 fn cap(
     engine_impl: &str,
@@ -387,6 +423,38 @@ fn cap(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ⚠️ **引擎自报的输入模态**（2026-11-24）—— 按 model_id 查 ⇒ ⇒
+    /// **空 = 没说**（**不是**「只能吃文本」）⇒ ⇒ 负控用**能力目录里没有的
+    /// id**（`no-such-model-at-all`）。
+    ///
+    /// ⚠️⚠️ **负控换过一次（2026-11-24 修）**：原来拿 neuron's **默认模型**
+    /// （`minicpm5-1b`）当「引擎没说」那一格 ⇒ ⇒ **前提是假的** —— 它**在**
+    /// 能力目录里（`cap("candle", DEFAULT_MODEL_ID, &[TextInput], …)`）⇒ ⇒
+    /// 断言当场红 ⇒ ⇒ **红的是判据的前提，不是实现**。
+    /// ⇒ ⇒ **「没说」那一格只能取能力目录里没有的 id** ⇒ ⇒ 而且**下载清单
+    /// 那一层不存在**这样的条目（实测：下载清单 41 个唯一 id **全在**能力
+    /// 目录里 ⇒ ⇒ 差集是**空集**）⇒ ⇒ **别再去找**一枚「清单里有、目录里
+    /// 没有」的模型（找了也没有 ⇒ ⇒ 白找一圈）。
+    #[test]
+    fn the_default_capability_catalog_reports_the_engine_input_modalities() {
+        let mut mage = default_input_modalities("microsoft/Mage-VL");
+        mage.sort();
+        // ⚠️ **词是 canonical 那一套**（`text` ／ `image`）⇒ ⇒ 不是引擎的
+        // `text_input` ／ `image_input` ⇒ ⇒ 归一真的跑了。
+        assert_eq!(mage, vec!["image", "text"]);
+        // ⚠️ **视频那一格是空的** —— 这条实现的 chat 路径不吃视频 ⇒ ⇒
+        // **部署真相 ≠ 模型卡真相**（模型卡逐字写着 image and video）。
+        assert!(!default_input_modalities("microsoft/Mage-VL").contains(&"video"));
+        // ⚠️ **默认模型**（能力目录里**有**它 ⇒ ⇒ 报 text_input —— 这一格
+        // **不是**「没说」）。
+        assert_eq!(default_input_modalities("minicpm5-1b"), vec!["text"]);
+        // ⚠️ **「没说」那一枚**（能力目录里没有这个 id）⇒ ⇒ 空（**不是** text！）。
+        assert_eq!(
+            default_input_modalities("no-such-model-at-all"),
+            Vec::<&str>::new()
+        );
+    }
 
     #[test]
     fn test_with_defaults_has_candle_llms() {

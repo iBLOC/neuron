@@ -17,6 +17,19 @@
 //! operation. On CUDA, mistral.rs's `with_auto_isq` selects the best format
 //! for the detected hardware.
 //!
+//! **MTP (multi-token prediction / speculative decoding)**: opt-in via
+//! `NEURON_MISTRALRS_MTP=on`. The draft head is NOT something neuron
+//! owns — it has to ship INSIDE the checkpoint (`mtp.*` weights) and it
+//! is attached by mistral.rs itself. Two prerequisites therefore have to
+//! hold before MTP can engage: the checkpoint must carry the built-in
+//! head (HF/safetensors only — a GGUF cannot), and the backend must
+//! have PagedAttention (upstream gates it on CUDA-on-unix / Metal).
+//! `NEURON_MISTRALRS_MTP_N_PREDICT` caps the draft depth (unset ⇒
+//! mistral.rs autotunes it). `NEURON_MISTRALRS_THROUGHPUT_LOGGING=on`
+//! turns on the engine's Throughput line — the ONLY place the MTP
+//! accept rate is printed — so "MTP was asked for" and "MTP is doing
+//! something" stay two separate observations.
+//!
 //! **License**: mistral.rs is MIT. Compatible with neuron's Apache-2.0 (permissive
 //! upstream can be combined with permissive downstream).
 
@@ -25,8 +38,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use futures_util::stream::BoxStream;
 use mistralrs::{
-    ChatCompletionResponse, IsqBits, Model, ModelBuilder, ModelDType, MultimodalMessages,
-    RequestLike, Response, TextMessageRole, TextMessages,
+    ChatCompletionResponse, IsqBits, Model, ModelBuilder, ModelDType, MtpConfig,
+    MultimodalMessages, RequestLike, Response, TextMessageRole, TextMessages,
 };
 use tracing::{info, warn};
 
@@ -153,13 +166,48 @@ impl MistralRsLlmRuntime {
             _ => builder.with_auto_isq(IsqBits::Four),
         };
 
+        // Speculative decoding (MTP) — opt-in.
+        //
+        // This knob can only ever ASK for the draft head: the head has
+        // to ship inside the checkpoint (mtp.* weights), and mistral.rs
+        // refuses the combination when the backend has no PagedAttention
+        // (it gates paged attention on CUDA-on-unix / Metal). So the
+        // refusal, when it comes, arrives as a load error — and it is
+        // reported as an MTP refusal, not as a generic "bad model id".
+        let mtp = mtp_request_from_env().map_err(|e| NeuronError::not_initialized(e))?;
+        let throughput_logging =
+            throughput_logging_from_env().map_err(|e| NeuronError::not_initialized(e))?;
+        let builder = match mtp {
+            MtpRequest::Off => builder,
+            MtpRequest::Builtin { depth } => {
+                info!(
+                    model_id = %id,
+                    depth = ?depth,
+                    "mistralrs: built-in MTP requested — the checkpoint must ship its own draft \
+                     head (mtp.* weights) and must be an HF/safetensors snapshot (a GGUF cannot \
+                     carry a built-in MTP head)"
+                );
+                builder.with_mtp_config(MtpConfig::builtin(depth))
+            }
+        };
+        // The engine's Throughput line is the ONLY place the MTP accept
+        // rate is printed, and upstream keeps it off by default — so
+        // "MTP was asked for" and "MTP is doing something" are two
+        // different observations, and the second one needs this knob.
+        let builder = if throughput_logging {
+            info!(
+                model_id = %id,
+                "mistralrs: throughput logging on — the MTP accept rate shows up in the \
+                 'Throughput ... MTP accept ...%' line"
+            );
+            builder.with_throughput_logging()
+        } else {
+            builder
+        };
+
+        let mtp_requested = !matches!(mtp, MtpRequest::Off);
         let model = builder.build().await.map_err(|e| {
-            NeuronError::not_initialized(format!(
-                "mistralrs load failed for model '{id}': {e}. \
-                 Verify the model id is a valid HuggingFace repo (e.g. 'Qwen/Qwen3-4B'). \
-                 For local paths, ensure config.json + tokenizer.json + safetensors are present. \
-                 Set NEURON_MISTRALRS_ISQ=none to disable in-situ quantization."
-            ))
+            NeuronError::not_initialized(mistralrs_load_error(&id, mtp_requested, &e.to_string()))
         })?;
 
         info!(model_id = %id, "mistralrs model loaded");
@@ -750,10 +798,202 @@ fn chat_completion_to_response(
     })
 }
 
+/// What the mistralrs leg was asked to do about speculative decoding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MtpRequest {
+    /// No speculative decoding — the default.
+    Off,
+    /// Use the checkpoint's own built-in MTP head.
+    ///
+    /// `depth` is the number of draft tokens per step; `None` leaves
+    /// the depth to mistral.rs's own autotuner.
+    Builtin { depth: Option<usize> },
+}
+
+/// Parse a switch knob (`on`/`off`).
+///
+/// An **unknown** value is an error, not a silent `false`. A typo in
+/// `NEURON_MISTRALRS_MTP=onn` must not quietly turn a requested
+/// speculative-decoding run into a plain one — and the knob is read at
+/// load time, so the failure lands where the user is looking.
+fn parse_switch_value(raw: Option<&str>, label: &str) -> Result<Option<bool>, String> {
+    let Some(raw) = raw else { return Ok(None) };
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Ok(Some(true)),
+        "0" | "false" | "no" | "off" => Ok(Some(false)),
+        _ => Err(format!(
+            "neuron: {label} got an unknown value {raw:?} — use on/off (1/0, true/false, yes/no)"
+        )),
+    }
+}
+
+/// The draft depth mistral.rs should use.
+///
+/// `None` (unset) ⇒ mistral.rs picks it itself (its autotuner tops out
+/// at `AUTO_MAX_DEPTH`). `0` is rejected HERE rather than by the
+/// backend: mistral.rs refuses it too ("MTP n_predict must be at least
+/// 1"), but it refuses it minutes later, inside the load.
+fn parse_mtp_depth(raw: Option<&str>) -> Result<Option<usize>, String> {
+    let Some(raw) = raw else { return Ok(None) };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let depth: usize = trimmed.parse().map_err(|_| {
+        format!("neuron: NEURON_MISTRALRS_MTP_N_PREDICT must be a positive integer, got {raw:?}")
+    })?;
+    if depth == 0 {
+        return Err(
+            "neuron: NEURON_MISTRALRS_MTP_N_PREDICT must be at least 1 (mistral.rs rejects 0)"
+                .into(),
+        );
+    }
+    Ok(Some(depth))
+}
+
+/// Resolve `NEURON_MISTRALRS_MTP` + `NEURON_MISTRALRS_MTP_N_PREDICT`.
+fn parse_mtp_request(switch: Option<&str>, depth: Option<&str>) -> Result<MtpRequest, String> {
+    if !parse_switch_value(switch, "NEURON_MISTRALRS_MTP")?.unwrap_or(false) {
+        return Ok(MtpRequest::Off);
+    }
+    Ok(MtpRequest::Builtin {
+        depth: parse_mtp_depth(depth)?,
+    })
+}
+
+/// [`parse_mtp_request`] against the process environment.
+fn mtp_request_from_env() -> Result<MtpRequest, String> {
+    parse_mtp_request(
+        crate::config::env_var("MISTRALRS_MTP").as_deref(),
+        crate::config::env_var("MISTRALRS_MTP_N_PREDICT").as_deref(),
+    )
+}
+
+/// Resolve `NEURON_MISTRALRS_THROUGHPUT_LOGGING`.
+///
+/// This is the knob that makes the engine's Throughput line — the only
+/// place the MTP accept rate is printed — exist at all.
+fn throughput_logging_from_env() -> Result<bool, String> {
+    Ok(parse_switch_value(
+        crate::config::env_var("MISTRALRS_THROUGHPUT_LOGGING").as_deref(),
+        "NEURON_MISTRALRS_THROUGHPUT_LOGGING",
+    )?
+    .unwrap_or(false))
+}
+
+/// The message a failed load reports.
+///
+/// When MTP was requested, the message must say so: a speculative
+/// decoding request that the backend refuses looks like an ordinary
+/// "bad model id" from the outside, and the user would go looking in
+/// the wrong place. The upstream refusal text is kept verbatim in
+/// `cause` — it names the real prerequisite.
+fn mistralrs_load_error(model_id: &str, mtp_requested: bool, cause: &str) -> String {
+    // The upstream message usually ends with its own full stop; keeping it
+    // would print "pipeline.." — trim it so the sentence reads once.
+    let cause = cause.trim().trim_end_matches('.');
+    if !mtp_requested {
+        return format!(
+            "mistralrs load failed for model '{model_id}': {cause}. \
+             Verify the model id is a valid HuggingFace repo (e.g. 'Qwen/Qwen3-4B'). \
+             For local paths, ensure config.json + tokenizer.json + safetensors are present. \
+             Set NEURON_MISTRALRS_ISQ=none to disable in-situ quantization."
+        );
+    }
+    format!(
+        "mistralrs load failed for model '{model_id}': {cause}. \
+         MTP was requested for this model (NEURON_MISTRALRS_MTP=on) but the backend did not \
+         attach a draft head. Two prerequisites have to hold: the checkpoint must ship the \
+         built-in MTP weights (mtp.*) as an HF/safetensors snapshot (a GGUF cannot carry a \
+         built-in MTP head), and the backend must have PagedAttention (mistral.rs gates it on \
+         CUDA-on-unix / Metal). Unset NEURON_MISTRALRS_MTP to load the model without \
+         speculative decoding."
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::canonical::MediaAttachment;
+
+    // ── MTP knob resolution ────────────────────────────────────────────
+    //
+    // These exercise the pure parsers behind NEURON_MISTRALRS_MTP /
+    // NEURON_MISTRALRS_MTP_N_PREDICT. They take their input as an
+    // argument instead of reading the environment, because env vars are
+    // process-global and the test harness runs its cases in parallel —
+    // a test that mutates the environment would race its neighbours.
+
+    #[test]
+    fn mtp_is_off_by_default() {
+        assert_eq!(parse_mtp_request(None, None).unwrap(), MtpRequest::Off);
+    }
+
+    #[test]
+    fn mtp_switch_accepts_the_usual_spellings() {
+        for on in ["1", "true", "TRUE", "yes", "on", "ON"] {
+            assert_eq!(
+                parse_mtp_request(Some(on), None).unwrap(),
+                MtpRequest::Builtin { depth: None },
+                "{on} should switch MTP on"
+            );
+        }
+        for off in ["0", "false", "FALSE", "no", "off", "OFF"] {
+            assert_eq!(
+                parse_mtp_request(Some(off), None).unwrap(),
+                MtpRequest::Off,
+                "{off} should switch MTP off"
+            );
+        }
+    }
+
+    /// The negative control for "an unknown value is not a silent off":
+    /// a typo must FAIL, not quietly disable a requested feature.
+    #[test]
+    fn mtp_switch_rejects_an_unknown_value_instead_of_silently_disabling() {
+        let err = parse_mtp_request(Some("onn"), None).expect_err("typo must not be swallowed");
+        assert!(err.contains("NEURON_MISTRALRS_MTP"), "{err}");
+        assert!(err.contains("onn"), "{err}");
+    }
+
+    #[test]
+    fn mtp_depth_is_carried_through_and_bounded() {
+        assert_eq!(
+            parse_mtp_request(Some("on"), Some("3")).unwrap(),
+            MtpRequest::Builtin { depth: Some(3) }
+        );
+        assert_eq!(
+            parse_mtp_request(Some("on"), Some("")).unwrap(),
+            MtpRequest::Builtin { depth: None }
+        );
+        assert!(parse_mtp_request(Some("on"), Some("0")).is_err());
+        assert!(parse_mtp_request(Some("on"), Some("three")).is_err());
+    }
+
+    /// A depth of 0 is rejected by mistral.rs too — but it rejects it
+    /// minutes later, inside the load. The knob rejects it here.
+    #[test]
+    fn mtp_depth_zero_names_the_rule() {
+        let err = parse_mtp_request(Some("on"), Some("0")).expect_err("0 must be rejected");
+        assert!(err.contains("at least 1"), "{err}");
+    }
+
+    /// The load error must distinguish "MTP was asked for and the
+    /// backend said no" from "the model id is wrong" — otherwise the
+    /// user goes looking in the wrong place.
+    #[test]
+    fn load_error_names_mtp_only_when_mtp_was_requested() {
+        let with_mtp = mistralrs_load_error("m", true, "boom");
+        assert!(with_mtp.contains("MTP was requested"), "{with_mtp}");
+        assert!(with_mtp.contains("PagedAttention"), "{with_mtp}");
+        assert!(with_mtp.contains("boom"), "{with_mtp}");
+
+        // Negative control: without MTP the message must NOT claim MTP
+        // is involved.
+        let without_mtp = mistralrs_load_error("m", false, "boom");
+        assert!(!without_mtp.contains("MTP"), "{without_mtp}");
+        assert!(without_mtp.contains("boom"), "{without_mtp}");
+    }
 
     /// 1×1 transparent PNG — the same fixture the canonical→chat
     /// translator's test uses. Small enough to keep in the source and

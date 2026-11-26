@@ -55,7 +55,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::task::{Context, Poll, Waker};
+use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use futures_util::Stream;
@@ -93,9 +93,10 @@ pub struct SchedulerConfig {
     #[serde(default = "default_reaper_interval_secs")]
     pub reaper_interval_secs: u64,
     /// Platform key into the memory profile (`cpu` / `cuda` /
-    /// `metal`). Empty means `cpu`. RSS observation (profile
-    /// correction) only runs on `cpu` — GPU memory is invisible to
-    /// the process resident set.
+    /// `metal`). **Empty means the detected value** — not a hardcoded
+    /// `cpu`: a model living in VRAM must not be accounted on the CPU
+    /// profile, and RSS observation (profile correction) only runs on `cpu`
+    /// — GPU memory is invisible to the process resident set.
     #[serde(default)]
     pub platform: String,
 }
@@ -133,7 +134,10 @@ impl Default for SchedulerConfig {
 impl SchedulerConfig {
     pub fn effective_platform(&self) -> &str {
         match self.platform.as_str() {
-            "" => "cpu",
+            // 空 ⇒ **探测值**，不是写死的 "cpu" ⇒ ⇒ 一台跑在显存上的模型
+            // 不会在 cpu 档记账（`observes_rss()` 也不会去观测一个
+            // **不含权重**的进程 RSS —— 那是另一个「说假话」）。
+            "" => crate::accel::detected_platform_key(),
             p => p,
         }
     }
@@ -832,6 +836,7 @@ impl Drop for AcquireFuture {
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicUsize;
+    use std::task::Waker;
 
     // -- fixtures -------------------------------------------------------------
 
@@ -1339,7 +1344,9 @@ mod tests {
 
         let st = sched.status();
         assert_eq!(st.capability, "llm");
-        assert_eq!(st.platform, "cpu");
+        // 平台键现在是**探测**出来的 ⇒ ⇒ 断言对着探测值，而不是写死
+        // "cpu"（在 CUDA build 上它该是 "cuda"）。
+        assert_eq!(st.platform, crate::accel::detected_platform_key());
         assert_eq!(st.budget_bytes, 1_000_000_000);
         assert_eq!(st.resident_bytes, 123_000_000);
         let json = serde_json::to_string(&st).unwrap();

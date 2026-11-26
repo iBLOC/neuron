@@ -140,6 +140,32 @@ impl OcrRuntimeRegistry {
     pub fn default_runtime(&self) -> Arc<dyn OcrRuntime> {
         Arc::new(UnavailableOcrRuntime)
     }
+
+    /// **注册表里第一枚** —— 也就是「默认的那一枚」。
+    ///
+    /// ⚠️ **为什么需要这条路**（2026-11-25 真机读数）：
+    /// `/v1/models` **只列上游目录条目**（真机：41 条，asr／embedding／
+    /// imagegen／llm／rerank／tts／vision）⇒ ⇒ **运行时注册的 OCR 模型
+    /// 一个都不在里面** ⇒ ⇒ 客户端**学不到** `model_id` ⇒ ⇒ 客户端只能
+    /// 打 `model: ''` ⇒ ⇒ 端脑得接住这一脚 ⇒ ⇒ 否则**探针式**的 OCR
+    /// 那一支**结构性不可达**（永远 501）。
+    ///
+    /// ⚠️ **为什么能在这里加载**（而 `default_runtime()` 不能）：
+    /// 调用点在 **HTTP 处理器**里（**不在** `ServerState::new` 里）⇒ ⇒
+    /// 不会撞上「从一个 runtime 内部启动另一个 runtime」的 panic ⇒ ⇒
+    /// 这一条是**异步**的，处理器 `await` 它。
+    ///
+    /// 一枚都没注册 ⇒ ⇒ `Err`（⇒ 调用方退到不可用桩 ⇒ ⇒ 501）。
+    pub async fn runtime_for_default(&self) -> Result<Arc<dyn OcrRuntime>, NeuronError> {
+        let first = {
+            let registered = self.registered.lock().unwrap();
+            registered.first().cloned()
+        };
+        let entry = first.ok_or_else(|| {
+            NeuronError::new("NoRegisteredModel: register at least one OCR model")
+        })?;
+        self.runtime_for(&entry.model_id).await
+    }
 }
 
 /// Fallback runtime returned when no OCR model is registered. Every call
@@ -191,6 +217,35 @@ mod tests {
         let reg = OcrRuntimeRegistry::new(config);
         let rt = reg.default_runtime();
         assert_eq!(rt.name(), "unavailable");
+    }
+
+    #[tokio::test]
+    async fn test_runtime_for_default_with_nothing_registered_says_so() {
+        let config = Arc::new(NeuronConfig::new());
+        let reg = OcrRuntimeRegistry::new(config);
+        let err = reg.runtime_for_default().await.err().unwrap();
+        assert!(err.message.contains("NoRegisteredModel"), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn test_runtime_for_default_reaches_the_registered_model() {
+        let config = Arc::new(NeuronConfig::new());
+        let mut reg = OcrRuntimeRegistry::new(config);
+        reg.register(
+            "ppocrv5-mobile".into(),
+            OcrImpl::PaddleOcr,
+            DeviceSelection::Cpu,
+            64 * 1024 * 1024,
+        )
+        .expect("register within default resource budget");
+        // ⚠️ **权重不在** ⇒ ⇒ 加载必然失败 ⇒ ⇒ 但**失败的那一步**是关键：
+        // 它必须已经**越过「没注册」那一关** ⇒ ⇒ 错误里**不许**再出现
+        // NoRegisteredModel ⇒ ⇒ 这才证明「默认那一枚」选对了。
+        let err = reg.runtime_for_default().await.err().unwrap();
+        assert!(
+            !err.message.contains("NoRegisteredModel"),
+            "default runtime must try the registered model, got: {err:?}"
+        );
     }
 
     #[tokio::test]

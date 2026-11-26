@@ -33,7 +33,20 @@ struct Snapshot {
     rss_bytes: u64,
 }
 
-#[cfg(target_os = "linux")]
+/// ⚠⚠️ **Android 与 Linux 同一腿**（2026-11-26 刀 16，真机撞出来的）——
+///
+/// ⇒ ⇒ **Android 的 `target_os` 是 `"android"`，不是 `"linux"`** ⇒ ⇒ 只写
+/// `#[cfg(target_os = "linux")]` 的话 ⇒ ⇒ 手机的这条腿**整个不存在** ⇒ ⇒
+///
+/// 后果：调度器的自动预算（`total_memory_bytes()`）⇒ ⇒ **返回 0** ⇒ ⇒
+/// `resolve_budget` 落进 `else` 分支 ⇒ ⇒ 用 **12 GiB 兜底常量** ⇒ ⇒
+/// 在一台 **1.91 GiB** 的手机上，预算**超了 6 倍** ⇒ ⇒ 调度器以为有的是地方
+/// ⇒ ⇒ 于是它会让**装不下**的模型留在内存里 ⇒ ⇒ **OOM killer 来收割**
+/// （真机逐字：`oom_reaper: reaped process 25746 (dtype_probe)`）。
+///
+/// ⇒ ⇒ 所以这一腿必须**同时**认 android —— 与
+/// [`crate::accel::ram_bytes_platform`]（同一刀修的另一处）**同一口径**。
+#[cfg(any(target_os = "linux", target_os = "android"))]
 mod platform {
     use super::Snapshot;
 
@@ -152,7 +165,12 @@ mod platform {
     }
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "android",
+    target_os = "macos",
+    target_os = "windows"
+)))]
 mod platform {
     use super::Snapshot;
 
@@ -169,18 +187,38 @@ mod tests {
     #[test]
     fn test_rss_probe_returns_nonzero_on_supported_platforms() {
         let rss = rss_bytes();
-        #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+        #[cfg(any(
+            target_os = "linux",
+            target_os = "android",
+            target_os = "macos",
+            target_os = "windows"
+        ))]
         assert!(rss > 0, "RSS probe should work on this platform");
-        #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+        #[cfg(not(any(
+            target_os = "linux",
+            target_os = "android",
+            target_os = "macos",
+            target_os = "windows"
+        )))]
         assert_eq!(rss, 0);
     }
 
     #[test]
     fn test_total_memory_probe_returns_nonzero_on_supported_platforms() {
         let total = total_memory_bytes();
-        #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+        #[cfg(any(
+            target_os = "linux",
+            target_os = "android",
+            target_os = "macos",
+            target_os = "windows"
+        ))]
         assert!(total > 0, "total-RAM probe should work on this platform");
-        #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+        #[cfg(not(any(
+            target_os = "linux",
+            target_os = "android",
+            target_os = "macos",
+            target_os = "windows"
+        )))]
         assert_eq!(total, 0);
     }
 }

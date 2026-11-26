@@ -28,6 +28,7 @@ fn test_llm_registry_clone_shares_its_state() {
             "shared-test".to_string(),
             crate::llm::LlmImpl::Candle,
             DeviceSelection::Cpu,
+            crate::accel::DTypeChoice::F32,
             1_000,
         )
         .expect("register");
@@ -300,6 +301,54 @@ fn test_imagegen_registry_clone_shares_its_resources() {
             9_000_000_000,
         )
         .expect_err("a clone must see the quota its original already spent");
+    assert!(
+        err.message.contains("InsufficientResources"),
+        "the refusal must be the resource budget, got: {err:?}"
+    );
+}
+
+/// ⚠ **共享不变量的第三格：宿主层那两份 clone 也必须共享同一份配额**。
+///
+/// 上面那条判据量的是「**手工** clone」；但真实宿主（`ServerState::new`）
+/// 把注册表 clone 一次放进动态注册锁（`imagegen_registry_lock`），handlers
+/// 读的是**另一份**（`imagegen_registry`），动态注册（`register_model`）
+/// 扣的是**锁那份**的账。
+///
+/// ⇒ ⇒ 若那一行哪天从「clone」改成「新建」，两份就各有各的配额 ⇒ ⇒ 锁那份
+/// 扣掉的账 handlers 那份看不见 ⇒ ⇒ **超卖** ⇒ ⇒ 而上面那条 registry 级
+/// 判据**照样绿**（它只量手工 clone）⇒ ⇒ 失败长得像成功。
+///
+/// 这条判据量的是**宿主那一格**（“动态注册扣掉的账，handlers 那份必须看得见”），
+/// 不是「某个 registry 的 Clone 实现」——前者才是真实使用路径。
+#[tokio::test]
+async fn test_server_state_imagegen_registration_charges_the_shared_budget() {
+    use crate::server::ServerState;
+
+    let state = ServerState::new(NeuronConfig::default());
+    // 动态注册落在**注册锁那份 clone** 上（register_model → imagegen_registry_lock）。
+    // 引擎取 `"mock"`（`ImageGenImpl::parse` 在测试构建里认它）⇒ ⇒ 这条判据
+    // **不依赖 candle feature** ⇒ ⇒ 任何能编过的构建都会钉它。
+    state
+        .register_model(
+            "imagegen",
+            "host-holder".to_string(),
+            "mock".to_string(),
+            DeviceSelection::Cpu,
+            8_000_000_000,
+        )
+        .await
+        .expect("the dynamic registration must be accepted");
+    // handlers 那份必须看得见这笔扣账 ⇒ ⇒ 再要 9 GB（8 + 9 > 16）必须被拒；
+    // 两份独立时它会放行 ⇒ ⇒ 这条断言红。
+    let err = state
+        .imagegen_registry
+        .register(
+            "host-oversell".to_string(),
+            crate::imagegen::ImageGenImpl::Mock,
+            DeviceSelection::Cpu,
+            9_000_000_000,
+        )
+        .expect_err("the handler's registry must see the quota the registration lock already spent");
     assert!(
         err.message.contains("InsufficientResources"),
         "the refusal must be the resource budget, got: {err:?}"

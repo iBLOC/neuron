@@ -1,3 +1,4 @@
+pub mod accel;
 pub mod adapter;
 pub mod asr;
 pub mod api_error;
@@ -19,9 +20,12 @@ pub mod mage_vl;
 pub mod metrics;
 pub mod models;
 pub mod ocr;
+pub mod ort_pool;
 pub mod rerank;
 pub mod scheduler;
 pub mod server;
+pub mod spk;
+pub mod face;
 pub mod tts;
 pub mod vision;
 

@@ -644,6 +644,13 @@ pub struct CatalogEntry {
     /// `false` = 历史支持模型库（老模型，仍可下载但不再推荐）。
     pub recommended: bool,
     pub capabilities: Vec<String>,
+    /// **引擎自报的输入模态**（`text` / `image` / … —— **已归一**）——
+    /// ⚠️ **空 = 没说**（**不是**「只能吃文本」）⇒ ⇒ 消费方要能说「不知道」。
+    ///
+    /// ⚠️ **这是「部署真相」那一轴**（2026-11-24）—— 与「模型卡真相」分开：
+    /// 模型卡说这条**模型**吃什么（synapse 的出厂清单），这里说这条**实现**
+    /// 真的吃什么 ⇒ ⇒ 消费方的优先级是**上游 → 出厂清单**。
+    pub input_modalities: Vec<String>,
     pub available: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
@@ -755,6 +762,11 @@ impl Catalog {
                 engine_impl: s.engine_impl,
                 recommended: !is_legacy_model(s.id),
                 capabilities: vec![engine_str.clone()],
+                // ⚠️ **引擎自报的模态**（同一份能力清单 ⇒ ⇒ 不另建第二份）
+                input_modalities: crate::capabilities::catalog::default_input_modalities(&id_str)
+                    .into_iter()
+                    .map(|s| s.to_string())
+                    .collect(),
                 available: on_disk.is_some(),
                 path: on_disk
                     .as_ref()
@@ -838,6 +850,12 @@ impl Catalog {
                         engine_impl: "",
                         recommended: !is_legacy_model(&m.id),
                         capabilities: vec![m.engine.as_str().to_string()],
+                        // ⚠️ **盘上有、但不在下载清单里**的那几枚 ⇒ ⇒ 模态照样
+                        // 查引擎自报（查不到 ⇒ ⇒ 空＝没说 ⇒ ⇒ 不许编）。
+                        input_modalities: crate::capabilities::catalog::default_input_modalities(&m.id)
+                            .into_iter()
+                            .map(|s| s.to_string())
+                            .collect(),
                         available: true,
                         path: Some(m.path.to_string_lossy().to_string()),
                         size_bytes: Some(m.size_bytes),
@@ -918,6 +936,60 @@ mod tests {
     use crate::models::source::SourceRegistry;
     use std::collections::HashMap;
     use tempfile::TempDir;
+
+    /// ⚠️⚠️ **目录条目带引擎自报的输入模态**（2026-11-24）—— 上游真值那一档
+    /// 第一次真通 ⇒ ⇒ 那条清单**不再只说「能力档」** ⇒ ⇒ 消费方（端脑）能拿到
+    /// 「这条实现真的吃什么」⇒ ⇒ **不必再跨仓抄一份模型卡知识**。
+    ///
+    /// ⚠️ **空 = 引擎没说**（**不是**「只能吃文本」）⇒ ⇒ 负控取一枚
+    /// **盘上有、能力目录里没有**的模型（引擎确实没自报 ⇒ ⇒ 模态空）。
+    ///
+    /// ⚠️⚠️ **负控换过一次（2026-11-24 修）**：原来拿 neuron's **默认模型**
+    /// （`minicpm5-1b`）当「引擎没说」那一格 ⇒ ⇒ **前提是假的** —— 它**在**
+    /// 能力目录里（报 `text_input`）⇒ ⇒ 断言当场红 ⇒ ⇒ **红的是判据的前提，
+    /// 不是实现** ⇒ ⇒ 改判据，不改实现。
+    #[test]
+    fn the_catalog_entries_carry_the_engine_reported_input_modalities() {
+        let tmp = TempDir::new().unwrap();
+        // ⚠️ **先造一枚「引擎没自报」的模型**（盘上有、下载清单里没有、
+        // 能力目录里也没有）⇒ ⇒ 「没说」那一格才有**真**对象。
+        let unknown_dir = tmp.path().join("llm").join("totally-unknown-model");
+        std::fs::create_dir_all(&unknown_dir).unwrap();
+        std::fs::write(unknown_dir.join("model.safetensors"), b"fake").unwrap();
+        let registry = Registry::new(tmp.path().to_path_buf());
+        let sources = Arc::new(SourceRegistry::with_defaults());
+        let cfg = CatalogConfig {
+            default_source_id: "huggingface".to_string(),
+            per_engine_source: HashMap::new(),
+            per_model_source: HashMap::new(),
+        };
+        let catalog = Catalog::new(registry, sources, cfg);
+        let entries = catalog.entries();
+        let entry_of = |id: &str| -> CatalogEntry {
+            entries
+                .iter()
+                .find(|e| e.id.split_once('/').map(|(_, rest)| rest) == Some(id))
+                .cloned()
+                .unwrap_or_else(|| panic!("目录里必须有 {id}"))
+        };
+        // ⚠️ **Mage-VL**：引擎自报 text ＋ image（**没有** video ⇒ ⇒ 这条
+        // 实现不吃视频 ⇒ ⇒ 部署真相 ≠ 模型卡真相）。
+        let mut mage = entry_of("microsoft/Mage-VL").input_modalities.clone();
+        mage.sort();
+        // ⚠️ **词是 canonical 那一套**（已归一）⇒ ⇒ 出仓即可直接用。
+        assert_eq!(mage, vec!["image", "text"]);
+        // ⚠️ **纯文本那枚**：只有 text。
+        let mut qwen = entry_of("qwen3-0.6b").input_modalities.clone();
+        qwen.sort();
+        assert_eq!(qwen, vec!["text"]);
+        // ⚠️ **默认模型**：能力目录里**有**它 ⇒ ⇒ 报 text_input。
+        let mut minicpm = entry_of("minicpm5-1b").input_modalities.clone();
+        minicpm.sort();
+        assert_eq!(minicpm, vec!["text"]);
+        // ⚠️ **「引擎没说」那一枚**（盘上有、能力目录里没有）⇒ ⇒ **空**
+        // （**不是** text！）⇒ ⇒ 消费方才敢说「不知道」。
+        assert!(entry_of("totally-unknown-model").input_modalities.is_empty());
+    }
 
     #[test]
     fn test_catalog_entries_lists_all_supported() {

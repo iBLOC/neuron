@@ -93,6 +93,17 @@ pub enum AnthropicContentBlock {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         signature: Option<String>,
     },
+    /// Anthropic's official document block: `{"type":"document","source":{…}}`.
+    ///
+    /// ⚠ **不许当它不存在** —— 上一版这个枚举里没有 `document` ⇒ ⇒ 一份
+    /// PDF 会让 serde 报「未知变体」⇒ ⇒ 协议层就「不认这个载荷」⇒ ⇒ 与
+    /// OpenAI 那张脸**各说各话** ⇒ ⇒ 今天补上（**认出来**；引擎层照旧
+    /// **如实拒绝**，不许折成 JSON）。
+    Document {
+        source: AnthropicDocumentSource,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache_control: Option<AnthropicCacheControl>,
+    },
 }
 
 fn is_error_some(b: &Option<bool>) -> bool { b.is_some() }
@@ -100,6 +111,17 @@ fn is_error_some(b: &Option<bool>) -> bool { b.is_some() }
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AnthropicImageSource {
+    Base64 { media_type: String, data: String },
+    Url { url: String },
+}
+
+/// The `source` of an Anthropic document block.
+///
+/// ⚠ **只认 base64 与 url** —— Anthropic 还有一种 `text` 源（纯文本文档）
+/// ⇒ ⇒ 本仓**不认**它（serde 报未知变体 ⇒ ⇒ **大声**拒绝，不猜）。
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AnthropicDocumentSource {
     Base64 { media_type: String, data: String },
     Url { url: String },
 }
@@ -315,6 +337,20 @@ fn convert_content_block(b: AnthropicContentBlock) -> Result<ContentBlock, Strin
         }
         AnthropicContentBlock::Thinking { thinking, signature } =>
             Ok(ContentBlock::Reasoning(ReasoningBlock { text: thinking, signature })),
+        // ⚠ **文档 ⇒ ContentBlock::Document**（附件，不折 JSON）⇒ ⇒ 与
+        // OpenAI 那张脸**同一个块类型** ⇒ ⇒ 两个协议面不许各说各话。
+        AnthropicContentBlock::Document { source, .. } => {
+            let src = match source {
+                AnthropicDocumentSource::Base64 { media_type, data } => {
+                    ImageSource::Base64 { media_type, data }
+                }
+                AnthropicDocumentSource::Url { url } => ImageSource::Url(url),
+            };
+            Ok(ContentBlock::Document(crate::canonical::DocumentBlock {
+                source: src,
+                filename: None,
+            }))
+        }
     }
 }
 
@@ -705,6 +741,39 @@ mod tests {
                 assert_eq!(llm.sampling.max_tokens, Some(4096));
             }
             _ => panic!("expected LLM"),
+        }
+    }
+
+    /// 文档 part（Anthropic 官方的 `document` block）必须**被认出来** ⇒ ⇒
+    /// 收成 `ContentBlock::Document` ⇒ ⇒ 不许让 serde 当未知变体炸掉 ⇒ ⇒
+    /// 两个协议面不许各说各话（OpenAI 那张脸走 `file` part ⇒ ⇒ 同一个块）。
+    #[test]
+    fn test_parse_with_document_block() {
+        let body = serde_json::to_vec(&serde_json::json!({
+            "model": "claude-3-5-sonnet",
+            "max_tokens": 1024,
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": "aGVsbG8="}},
+                    {"type": "text", "text": "what is in this document?"}
+                ]
+            }]
+        })).unwrap();
+        let adapter = AnthropicMessagesAdapter;
+        let req = adapter.parse(&Bytes::from(body), &axum::http::HeaderMap::new()).expect("parse");
+        let CanonicalRequest::Llm(llm) = req else { panic!("expected LLM") };
+        let content = &llm.messages[0].content;
+        assert_eq!(content.len(), 2);
+        match &content[0] {
+            ContentBlock::Document(d) => match &d.source {
+                ImageSource::Base64 { media_type, data } => {
+                    assert_eq!(media_type, "application/pdf");
+                    assert_eq!(data, "aGVsbG8=");
+                }
+                other => panic!("expected a base64 source, got {other:?}"),
+            },
+            other => panic!("expected a document block, got {other:?}"),
         }
     }
 

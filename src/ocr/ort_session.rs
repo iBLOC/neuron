@@ -12,7 +12,6 @@
 //! per graph so concurrent requests each get their own.
 
 use std::path::Path;
-use std::sync::{Condvar, Mutex};
 
 use ort::session::builder::GraphOptimizationLevel;
 use ort::session::Session;
@@ -88,56 +87,12 @@ impl OcrSession for OrtGraphSession {
 }
 
 /// Fixed-size checkout pool: `with` blocks until a slot is free and hands
-/// it back on scope exit. Generic (and unit-tested) over the stored type so
-/// the blocking semantics don't need a real onnxruntime to verify.
-pub(crate) struct SessionPool<T> {
-    items: Mutex<Vec<T>>,
-    available: Condvar,
-}
-
-impl<T> SessionPool<T> {
-    pub(crate) fn new(items: Vec<T>) -> Self {
-        Self {
-            items: Mutex::new(items),
-            available: Condvar::new(),
-        }
-    }
-
-    /// Run `f` with exclusive access to one pooled item, blocking while all
-    /// slots are checked out. The item returns to the pool before `with`
-    /// returns (panics included — the guard pushes back in its Drop).
-    pub(crate) fn with<F, R>(&self, f: F) -> R
-    where
-        F: FnOnce(&mut T) -> R,
-    {
-        struct Guard<'a, T> {
-            pool: &'a SessionPool<T>,
-            item: Option<T>,
-        }
-        impl<T> Drop for Guard<'_, T> {
-            fn drop(&mut self) {
-                if let Some(item) = self.item.take() {
-                    let mut items = self.pool.items.lock().unwrap();
-                    items.push(item);
-                    self.pool.available.notify_one();
-                }
-            }
-        }
-
-        let mut items = self.items.lock().unwrap();
-        let item = loop {
-            if let Some(item) = items.pop() {
-                break item;
-            }
-            items = self.available.wait(items).unwrap();
-        };
-        drop(items);
-        let mut guard = Guard { pool: self, item: Some(item) };
-        let out = f(guard.item.as_mut().unwrap());
-        drop(guard);
-        out
-    }
-}
+/// it back on scope exit.
+///
+/// The implementation lives in [`crate::ort_pool`] — the Ming-3.0
+/// CAM++ extractor needs the same shape, and one shape of "how do we share
+/// an ort session" is cheaper than two.
+pub(crate) use crate::ort_pool::SessionPool;
 
 #[cfg(test)]
 mod tests {
