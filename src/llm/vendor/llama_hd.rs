@@ -28,9 +28,9 @@
 //! Keep this file in sync with upstream `models/llama.rs`; re-diff when
 //! bumping the candle pin.
 
-use candle_transformers::models::with_tracing::{linear_no_bias as linear, Linear, RmsNorm};
-use candle::{DType, Device, IndexOp, Result, Tensor, D};
-use candle_nn::{embedding, Embedding, Module, VarBuilder};
+use candle::{D, DType, Device, IndexOp, Result, Tensor};
+use candle_nn::{Embedding, Module, VarBuilder, embedding};
+use candle_transformers::models::with_tracing::{Linear, RmsNorm, linear_no_bias as linear};
 use std::{collections::HashMap, f32::consts::PI};
 
 pub const DEFAULT_MAX_SEQ_LEN: usize = 4096;
@@ -258,7 +258,8 @@ impl Cache {
         if let Some(mask) = self.masks.get(&(seq_len, kv_len)) {
             Ok(mask.clone())
         } else {
-            let mask = candle_transformers::utils::build_causal_mask(seq_len, index_pos, &self.device)?;
+            let mask =
+                candle_transformers::utils::build_causal_mask(seq_len, index_pos, &self.device)?;
             self.masks.insert((seq_len, kv_len), mask.clone());
             Ok(mask)
         }
@@ -401,7 +402,10 @@ impl CausalSelfAttention {
     }
 
     fn repeat_kv(&self, x: Tensor) -> Result<Tensor> {
-        candle_transformers::utils::repeat_kv(x, self.num_attention_heads / self.num_key_value_heads)
+        candle_transformers::utils::repeat_kv(
+            x,
+            self.num_attention_heads / self.num_key_value_heads,
+        )
     }
 
     fn load(vb: VarBuilder, cfg: &Config) -> Result<Self> {

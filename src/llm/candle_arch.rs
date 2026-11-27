@@ -280,9 +280,8 @@ pub fn detect_arch(model_dir: &std::path::Path) -> Result<(CausalArch, String), 
         // `qwen3_5_moe` is the Qwen 3.5 MoE line (35B-A3B / 122B-A10B /
         // 397B-A17B) — it must land here rather than in the generic
         // "unsupported model_type" arm, so the error says "MoE".
-        "qwen2moe" | "qwen3moe" | "qwen2_moe" | "qwen3_moe" | "qwen3_5moe"
-        | "qwen3_5_moe" | "qwen3.5_moe" | "mixtral" | "deepseek" | "deepseek_v2"
-        | "deepseek_v3" => {
+        "qwen2moe" | "qwen3moe" | "qwen2_moe" | "qwen3_moe" | "qwen3_5moe" | "qwen3_5_moe"
+        | "qwen3.5_moe" | "mixtral" | "deepseek" | "deepseek_v2" | "deepseek_v3" => {
             return Err(format!(
                 "MoE model_type {model_type:?} is not supported. \
                  neuron only loads dense causal LMs. For MoE inference, \
@@ -390,9 +389,7 @@ mod tests {
                      exposes this as Option<bool>"
                 );
             }
-            other => panic!(
-                "expected CausalArch::Llama for minicpm5-2b, got {other:?}"
-            ),
+            other => panic!("expected CausalArch::Llama for minicpm5-2b, got {other:?}"),
         }
     }
 }

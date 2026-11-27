@@ -158,7 +158,11 @@ impl MemoryProfileStore {
     pub fn estimate(&self, model_id: &str, platform: &str) -> u64 {
         let inner = self.inner.lock().unwrap();
         if let Some(entry) = inner.models.get(model_id) {
-            if let Some(b) = entry.bytes.get(platform).or_else(|| entry.bytes.get("default")) {
+            if let Some(b) = entry
+                .bytes
+                .get(platform)
+                .or_else(|| entry.bytes.get("default"))
+            {
                 return *b;
             }
         }
@@ -197,8 +201,9 @@ impl MemoryProfileStore {
                 .or_else(|| entry.bytes.get("default"))
                 .copied();
             let blended = match current {
-                Some(prev) => ((1.0 - EWMA_ALPHA) * prev as f64 + EWMA_ALPHA * observed_bytes as f64)
-                    as u64,
+                Some(prev) => {
+                    ((1.0 - EWMA_ALPHA) * prev as f64 + EWMA_ALPHA * observed_bytes as f64) as u64
+                }
                 None => observed_bytes,
             };
             entry.bytes.insert(platform.to_string(), blended);
@@ -327,20 +332,28 @@ mod tests {
     fn test_observe_blends_and_persists() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("scheduler").join("observed.json");
-        let store =
-            MemoryProfileStore::embedded().with_overrides_path(&path);
+        let store = MemoryProfileStore::embedded().with_overrides_path(&path);
 
         // First observation seeds the estimate directly.
         store.observe("some-unknown-7b-model", "cpu", 30_000_000_000);
-        assert_eq!(store.estimate("some-unknown-7b-model", "cpu"), 30_000_000_000);
+        assert_eq!(
+            store.estimate("some-unknown-7b-model", "cpu"),
+            30_000_000_000
+        );
 
         // Second observation blends: 0.7*30G + 0.3*20G = 27G.
         store.observe("some-unknown-7b-model", "cpu", 20_000_000_000);
-        assert_eq!(store.estimate("some-unknown-7b-model", "cpu"), 27_000_000_000);
+        assert_eq!(
+            store.estimate("some-unknown-7b-model", "cpu"),
+            27_000_000_000
+        );
 
         // Sub-noise observations are ignored.
         store.observe("some-unknown-7b-model", "cpu", 1_000);
-        assert_eq!(store.estimate("some-unknown-7b-model", "cpu"), 27_000_000_000);
+        assert_eq!(
+            store.estimate("some-unknown-7b-model", "cpu"),
+            27_000_000_000
+        );
 
         // Overrides file exists and carries the observed entry.
         let content = std::fs::read_to_string(&path).unwrap();
@@ -369,7 +382,9 @@ mod tests {
         let p = default_overrides_path(&dirs).unwrap();
         assert_eq!(
             p,
-            PathBuf::from("/models").join("scheduler").join("observed_profiles.json")
+            PathBuf::from("/models")
+                .join("scheduler")
+                .join("observed_profiles.json")
         );
         assert!(default_overrides_path(&[]).is_none());
     }

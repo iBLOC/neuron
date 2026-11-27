@@ -92,8 +92,8 @@ mod platform {
         //    `mach_task_basic_info`（libc 有）带 `resident_size` —— 正是
         //    这里的意图；交叉 check 过 aarch64-apple-darwin。
         use libc::{
-            mach_msg_type_number_t, mach_task_basic_info, mach_task_self_,
-            MACH_TASK_BASIC_INFO, MACH_TASK_BASIC_INFO_COUNT,
+            MACH_TASK_BASIC_INFO, MACH_TASK_BASIC_INFO_COUNT, mach_msg_type_number_t,
+            mach_task_basic_info, mach_task_self_,
         };
         unsafe {
             let mut info: mach_task_basic_info = std::mem::zeroed();

@@ -15,7 +15,7 @@
 //!
 
 // Vendored from candle-transformers 0.9.2, patched with flash-attn support.
-use candle_transformers::models::with_tracing::{linear, linear_no_bias, Linear, RmsNorm};
+use candle_transformers::models::with_tracing::{Linear, RmsNorm, linear, linear_no_bias};
 
 /// Convert from the upstream qwen2::Config (no use_flash_attn field)
 /// to the vendored one with flash-attn enabled.
@@ -40,7 +40,7 @@ impl From<candle_transformers::models::qwen2::Config> for Config {
         }
     }
 }
-use candle::{DType, Device, IndexOp, Module, Result, Tensor, D};
+use candle::{D, DType, Device, IndexOp, Module, Result, Tensor};
 use candle_nn::{Activation, VarBuilder};
 use std::sync::Arc;
 
@@ -217,10 +217,10 @@ impl Attention {
         };
         self.kv_cache = Some((key_states.clone(), value_states.clone()));
 
-        let key_states = candle_transformers::utils::repeat_kv(key_states, self.num_kv_groups)?
+        let key_states =
+            candle_transformers::utils::repeat_kv(key_states, self.num_kv_groups)?.contiguous()?;
+        let value_states = candle_transformers::utils::repeat_kv(value_states, self.num_kv_groups)?
             .contiguous()?;
-        let value_states =
-            candle_transformers::utils::repeat_kv(value_states, self.num_kv_groups)?.contiguous()?;
 
         let attn_output = if self.use_flash_attn {
             // FlashAttention-2 path: requires the `flash-attn` build feature
@@ -241,8 +241,7 @@ impl Attention {
         } else {
             // Standard SDPA path (CPU / Metal / no flash-attn feature)
             let scale = 1f64 / f64::sqrt(self.head_dim as f64);
-            let attn_weights =
-                (query_states.matmul(&key_states.transpose(2, 3)?)? * scale)?;
+            let attn_weights = (query_states.matmul(&key_states.transpose(2, 3)?)? * scale)?;
 
             let attn_weights = match attention_mask {
                 None => attn_weights,

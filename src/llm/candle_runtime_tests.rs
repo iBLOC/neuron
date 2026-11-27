@@ -22,10 +22,7 @@ fn test_decode_token_for_stream_replaces_sentencepiece_word_marker() {
         CandleLlmRuntime::decode_token_for_stream("\u{2581}Hello"),
         " Hello"
     );
-    assert_eq!(
-        CandleLlmRuntime::decode_token_for_stream("Hello"),
-        "Hello"
-    );
+    assert_eq!(CandleLlmRuntime::decode_token_for_stream("Hello"), "Hello");
     assert_eq!(CandleLlmRuntime::decode_token_for_stream(""), "");
     assert_eq!(
         CandleLlmRuntime::decode_token_for_stream("a\u{2581}b\u{2581}c"),
@@ -40,9 +37,18 @@ fn test_decode_token_for_stream_replaces_sentencepiece_word_marker() {
 #[test]
 fn test_sample_token_from_logits_empty_returns_zero() {
     let logits: Vec<f32> = vec![];
-    assert_eq!(CandleLlmRuntime::sample_token_from_logits(&logits, 0.0, 1.0, 0), 0);
-    assert_eq!(CandleLlmRuntime::sample_token_from_logits(&logits, 1.0, 1.0, 0), 0);
-    assert_eq!(CandleLlmRuntime::sample_token_from_logits(&logits, 0.5, 1.0, 0), 0);
+    assert_eq!(
+        CandleLlmRuntime::sample_token_from_logits(&logits, 0.0, 1.0, 0),
+        0
+    );
+    assert_eq!(
+        CandleLlmRuntime::sample_token_from_logits(&logits, 1.0, 1.0, 0),
+        0
+    );
+    assert_eq!(
+        CandleLlmRuntime::sample_token_from_logits(&logits, 0.5, 1.0, 0),
+        0
+    );
 }
 
 #[test]
@@ -53,7 +59,10 @@ fn test_sample_token_from_logits_zero_temperature_is_argmax() {
         2
     );
     let logits = vec![3.0_f32, 1.0, 2.0];
-    assert_eq!(CandleLlmRuntime::sample_token_from_logits(&logits, 0.0, 1.0, 0), 0);
+    assert_eq!(
+        CandleLlmRuntime::sample_token_from_logits(&logits, 0.0, 1.0, 0),
+        0
+    );
     assert_eq!(
         CandleLlmRuntime::sample_token_from_logits(&logits, -0.5, 1.0, 0),
         0
@@ -169,14 +178,20 @@ fn test_sample_token_from_logits_top_k_composes_with_top_p() {
     let logits = vec![1.609_f32, 0.788, 0.223];
     for _ in 0..100 {
         let result = CandleLlmRuntime::sample_token_from_logits(&logits, 1.0, 0.5, 2);
-        assert!(result < 2, "top_k=2 + top_p=0.5 must exclude 2, got {result}");
+        assert!(
+            result < 2,
+            "top_k=2 + top_p=0.5 must exclude 2, got {result}"
+        );
     }
 }
 
 #[test]
 fn test_check_stop_suffix_no_match_returns_none() {
     let stops: Vec<String> = vec!["END".to_string()];
-    assert_eq!(CandleLlmRuntime::check_stop_suffix("hello world", &stops), None);
+    assert_eq!(
+        CandleLlmRuntime::check_stop_suffix("hello world", &stops),
+        None
+    );
     assert_eq!(CandleLlmRuntime::check_stop_suffix("", &stops), None);
     assert_eq!(CandleLlmRuntime::check_stop_suffix("ENDing", &stops), None);
 }
@@ -217,7 +232,10 @@ fn test_check_stop_suffix_empty_stop_string_ignored() {
 #[test]
 fn test_check_stop_suffix_empty_stops_returns_none() {
     let stops: Vec<String> = vec![];
-    assert_eq!(CandleLlmRuntime::check_stop_suffix("anything", &stops), None);
+    assert_eq!(
+        CandleLlmRuntime::check_stop_suffix("anything", &stops),
+        None
+    );
 }
 
 #[test]
@@ -260,7 +278,11 @@ fn test_candle_load_resolves_model_from_library_by_id() {
     // Fake a pulled model in the library: <home>/.neuron/models/llm/<id>/
     // with the three required artefacts.
     let temp = std::env::temp_dir().join(format!("neuron-lib-test-{}", std::process::id()));
-    let model_dir = temp.join(".neuron").join("models").join("llm").join("qwen3-0.6b");
+    let model_dir = temp
+        .join(".neuron")
+        .join("models")
+        .join("llm")
+        .join("qwen3-0.6b");
     std::fs::create_dir_all(&model_dir).unwrap();
     std::fs::write(model_dir.join("config.json"), b"{}").unwrap();
     std::fs::write(model_dir.join("tokenizer.json"), b"{}").unwrap();
@@ -285,7 +307,11 @@ async fn test_candle_chat_without_load_returns_not_initialized() {
     let runtime = CandleLlmRuntime::new();
     let req = ChatRequest {
         model: "qwen3-0.6b".to_string(),
-        messages: vec![ChatMessage { role: "user".to_string(), content: "Hello".to_string(), reasoning_content: None }],
+        messages: vec![ChatMessage {
+            role: "user".to_string(),
+            content: "Hello".to_string(),
+            reasoning_content: None,
+        }],
         temperature: None,
         max_tokens: None,
         top_p: None,
@@ -306,7 +332,11 @@ async fn test_candle_chat_stream_without_load_returns_not_initialized() {
     let runtime = CandleLlmRuntime::new();
     let req = ChatRequest {
         model: "qwen3-0.6b".to_string(),
-        messages: vec![ChatMessage { role: "user".to_string(), content: "Hello".to_string(), reasoning_content: None }],
+        messages: vec![ChatMessage {
+            role: "user".to_string(),
+            content: "Hello".to_string(),
+            reasoning_content: None,
+        }],
         temperature: None,
         max_tokens: None,
         top_p: None,
@@ -325,8 +355,16 @@ async fn test_candle_chat_stream_without_load_returns_not_initialized() {
 #[test]
 fn test_chatml_prompt_format_system_user_assistant() {
     let messages = vec![
-        ChatMessage { role: "system".to_string(), content: "You are helpful".to_string(), reasoning_content: None },
-        ChatMessage { role: "user".to_string(), content: "Hi".to_string(), reasoning_content: None },
+        ChatMessage {
+            role: "system".to_string(),
+            content: "You are helpful".to_string(),
+            reasoning_content: None,
+        },
+        ChatMessage {
+            role: "user".to_string(),
+            content: "Hi".to_string(),
+            reasoning_content: None,
+        },
     ];
 
     let prompt = CandleLlmRuntime::render_chatml_prompt(&messages);
@@ -339,9 +377,16 @@ fn test_chatml_prompt_format_system_user_assistant() {
 
 #[test]
 fn test_chatml_prompt_single_user() {
-    let messages = vec![ChatMessage { role: "user".to_string(), content: "hello".to_string(), reasoning_content: None }];
+    let messages = vec![ChatMessage {
+        role: "user".to_string(),
+        content: "hello".to_string(),
+        reasoning_content: None,
+    }];
     let prompt = CandleLlmRuntime::render_chatml_prompt(&messages);
-    assert_eq!(prompt, "<|im_start|>user\nhello<|im_end|>\n<|im_start|>assistant\n");
+    assert_eq!(
+        prompt,
+        "<|im_start|>user\nhello<|im_end|>\n<|im_start|>assistant\n"
+    );
 }
 
 #[test]
@@ -606,10 +651,16 @@ fn test_detect_arch_rejects_qwen3moe_with_clear_error() {
     fs::write(tmp.path().join("config.json"), cfg).unwrap();
 
     let result = CandleLlmRuntime::detect_arch(tmp.path());
-    assert!(result.is_err(), "qwen3moe must not silently fall through to dense loader");
+    assert!(
+        result.is_err(),
+        "qwen3moe must not silently fall through to dense loader"
+    );
     let err = result.err().unwrap();
     assert!(err.contains("MoE"), "error should mention MoE: got {err}");
-    assert!(err.contains("qwen3moe"), "error should name the rejected model_type: got {err}");
+    assert!(
+        err.contains("qwen3moe"),
+        "error should name the rejected model_type: got {err}"
+    );
 }
 
 #[test]
@@ -778,7 +829,10 @@ fn test_parse_use_flash_attn_unknown_values_are_kept_verbatim() {
 fn test_flash_attn_env_var_affects_mistral_config() {
     unsafe { std::env::set_var("NEURON_USE_FLASH_ATTN", "1") };
     let use_flash_attn = matches!(parse_use_flash_attn(), FlashAttnRequest::Enabled);
-    assert!(use_flash_attn, "NEURON_USE_FLASH_ATTN=1 should parse as true");
+    assert!(
+        use_flash_attn,
+        "NEURON_USE_FLASH_ATTN=1 should parse as true"
+    );
 
     let mut cfg = candle_transformers::models::mistral::Config::config_7b_v0_1(false);
     assert!(!cfg.use_flash_attn, "default should be false");
@@ -884,18 +938,12 @@ fn test_resolve_flash_attn_branch_order() {
     // Everything but the dtype ⇒ the kernel would die inside the
     // forward pass ⇒ ⇒ the dtype has to be a *named* prerequisite.
     assert_eq!(
-        resolve_flash_attn(
-            &FlashAttnRequest::Enabled,
-            prereqs(true, true, true, false)
-        ),
+        resolve_flash_attn(&FlashAttnRequest::Enabled, prereqs(true, true, true, false)),
         FlashAttnStatus::DtypeNotSupported
     );
     // Everything present ⇒ really on.
     assert_eq!(
-        resolve_flash_attn(
-            &FlashAttnRequest::Enabled,
-            prereqs(true, true, true, true)
-        ),
+        resolve_flash_attn(&FlashAttnRequest::Enabled, prereqs(true, true, true, true)),
         FlashAttnStatus::Enabled
     );
 }
@@ -943,7 +991,10 @@ fn test_flash_attn_effective_flag_is_only_true_when_enabled() {
         FlashAttnStatus::DeviceNotCuda,
         FlashAttnStatus::DtypeNotSupported,
     ] {
-        assert!(!status.is_enabled(), "{status:?} must not enable FlashAttention");
+        assert!(
+            !status.is_enabled(),
+            "{status:?} must not enable FlashAttention"
+        );
     }
     assert!(FlashAttnStatus::Enabled.is_enabled());
 }
@@ -970,7 +1021,10 @@ fn test_flash_attn_degraded_messages_name_the_missing_prerequisite() {
         FlashAttnArch::Phi3,
     )
     .expect("arch-not-covered must say something");
-    assert!(arch_msg.contains("phi3"), "must name the architecture: {arch_msg}");
+    assert!(
+        arch_msg.contains("phi3"),
+        "must name the architecture: {arch_msg}"
+    );
     assert!(
         !arch_msg.contains("device is not CUDA"),
         "must not blame the device: {arch_msg}"
@@ -982,7 +1036,10 @@ fn test_flash_attn_degraded_messages_name_the_missing_prerequisite() {
         FlashAttnArch::Qwen2,
     )
     .expect("device-not-cuda must say something");
-    assert!(device_msg.contains("CUDA"), "must name the device: {device_msg}");
+    assert!(
+        device_msg.contains("CUDA"),
+        "must name the device: {device_msg}"
+    );
     assert!(
         !device_msg.contains("build with"),
         "must not blame the build: {device_msg}"
@@ -997,7 +1054,10 @@ fn test_flash_attn_unknown_value_message_quotes_the_raw_value() {
         FlashAttnArch::Qwen2,
     )
     .expect("an unknown spelling must be reported");
-    assert!(msg.contains("onn"), "must quote what the operator typed: {msg}");
+    assert!(
+        msg.contains("onn"),
+        "must quote what the operator typed: {msg}"
+    );
     assert!(
         msg.contains("NEURON_USE_FLASH_ATTN"),
         "must name the knob: {msg}"
@@ -1057,10 +1117,7 @@ fn test_flash_attn_needs_a_dtype_the_kernel_accepts() {
     // 在 forward pass 里炸（那时模型已加载、显存已占）⇒ ⇒ 现在它是
     // **前提**，不是意外。
     assert_eq!(
-        resolve_flash_attn(
-            &FlashAttnRequest::Enabled,
-            prereqs(true, true, true, false)
-        ),
+        resolve_flash_attn(&FlashAttnRequest::Enabled, prereqs(true, true, true, false)),
         FlashAttnStatus::DtypeNotSupported
     );
     assert!(!FlashAttnStatus::DtypeNotSupported.is_enabled());
