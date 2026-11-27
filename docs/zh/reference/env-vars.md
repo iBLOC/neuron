@@ -23,6 +23,9 @@ neuron 在启动时从环境变量读取配置。下表完整列出每一个 `NE
 | `NEURON_ASR_MODEL_PATH` | (未设置) | ASR 模型目录路径(Whisper:`config.json` + `tokenizer.json` + `*.safetensors` + `mel_filters.safetensors`;SenseVoiceSmall:`model.onnx` 或 `model.int8.onnx` + `tokens.txt`;tract 路径还需要 `scripts/prep-sensevoice-onnx.py` 产出的 `model.prepped.onnx`) |
 | `NEURON_RERANK_MODEL_PATH` | (未设置) | Rerank 模型目录路径(BGE/mxbai/jina;cohere 不使用) |
 | `NEURON_EMBEDDING_MODEL_PATH` | (未设置) | Embedding 模型目录路径(MiniLM BERT;EmbeddingGemma 2 需 `config.json` + `tokenizer.json` + `model.safetensors`——未设置时回落到 `<模型根目录>/gemma2/embeddinggemma-2/`) |
+| `NEURON_MISTRALRS_MTP` | (未设置，关闭) | `on` 启用多 token 预测 / 推测解码，通过 checkpoint 内置的草稿头（仅 HF/safetensors；需要 PagedAttention）。 |
+| `NEURON_MISTRALRS_MTP_N_PREDICT` | (未设置，自动) | 限制 MTP 草稿深度（至少 1）；未设置时由 mistral.rs 自动调优。 |
+| `NEURON_MISTRALRS_THROUGHPUT_LOGGING` | (未设置，关闭) | `on` 开启引擎的 Throughput 行，MTP accept 率只在这里打印。 |
 | `NEURON_EMBEDDING_RUNTIME` | (未设置) | `candle`(MiniLM BERT)\| `gemma2`(EmbeddingGemma 2,768 维 MRL 嵌入)——加载哪个 Embedding 引擎 |
 | `NEURON_EMBEDDING_GEMMA2_MAX_SEQ` | `2048` | EmbeddingGemma 2 运行时的右截断上限(token)。双向注意力掩码开销为 `batch × seq² × 4 字节`,用它封顶;模型本身支持 8192。 |
 | `NEURON_VISION_MODEL_PATH` | (未设置) | Vision 模型目录路径。ONNX 路径从里面读 `model.onnx` + `config.json`；`candle-yolo` 从里面读 `*.safetensors`（且要求权重覆盖全部架构变量，否则拒绝运行）。 |
@@ -40,6 +43,7 @@ neuron 在启动时从环境变量读取配置。下表完整列出每一个 `NE
 | `NEURON_LLAMA_CPP_GPU_LAYERS` | 取自设备选择 | 覆盖 llama.cpp 的 GPU 卸载层数。`0` = 全 CPU;`u32::MAX`(或隐含它的设备)= 全卸载;中间数字 = 部分卸载 |
 | `NEURON_LLAMA_CPP_FORCE_CHATML` | (未设置) | `1` / `true` 跳过 GGUF 内嵌的 chat template,把所有请求都走 ChatML 回退(`<\|im_start\|>` 框架) |
 | `NEURON_LLAMA_CPP_MMPROJ` | (未设置) | 多模态请求的视觉投影器 GGUF 路径。未设置时运行时会在文本 GGUF 旁自动发现 `mmproj-*.gguf`;找不到则按纯文本模型加载 |
+| `NEURON_LLAMA_CPP_CPU_MOE` | (未设置，false) | `1` / `true` 将 llama.cpp 后端切换到 CPU MoE 覆盖（`add_cpu_moe_override`），使 llama.cpp 原本在 CPU 上拒绝的 Mixture-of-Experts 模型仍可加载与服务。要求 `NEURON_LLM_RUNTIME=llamacpp`。 |
 | `NEURON_REMOTE_BASE_URL` | (未设置) | 要注册为远程 LLM 引擎的 OpenAI 兼容端点基础 URL(`NEURON_REMOTE_MODELS` 里的每个 id 都被原样代理,含工具) |
 | `NEURON_REMOTE_MODELS` | (未设置) | 逗号分隔的模型 id,注册到 `NEURON_REMOTE_BASE_URL`(如 `gpt-4o,claude-3-5-sonnet`)。第一个 id 成为默认引擎 |
 | `NEURON_REMOTE_API_KEY` | (未设置) | 发给远程端点的 Bearer token |

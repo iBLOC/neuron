@@ -38,6 +38,7 @@ neuron reads its configuration from environment variables on startup. The full m
 | `NEURON_LLAMA_CPP_GPU_LAYERS` | from the device selection | Override the llama.cpp GPU offload count. `0` = full CPU; `u32::MAX` (or a device that implies it) = full offload; a number in between = partial offload |
 | `NEURON_LLAMA_CPP_FORCE_CHATML` | (unset) | `1` / `true` skips the GGUF's embedded chat template and renders every request through the ChatML fallback (`<\|im_start\|>` framing) |
 | `NEURON_LLAMA_CPP_MMPROJ` | (unset) | Path to a vision-projector GGUF for multimodal requests. When unset, the runtime auto-discovers `mmproj-*.gguf` next to the text GGUF; without one, the model loads as text-only |
+| `NEURON_LLAMA_CPP_CPU_MOE` | (unset, false) | `1` / `true` opts the llama.cpp backend into the CPU MoE override (`add_cpu_moe_override`) so Mixture-of-Experts models that llama.cpp otherwise refuses on CPU can still load and serve. Requires `NEURON_LLM_RUNTIME=llamacpp`. |
 | `NEURON_REMOTE_BASE_URL` | (unset) | Base URL of an OpenAI-compatible endpoint to register as a remote LLM engine (each id in `NEURON_REMOTE_MODELS` is proxied verbatim, tools included) |
 | `NEURON_REMOTE_MODELS` | (unset) | Comma-separated model ids to register against `NEURON_REMOTE_BASE_URL` (e.g. `gpt-4o,claude-3-5-sonnet`). The first one becomes the default engine |
 | `NEURON_REMOTE_API_KEY` | (unset) | Bearer token sent to the remote endpoint |
@@ -45,6 +46,9 @@ neuron reads its configuration from environment variables on startup. The full m
 | `NEURON_MAGE_VL_MODEL_ID` | `microsoft/Mage-VL` | Override the registered Mage-VL model id (HF repo id or local path string used for `engines.llm` keying) |
 | `NEURON_MAGE_VL_GATE_PATH` | (unset) | Path to the Mage-VL StreamMind gate model directory (used by `POST /v1/vision/gate/score`) |
 | `NEURON_MISTRALRS_ISQ` | `q4_0` | `q4_0` \| `q8_0` \| `none` — in-situ quantization applied by mistral.rs at load time |
+| `NEURON_MISTRALRS_MTP` | (unset, off) | `on` enables multi-token prediction / speculative decoding via the checkpoint built-in draft head (HF/safetensors only; requires PagedAttention). |
+| `NEURON_MISTRALRS_MTP_N_PREDICT` | (unset, autotune) | Caps the MTP draft depth (minimum 1); unset lets mistral.rs autotune it. |
+| `NEURON_MISTRALRS_THROUGHPUT_LOGGING` | (unset, off) | `on` turns on the engine Throughput line, the only place the MTP accept rate is printed. |
 | `NEURON_EMBEDDING_RUNTIME` | (unset) | `candle` (MiniLM BERT) \| `gemma2` (EmbeddingGemma 2, 768-d MRL embeddings) — which Embedding engine to load |
 | `NEURON_EMBEDDING_GEMMA2_MAX_SEQ` | `2048` | Right-truncation limit (tokens) for the EmbeddingGemma 2 runtime. The bidirectional attention mask costs `batch × seq² × 4 bytes`, so this caps it; the model itself accepts 8192. |
 | `NEURON_TTS_RUNTIME` | (unset) | `voxcpm` / `burn` (0.5B, requires `--features voxcpm`) \| `voxcpm2` (2B/48 kHz, same feature; loads upstream checkpoints directly, ~10 GB RAM) |
