@@ -32,9 +32,9 @@ use crate::adapter::openai_chat::{
 use crate::canonical::{
     CanonicalLlmRequest, CanonicalLlmResponse, CanonicalLlmStreamEvent, ContentBlock,
 };
+use crate::capabilities::ModelCapabilities;
 use crate::engine::privacy::PrivacyFilter;
 use crate::llm::ChatResult;
-use crate::capabilities::ModelCapabilities;
 
 pub struct RemoteLlmEngine {
     /// OpenAI-compatible base URL INCLUDING `/v1`.
@@ -78,10 +78,11 @@ impl RemoteLlmEngine {
         if self.privacy.is_none() {
             return Ok(());
         }
-        let has_audio = req
-            .messages
-            .iter()
-            .any(|m| m.content.iter().any(|b| matches!(b, ContentBlock::Audio(_))));
+        let has_audio = req.messages.iter().any(|m| {
+            m.content
+                .iter()
+                .any(|b| matches!(b, ContentBlock::Audio(_)))
+        });
         if has_audio {
             return Err(crate::llm::NeuronError::new(
                 "audio is biometric data and this engine redacts PII on the way out — \
@@ -92,15 +93,11 @@ impl RemoteLlmEngine {
         }
         Ok(())
     }
-
 }
 
 #[async_trait]
 impl crate::engine::LlmRuntime for RemoteLlmEngine {
-    async fn execute(
-        &self,
-        req: CanonicalLlmRequest,
-    ) -> ChatResult<CanonicalLlmResponse> {
+    async fn execute(&self, req: CanonicalLlmRequest) -> ChatResult<CanonicalLlmResponse> {
         self.guard_biometric_media(&req)?;
         // Redact on the way out, restore on the way back — the caller
         // never sees a pseudonym.
@@ -112,8 +109,12 @@ impl crate::engine::LlmRuntime for RemoteLlmEngine {
             }
             None => (req, None),
         };
-        let wire = canonical_request_to_openai_wire(&req)
+        let mut wire = canonical_request_to_openai_wire(&req)
             .map_err(|e| crate::llm::NeuronError::new(format!("remote wire: {e}")))?;
+        // Proxy under the upstream model id, not the local alias the caller
+        // used (see the `model` field doc): the stack can expose
+        // `deepseek-chat` while the remote is named something else.
+        wire["model"] = Value::String(self.model.clone());
         let url = format!("{}/chat/completions", self.base_url);
         let mut r = self.client.post(&url).json(&wire);
         if !self.api_key.is_empty() {
@@ -136,8 +137,8 @@ impl crate::engine::LlmRuntime for RemoteLlmEngine {
                 "remote HTTP {status}: {msg}"
             )));
         }
-        let mut canonical =
-            openai_wire_response_to_canonical(&body, &req.model).map_err(crate::llm::NeuronError::new)?;
+        let mut canonical = openai_wire_response_to_canonical(&body, &req.model)
+            .map_err(crate::llm::NeuronError::new)?;
         if let Some(filter) = restore {
             filter.restore_response(&mut canonical);
         }
@@ -280,7 +281,9 @@ mod tests {
     #[tokio::test]
     async fn the_remote_leg_forwards_the_audio_part_verbatim() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
         let addr = listener.local_addr().expect("addr");
         let seen = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
         let seen2 = seen.clone();
@@ -342,8 +345,14 @@ mod tests {
         let body = raw.split_once("\r\n\r\n").expect("a request body").1;
         let v: serde_json::Value = serde_json::from_str(body).expect("json body");
         assert_eq!(v["messages"][0]["content"][0]["type"], "input_audio");
-        assert_eq!(v["messages"][0]["content"][0]["input_audio"]["data"], "aGVsbG8=");
-        assert_eq!(v["messages"][0]["content"][0]["input_audio"]["format"], "wav");
+        assert_eq!(
+            v["messages"][0]["content"][0]["input_audio"]["data"],
+            "aGVsbG8="
+        );
+        assert_eq!(
+            v["messages"][0]["content"][0]["input_audio"]["format"],
+            "wav"
+        );
     }
 
     /// A voiceprint is **biometric data** ⇒ ⇒ a redacting engine must not
@@ -371,18 +380,25 @@ mod tests {
         use crate::canonical::*;
         let req = CanonicalLlmRequest {
             model: "deepseek-chat".into(),
-            system: vec![SystemBlock { text: "be brief".into(), cache_control: None }],
+            system: vec![SystemBlock {
+                text: "be brief".into(),
+                cache_control: None,
+            }],
             messages: vec![
                 CanonicalMessage {
                     role: MessageRole::User,
-                    content: vec![ContentBlock::Text(TextBlock { text: "list files".into() })],
+                    content: vec![ContentBlock::Text(TextBlock {
+                        text: "list files".into(),
+                    })],
                     tool_calls: vec![],
                     tool_call_id: None,
                     reasoning_content: None,
                 },
                 CanonicalMessage {
                     role: MessageRole::Assistant,
-                    content: vec![ContentBlock::Text(TextBlock { text: String::new() })],
+                    content: vec![ContentBlock::Text(TextBlock {
+                        text: String::new(),
+                    })],
                     tool_calls: vec![ToolCall {
                         id: "call_1".into(),
                         name: "bash".into(),
@@ -393,7 +409,9 @@ mod tests {
                 },
                 CanonicalMessage {
                     role: MessageRole::Tool,
-                    content: vec![ContentBlock::Text(TextBlock { text: "a.txt\nb.txt".into() })],
+                    content: vec![ContentBlock::Text(TextBlock {
+                        text: "a.txt\nb.txt".into(),
+                    })],
                     tool_calls: vec![],
                     tool_call_id: Some("call_1".into()),
                     reasoning_content: None,
@@ -420,10 +438,12 @@ mod tests {
             wire["messages"][2]["tool_calls"][0]["function"]["name"],
             "bash"
         );
-        assert!(wire["messages"][2]["tool_calls"][0]["function"]["arguments"]
-            .as_str()
-            .unwrap()
-            .contains("\"command\""));
+        assert!(
+            wire["messages"][2]["tool_calls"][0]["function"]["arguments"]
+                .as_str()
+                .unwrap()
+                .contains("\"command\"")
+        );
         // tool result: role tool + tool_call_id, content is the text
         assert_eq!(wire["messages"][3]["role"], "tool");
         assert_eq!(wire["messages"][3]["tool_call_id"], "call_1");
@@ -431,10 +451,7 @@ mod tests {
         // tools flatten to the OpenAI function envelope
         assert_eq!(wire["tools"][0]["type"], "function");
         assert_eq!(wire["tools"][0]["function"]["name"], "bash");
-        assert_eq!(
-            wire["tools"][0]["function"]["parameters"]["type"],
-            "object"
-        );
+        assert_eq!(wire["tools"][0]["function"]["parameters"]["type"], "object");
     }
 
     /// A remote response carrying tool_calls parses back into ToolUse

@@ -6,12 +6,12 @@
 //! handler since they are tightly coupled to the handler's shape.
 
 use axum::{
+    Json,
     body::Body,
     extract::{Multipart, State},
-    http::{header, StatusCode},
+    http::{StatusCode, header},
     response::sse::Event,
     response::{IntoResponse, Response, Sse},
-    Json,
 };
 use futures_util::StreamExt;
 
@@ -23,9 +23,9 @@ use super::{ServerError, ServerState};
 use crate::embedding::{EmbeddingInput, EmbeddingRequest};
 use crate::ocr::{OcrRequest, OcrResponse};
 use crate::vision::{
-    load_lora_from_path, LoraAdapterMeta, LoraListResponse, LoraRegisterRequest,
-    LoraRegisterResponse, LoraAdapterStatus, VisionImageSource, VisionRequest, VisionResponse,
-    VisionTask,
+    LoraAdapterMeta, LoraAdapterStatus, LoraListResponse, LoraRegisterRequest,
+    LoraRegisterResponse, VisionImageSource, VisionRequest, VisionResponse, VisionTask,
+    load_lora_from_path,
 };
 
 // ---------------------------------------------------------------------------
@@ -43,9 +43,7 @@ pub async fn health_handler() -> Json<serde_json::Value> {
 // Info
 // ---------------------------------------------------------------------------
 
-pub async fn info_handler(
-    State(state): State<ServerState>,
-) -> Json<serde_json::Value> {
+pub async fn info_handler(State(state): State<ServerState>) -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "object": "info",
         "version": env!("CARGO_PKG_VERSION"),
@@ -176,8 +174,7 @@ pub async fn chat_completions(
 
         let sse_stream = chunk_stream
             .map(|chunk| {
-                let json =
-                    serde_json::to_string(&chunk).unwrap_or_else(|_| "{}".to_string());
+                let json = serde_json::to_string(&chunk).unwrap_or_else(|_| "{}".to_string());
                 Ok::<Event, std::convert::Infallible>(Event::default().data(json))
             })
             .chain(futures_util::stream::once(async {
@@ -278,9 +275,7 @@ pub async fn audio_speech_stream(
     Json(payload): Json<SpeechStreamRequest>,
 ) -> Result<Response, ServerError> {
     if payload.input.is_empty() {
-        return Err(ServerError::BadRequest(
-            "input cannot be empty".to_string(),
-        ));
+        return Err(ServerError::BadRequest("input cannot be empty".to_string()));
     }
 
     let model = payload.model.as_deref().unwrap_or("voxcpm2");
@@ -316,12 +311,12 @@ pub async fn audio_speech_stream(
         .map_err(|e| ServerError::Internal(e.to_string()))?;
 
     let body = Body::from_stream(stream);
-    Ok(Response::builder()
+    Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, format.content_type())
         .header(header::CACHE_CONTROL, "no-store")
         .body(body)
-        .map_err(|e| ServerError::Internal(format!("response build: {e}")))?)
+        .map_err(|e| ServerError::Internal(format!("response build: {e}")))
 }
 
 pub async fn audio_speech(
@@ -329,9 +324,7 @@ pub async fn audio_speech(
     Json(payload): Json<SpeechRequest>,
 ) -> Result<Response, ServerError> {
     if payload.input.is_empty() {
-        return Err(ServerError::BadRequest(
-            "input cannot be empty".to_string(),
-        ));
+        return Err(ServerError::BadRequest("input cannot be empty".to_string()));
     }
 
     // Explicit unknown model id → 400 (caller asked for something we don't have).
@@ -360,7 +353,11 @@ pub async fn audio_speech(
         let samples = crate::tts::clone_audio::decode_reference_payload(reference)
             .map_err(ServerError::BadRequest)?;
         let audio = rt
-            .synthesize_clone(&payload.input, Some(&samples), payload.prompt_text.as_deref())
+            .synthesize_clone(
+                &payload.input,
+                Some(&samples),
+                payload.prompt_text.as_deref(),
+            )
             .await
             .map_err(|e| ServerError::BadRequest(e.message))?;
         return Ok((
@@ -470,18 +467,20 @@ pub fn images_request_to_params(
     payload: &ImagesGenerationsRequest,
 ) -> Result<(String, crate::imagegen::ImageGenParams), ServerError> {
     if payload.prompt.is_empty() {
-        return Err(ServerError::BadRequest("prompt cannot be empty".to_string()));
+        return Err(ServerError::BadRequest(
+            "prompt cannot be empty".to_string(),
+        ));
     }
     if payload.n == 0 || payload.n > 4 {
         return Err(ServerError::BadRequest("n must be in 1..=4".to_string()));
     }
-    if let Some(format) = payload.response_format.as_deref() {
-        if !format.eq_ignore_ascii_case("b64_json") {
-            return Err(ServerError::BadRequest(format!(
-                "response_format '{format}' is not supported — neuron serves local bytes, \
-                 use b64_json"
-            )));
-        }
+    if let Some(format) = payload.response_format.as_deref()
+        && !format.eq_ignore_ascii_case("b64_json")
+    {
+        return Err(ServerError::BadRequest(format!(
+            "response_format '{format}' is not supported — neuron serves local bytes, \
+             use b64_json"
+        )));
     }
     let (width, height) = match payload.size.as_deref() {
         Some(size) => crate::imagegen::parse_size(size).ok_or_else(|| {
@@ -502,7 +501,10 @@ pub fn images_request_to_params(
     params
         .validate()
         .map_err(|e| ServerError::BadRequest(e.message))?;
-    let model = payload.model.clone().unwrap_or_else(|| "moss-image".to_string());
+    let model = payload
+        .model
+        .clone()
+        .unwrap_or_else(|| "moss-image".to_string());
     Ok((model, params))
 }
 
@@ -641,7 +643,7 @@ pub async fn speaker_embeddings(
         .spkemb
         .embed(&bytes)
         .await
-        .map_err(|e| ServerError::NotImplemented(e))?;
+        .map_err(ServerError::NotImplemented)?;
 
     Ok(Json(SpeakerEmbeddingResponse {
         embedding: spk.embedding,
@@ -686,7 +688,10 @@ pub async fn face_embeddings(
     Json(req): Json<FaceEmbeddingRequest>,
 ) -> Result<Json<FaceEmbeddingResponse>, ServerError> {
     let bytes = match req.image {
-        VisionImageSource::Base64 { media_type: _, data } => {
+        VisionImageSource::Base64 {
+            media_type: _,
+            data,
+        } => {
             let data = data.trim();
             if let Some(rest) = data.strip_prefix("data:") {
                 let (_, payload) = rest
@@ -700,7 +705,7 @@ pub async fn face_embeddings(
         other => {
             return Err(ServerError::BadRequest(format!(
                 "face embedding takes base64 images only (got {other:?})"
-            )))
+            )));
         }
     };
 
@@ -708,7 +713,7 @@ pub async fn face_embeddings(
         .face
         .embed_faces(&bytes)
         .await
-        .map_err(|e| ServerError::NotImplemented(e))?;
+        .map_err(ServerError::NotImplemented)?;
 
     Ok(Json(FaceEmbeddingResponse {
         faces: result.faces,
@@ -859,7 +864,9 @@ pub async fn vision_detect(
     if req.task == VisionTask::default() {
         req.task = VisionTask::Detect;
     }
-    vision_run_task(&state, req, VisionTask::Detect).await.map(Json)
+    vision_run_task(&state, req, VisionTask::Detect)
+        .await
+        .map(Json)
 }
 
 /// `POST /v1/vision/classify` — image classification (top-K labels).
@@ -868,7 +875,9 @@ pub async fn vision_classify(
     Json(mut req): Json<VisionRequest>,
 ) -> Result<Json<VisionResponse>, ServerError> {
     req.task = VisionTask::Classify;
-    vision_run_task(&state, req, VisionTask::Classify).await.map(Json)
+    vision_run_task(&state, req, VisionTask::Classify)
+        .await
+        .map(Json)
 }
 
 /// `POST /v1/vision/segment` — instance segmentation (bbox + per-pixel mask).
@@ -877,7 +886,9 @@ pub async fn vision_segment(
     Json(mut req): Json<VisionRequest>,
 ) -> Result<Json<VisionResponse>, ServerError> {
     req.task = VisionTask::Segment;
-    vision_run_task(&state, req, VisionTask::Segment).await.map(Json)
+    vision_run_task(&state, req, VisionTask::Segment)
+        .await
+        .map(Json)
 }
 
 /// `POST /v1/vision/pose` — pose estimation (bbox + COCO keypoints).
@@ -886,7 +897,9 @@ pub async fn vision_pose(
     Json(mut req): Json<VisionRequest>,
 ) -> Result<Json<VisionResponse>, ServerError> {
     req.task = VisionTask::Pose;
-    vision_run_task(&state, req, VisionTask::Pose).await.map(Json)
+    vision_run_task(&state, req, VisionTask::Pose)
+        .await
+        .map(Json)
 }
 
 /// Common helper for the per-task vision handlers. Resolves the runtime
@@ -927,7 +940,11 @@ async fn vision_run_task(
         .unwrap_or_else(|_| state.vision.clone());
 
     if !rt.supported_tasks().contains(&req.task) {
-        let supported: Vec<String> = rt.supported_tasks().iter().map(|t| t.as_str().to_string()).collect();
+        let supported: Vec<String> = rt
+            .supported_tasks()
+            .iter()
+            .map(|t| t.as_str().to_string())
+            .collect();
         return Err(ServerError::BadRequestWithParam(
             format!(
                 "task {:?} not supported by runtime '{}'; supported tasks: [{}]",
@@ -939,13 +956,11 @@ async fn vision_run_task(
         ));
     }
 
-    rt.run(req)
-        .await
-        .map_err(|e| match e.error_type.as_str() {
-            "invalid_request_error" => ServerError::BadRequest(e.message),
-            "not_implemented" | "not_initialized" => ServerError::NotImplemented(e.message),
-            _ => ServerError::Internal(e.message),
-        })
+    rt.run(req).await.map_err(|e| match e.error_type.as_str() {
+        "invalid_request_error" => ServerError::BadRequest(e.message),
+        "not_implemented" | "not_initialized" => ServerError::NotImplemented(e.message),
+        _ => ServerError::Internal(e.message),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1066,13 +1081,14 @@ pub async fn vision_lora_register(
     let size_bytes = adapter.meta.size_bytes;
     let id = adapter.meta.id.clone();
 
-    let (start, end) = state
-        .vision_lora_registry
-        .register(adapter)
-        .map_err(|e| match e.error_type.as_str() {
-            "invalid_request_error" => ServerError::BadRequestWithParam(e.message, "id".into()),
-            _ => ServerError::Internal(e.message),
-        })?;
+    let (start, end) =
+        state
+            .vision_lora_registry
+            .register(adapter)
+            .map_err(|e| match e.error_type.as_str() {
+                "invalid_request_error" => ServerError::BadRequestWithParam(e.message, "id".into()),
+                _ => ServerError::Internal(e.message),
+            })?;
 
     Ok(Json(LoraRegisterResponse {
         id,
@@ -1084,9 +1100,7 @@ pub async fn vision_lora_register(
 }
 
 /// `GET /v1/vision/lora/list` — enumerate all registered LoRA adapters.
-pub async fn vision_lora_list(
-    State(state): State<ServerState>,
-) -> Json<LoraListResponse> {
+pub async fn vision_lora_list(State(state): State<ServerState>) -> Json<LoraListResponse> {
     let adapters: Vec<LoraAdapterMeta> = state
         .vision_lora_registry
         .list()
@@ -1115,23 +1129,6 @@ pub async fn vision_lora_unregister(
 // Forecast (Chronos2)
 // ---------------------------------------------------------------------------
 
-/// `POST /v1/forecast` — run a time-series forecast through the
-/// chronos2 registry.
-///
-/// ⚠ **这条注释曾经说假话**（2026-11-19 订正）：它写着「registry 只带一个
-/// stub 运行时 ⇒ ⇒ 一直返回 503」⇒ ⇒ 而**真模型路径当时确实加载不了**
-/// （vendored 端口与上游 checkpoint 不是同一套架构）⇒ ⇒ 那句话当时是
-/// **对的**，但它把「暂时做不到」写成了「设计如此」。
-/// 现在：上游布局的 checkpoint（amazon/chronos-bolt-*）由
-/// `chronos2::bolt` 那个**上游兼容运行时**真跑。
-///
-/// ⚠ **点名一枚没装的 checkpoint ⇒ ⇒ 明确报错**（2026-11-19 订正）：
-/// 旧形式落 stub ⇒ ⇒ 503/501 ＋ 一句「port not vendored」的 canned note
-/// ⇒ ⇒ 既不点名那枚 id、也不说为什么 ⇒ ⇒ 用户看到的是一个说不清所以然
-/// 的错。现在**选 checkpoint 的那一层**（`Chronos2Registry::runtime_for`）
-/// 直接报错：点名 id ＋ 说清为什么（没装 / 装的是另一枚 / 加载失败），
-/// HTTP 状态码 **404**（与 chat 面的 `no_engine_for_model` 同一种说法）。
-
 /// Map a chronos2 error onto the HTTP error surface.
 ///
 /// ⚠ **One vocabulary across faces**: a named checkpoint that is not
@@ -1152,6 +1149,22 @@ fn forecast_error(e: crate::chronos2::Chronos2Error) -> ServerError {
     }
 }
 
+/// `POST /v1/forecast` — run a time-series forecast through the
+/// chronos2 registry.
+///
+/// ⚠ **这条注释曾经说假话**（2026-11-19 订正）：它写着「registry 只带一个
+/// stub 运行时 ⇒ ⇒ 一直返回 503」⇒ ⇒ 而**真模型路径当时确实加载不了**
+/// （vendored 端口与上游 checkpoint 不是同一套架构）⇒ ⇒ 那句话当时是
+/// **对的**，但它把「暂时做不到」写成了「设计如此」。
+/// 现在：上游布局的 checkpoint（amazon/chronos-bolt-*）由
+/// `chronos2::bolt` 那个**上游兼容运行时**真跑。
+///
+/// ⚠ **点名一枚没装的 checkpoint ⇒ ⇒ 明确报错**（2026-11-19 订正）：
+/// 旧形式落 stub ⇒ ⇒ 503/501 ＋ 一句「port not vendored」的 canned note
+/// ⇒ ⇒ 既不点名那枚 id、也不说为什么 ⇒ ⇒ 用户看到的是一个说不清所以然
+/// 的错。现在**选 checkpoint 的那一层**（`Chronos2Registry::runtime_for`）
+/// 直接报错：点名 id ＋ 说清为什么（没装 / 装的是另一枚 / 加载失败），
+/// HTTP 状态码 **404**（与 chat 面的 `no_engine_for_model` 同一种说法）。
 pub async fn forecast(
     State(state): State<ServerState>,
     Json(req): Json<crate::chronos2::ForecastRequest>,
@@ -1183,12 +1196,8 @@ pub async fn forecast(
         .map_err(forecast_error)?;
     let resp = rt.forecast(req).await.map_err(forecast_error)?;
     let took_ms = started.elapsed().as_millis() as u64;
-    Ok(Json(crate::chronos2::ForecastResponse {
-        took_ms,
-        ..resp
-    }))
+    Ok(Json(crate::chronos2::ForecastResponse { took_ms, ..resp }))
 }
-
 
 #[cfg(feature = "candle")]
 pub use crate::mage_vl::http::gate_score;

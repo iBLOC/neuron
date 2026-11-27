@@ -9,9 +9,8 @@ use super::ApiAdapter;
 use crate::api_error::{ApiError, ApiResult};
 use crate::canonical::{
     AudioSource, CanonicalLlmRequest, CanonicalLlmResponse, CanonicalLlmStreamEvent,
-    CanonicalMessage, CanonicalRequest, CanonicalResponse, CanonicalStreamEvent,
-    ContentBlock, ContentDelta, ImageSource, MessageRole, SamplingParams, StopReason,
-    TextBlock,
+    CanonicalMessage, CanonicalRequest, CanonicalResponse, CanonicalStreamEvent, ContentBlock,
+    ContentDelta, ImageSource, MessageRole, SamplingParams, StopReason, TextBlock,
 };
 use crate::capabilities::AdapterCapabilities;
 
@@ -135,7 +134,8 @@ pub fn openai_to_canonical(req: OpenAiChatRequest) -> Result<CanonicalRequest, S
         };
         let content_text = match &m.content {
             Some(Value::String(s)) => s.clone(),
-            Some(Value::Array(parts)) => parts.iter()
+            Some(Value::Array(parts)) => parts
+                .iter()
                 .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
                 .collect::<Vec<_>>()
                 .join("\n"),
@@ -189,9 +189,14 @@ pub fn openai_to_canonical(req: OpenAiChatRequest) -> Result<CanonicalRequest, S
                 if p.get("type").and_then(|t| t.as_str()) != Some("input_audio") {
                     continue;
                 }
-                let Some(ia) = p.get("input_audio") else { continue; };
+                let Some(ia) = p.get("input_audio") else {
+                    continue;
+                };
                 let data = ia.get("data").and_then(|d| d.as_str()).unwrap_or_default();
-                let format = ia.get("format").and_then(|f| f.as_str()).unwrap_or_default();
+                let format = ia
+                    .get("format")
+                    .and_then(|f| f.as_str())
+                    .unwrap_or_default();
                 if let Some(rest) = data.strip_prefix("data:") {
                     let Some((header, payload)) = rest.split_once(";base64,") else {
                         return Err("malformed input_audio data URI (missing ;base64,)".to_string());
@@ -223,7 +228,7 @@ pub fn openai_to_canonical(req: OpenAiChatRequest) -> Result<CanonicalRequest, S
                         return Err(format!(
                             "input_audio format {other:?} is not recognized \
                              (wav/mp3/flac/ogg/webm) - refusing to guess a mime type"
-                        ))
+                        ));
                     }
                 };
                 audios.push(ContentBlock::Audio(crate::canonical::AudioBlock {
@@ -250,16 +255,16 @@ pub fn openai_to_canonical(req: OpenAiChatRequest) -> Result<CanonicalRequest, S
                 if p.get("type").and_then(|t| t.as_str()) != Some("video_url") {
                     continue;
                 }
-                let Some(vu) = p.get("video_url") else { continue; };
+                let Some(vu) = p.get("video_url") else {
+                    continue;
+                };
                 let url = vu.get("url").and_then(|u| u.as_str()).unwrap_or_default();
                 if url.is_empty() {
                     return Err("video_url carries no url".to_string());
                 }
                 if let Some(rest) = url.strip_prefix("data:") {
                     let Some((header, payload)) = rest.split_once(";base64,") else {
-                        return Err(
-                            "malformed video_url data URI (missing ;base64,)".to_string()
-                        );
+                        return Err("malformed video_url data URI (missing ;base64,)".to_string());
                     };
                     let media_type = header.split(';').next().unwrap_or_default().to_string();
                     // ⚠️ mime 推不出来就报错，不许猜（猜错 ⇒ 上游按错解码器解
@@ -292,17 +297,24 @@ pub fn openai_to_canonical(req: OpenAiChatRequest) -> Result<CanonicalRequest, S
         let mut tool_calls = Vec::new();
         if let Some(calls) = &m.tool_calls {
             for c in calls {
-                let id = c.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let id = c
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
                 let name = c["function"]["name"]
                     .as_str()
                     .unwrap_or_default()
                     .to_string();
                 let arguments = match c["function"]["arguments"].as_str() {
-                    Some(s) => serde_json::from_str(s)
-                        .unwrap_or(Value::String(s.to_string())),
+                    Some(s) => serde_json::from_str(s).unwrap_or(Value::String(s.to_string())),
                     None => Value::Null,
                 };
-                tool_calls.push(crate::canonical::ToolCall { id, name, arguments });
+                tool_calls.push(crate::canonical::ToolCall {
+                    id,
+                    name,
+                    arguments,
+                });
             }
         }
         // Document parts: OpenAI's `file` entries become ContentBlock::Document.
@@ -397,10 +409,7 @@ pub fn openai_to_canonical(req: OpenAiChatRequest) -> Result<CanonicalRequest, S
                     .get("description")
                     .and_then(|x| x.as_str())
                     .map(str::to_string),
-                input_schema: function
-                    .get("parameters")
-                    .cloned()
-                    .unwrap_or(Value::Null),
+                input_schema: function.get("parameters").cloned().unwrap_or(Value::Null),
             });
         }
     }
@@ -491,13 +500,13 @@ pub fn canonical_request_to_openai_wire(req: &CanonicalLlmRequest) -> Result<Val
                         return Err(format!(
                             "ImageSource::Url cannot be forwarded to an OpenAI-compatible \
                              upstream (pre-decode to base64): {u}"
-                        ))
+                        ));
                     }
                     ImageSource::FileId(f) => {
                         return Err(format!(
                             "ImageSource::FileId cannot be forwarded to an OpenAI-compatible \
                              upstream: {f}"
-                        ))
+                        ));
                     }
                 },
                 ContentBlock::Audio(aud) => match &aud.source {
@@ -512,7 +521,7 @@ pub fn canonical_request_to_openai_wire(req: &CanonicalLlmRequest) -> Result<Val
                         return Err(format!(
                             "AudioSource::Url cannot be forwarded to an OpenAI-compatible \
                              upstream (pre-decode to base64): {u}"
-                        ))
+                        ));
                     }
                 },
                 ContentBlock::Video(vid) => match &vid.source {
@@ -526,13 +535,12 @@ pub fn canonical_request_to_openai_wire(req: &CanonicalLlmRequest) -> Result<Val
                         return Err(format!(
                             "VideoSource::Url cannot be forwarded to an OpenAI-compatible \
                              upstream (pre-decode to base64): {u}"
-                        ))
+                        ));
                     }
                     crate::canonical::VideoSource::Frames(_) => {
-                        return Err(
-                            "VideoSource::Frames is a frame list (the visual lane owns \
-                             frames) - it is not one video payload".to_string(),
-                        )
+                        return Err("VideoSource::Frames is a frame list (the visual lane owns \
+                             frames) - it is not one video payload"
+                            .to_string());
                     }
                 },
                 // ⚠ **文档必须活着穿过转发** —— 旧的 `_ => {}` 会把它**静默
@@ -578,10 +586,10 @@ pub fn canonical_request_to_openai_wire(req: &CanonicalLlmRequest) -> Result<Val
             Value::Array(arr)
         };
         let mut msg = serde_json::json!({"role": role, "content": content});
-        if m.role == MessageRole::Tool {
-            if let Some(id) = &m.tool_call_id {
-                msg["tool_call_id"] = Value::String(id.clone());
-            }
+        if m.role == MessageRole::Tool
+            && let Some(id) = &m.tool_call_id
+        {
+            msg["tool_call_id"] = Value::String(id.clone());
         }
         if !m.tool_calls.is_empty() {
             let calls: Vec<Value> = m
@@ -657,10 +665,7 @@ pub fn openai_wire_response_to_canonical(
         .get(0)
         .ok_or_else(|| "remote response has no choices".to_string())?;
     let message = &choice["message"];
-    let text = message["content"]
-        .as_str()
-        .unwrap_or_default()
-        .to_string();
+    let text = message["content"].as_str().unwrap_or_default().to_string();
 
     let mut content = Vec::new();
     if !text.is_empty() {
@@ -674,7 +679,10 @@ pub fn openai_wire_response_to_canonical(
             };
             content.push(ContentBlock::ToolUse(crate::canonical::ToolUseBlock {
                 id: c["id"].as_str().unwrap_or_default().to_string(),
-                name: c["function"]["name"].as_str().unwrap_or_default().to_string(),
+                name: c["function"]["name"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string(),
                 input: arguments,
             }));
         }
@@ -688,11 +696,14 @@ pub fn openai_wire_response_to_canonical(
         _ => StopReason::EndTurn,
     };
 
-    let usage = body.get("usage").map(|u| crate::canonical::UsageInfo {
-        input_tokens: u["prompt_tokens"].as_u64().unwrap_or(0) as u32,
-        output_tokens: u["completion_tokens"].as_u64().unwrap_or(0) as u32,
-        ..Default::default()
-    }).unwrap_or_default();
+    let usage = body
+        .get("usage")
+        .map(|u| crate::canonical::UsageInfo {
+            input_tokens: u["prompt_tokens"].as_u64().unwrap_or(0) as u32,
+            output_tokens: u["completion_tokens"].as_u64().unwrap_or(0) as u32,
+            ..Default::default()
+        })
+        .unwrap_or_default();
 
     Ok(CanonicalLlmResponse {
         id: body["id"].as_str().unwrap_or("remote").to_string(),
@@ -705,7 +716,9 @@ pub fn openai_wire_response_to_canonical(
 }
 
 pub fn canonical_to_openai(resp: &CanonicalLlmResponse) -> OpenAiChatResponse {
-    let text = resp.content.iter()
+    let text = resp
+        .content
+        .iter()
         .filter_map(|b| match b {
             ContentBlock::Text(t) => Some(t.text.clone()),
             _ => None,
@@ -717,7 +730,9 @@ pub fn canonical_to_openai(resp: &CanonicalLlmResponse) -> OpenAiChatResponse {
     // produced when a backend hands its reasoning over separately)
     // surfaces on the OpenAI wire as `reasoning_content` — joined when
     // the model emitted several reasoning segments.
-    let reasoning = resp.content.iter()
+    let reasoning = resp
+        .content
+        .iter()
         .filter_map(|b| match b {
             ContentBlock::Reasoning(r) => Some(r.text.clone()),
             _ => None,
@@ -805,21 +820,28 @@ pub fn canonical_chunk_to_openai_chunk(
                 model: model_id.to_string(),
                 choices: vec![OpenAiChatChunkChoice {
                     index: 0,
-                    delta: OpenAiChatChunkDelta { role: None, content, reasoning_content },
+                    delta: OpenAiChatChunkDelta {
+                        role: None,
+                        content,
+                        reasoning_content,
+                    },
                     finish_reason: None,
                 }],
                 usage: None,
             })
         }
         CanonicalLlmStreamEvent::MessageDelta { stop_reason, usage } => {
-            let finish = stop_reason.as_ref().map(|sr| match sr {
-                StopReason::EndTurn => "stop",
-                StopReason::MaxTokens => "length",
-                StopReason::StopSequence => "stop",
-                StopReason::ToolUse => "tool_calls",
-                StopReason::Refusal => "content_filter",
-                StopReason::Other(s) => s.as_str(),
-            }.to_string());
+            let finish = stop_reason.as_ref().map(|sr| {
+                match sr {
+                    StopReason::EndTurn => "stop",
+                    StopReason::MaxTokens => "length",
+                    StopReason::StopSequence => "stop",
+                    StopReason::ToolUse => "tool_calls",
+                    StopReason::Refusal => "content_filter",
+                    StopReason::Other(s) => s.as_str(),
+                }
+                .to_string()
+            });
             Some(OpenAiChatChunk {
                 id: chunk_id.to_string(),
                 object: "chat.completion.chunk".to_string(),
@@ -845,9 +867,13 @@ pub struct OpenAiChatAdapter;
 
 #[async_trait]
 impl ApiAdapter for OpenAiChatAdapter {
-    fn name(&self) -> &str { "openai-chat" }
+    fn name(&self) -> &str {
+        "openai-chat"
+    }
 
-    fn paths(&self) -> &[&'static str] { &["/v1/chat/completions"] }
+    fn paths(&self) -> &[&'static str] {
+        &["/v1/chat/completions"]
+    }
 
     fn parse(&self, body: &Bytes, _headers: &HeaderMap) -> ApiResult<CanonicalRequest> {
         let req: OpenAiChatRequest = serde_json::from_slice(body)
@@ -857,7 +883,9 @@ impl ApiAdapter for OpenAiChatAdapter {
 
     fn serialize_response(&self, resp: &CanonicalResponse) -> ApiResult<Bytes> {
         let CanonicalResponse::Llm(llm) = resp else {
-            return Err(ApiError::Serialize("OpenAI chat got non-LLM response".to_string()));
+            return Err(ApiError::Serialize(
+                "OpenAI chat got non-LLM response".to_string(),
+            ));
         };
         let wire = canonical_to_openai(llm);
         serde_json::to_vec(&wire)
@@ -874,18 +902,24 @@ impl ApiAdapter for OpenAiChatAdapter {
         let model_id = "";
         match canonical_chunk_to_openai_chunk(llm_event, chunk_id, created, model_id) {
             Some(chunk) => {
-                let line = format!("data: {}\n\n",
+                let line = format!(
+                    "data: {}\n\n",
                     serde_json::to_string(&chunk)
-                        .map_err(|e| ApiError::Serialize(e.to_string()))?);
+                        .map_err(|e| ApiError::Serialize(e.to_string()))?
+                );
                 Ok(Some(Bytes::from(line)))
             }
             None => Ok(None),
         }
     }
 
-    fn response_content_type(&self) -> &'static str { "application/json" }
+    fn response_content_type(&self) -> &'static str {
+        "application/json"
+    }
 
-    fn stream_content_type(&self) -> &'static str { "text/event-stream" }
+    fn stream_content_type(&self) -> &'static str {
+        "text/event-stream"
+    }
 
     fn capabilities(&self) -> AdapterCapabilities {
         AdapterCapabilities {
@@ -908,7 +942,9 @@ mod tests {
             messages: vec![CanonicalMessage {
                 role: MessageRole::User,
                 content: vec![
-                    ContentBlock::Text(TextBlock { text: "listen".into() }),
+                    ContentBlock::Text(TextBlock {
+                        text: "listen".into(),
+                    }),
                     ContentBlock::Audio(crate::canonical::AudioBlock {
                         source: crate::canonical::AudioSource::Base64 {
                             media_type: "audio/wav".into(),
@@ -935,10 +971,12 @@ mod tests {
     /// blob instead of listening to it).
     #[test]
     fn an_audio_block_becomes_an_input_audio_part_on_the_wire() {
-        let wire =
-            canonical_request_to_openai_wire(&canonical_request_with_audio()).expect("wire");
+        let wire = canonical_request_to_openai_wire(&canonical_request_with_audio()).expect("wire");
         let content = &wire["messages"][0]["content"];
-        assert!(content.is_array(), "media forces the parts array: {content}");
+        assert!(
+            content.is_array(),
+            "media forces the parts array: {content}"
+        );
         assert_eq!(content[0]["type"], "text");
         assert_eq!(content[1]["type"], "input_audio");
         assert_eq!(content[1]["input_audio"]["data"], "aGVsbG8=");
@@ -958,7 +996,10 @@ mod tests {
         })];
         let wire = canonical_request_to_openai_wire(&req).expect("wire");
         let content = &wire["messages"][0]["content"];
-        assert!(content.is_array(), "media forces the parts array: {content}");
+        assert!(
+            content.is_array(),
+            "media forces the parts array: {content}"
+        );
         assert_eq!(content[0]["type"], "video_url");
         assert_eq!(
             content[0]["video_url"]["url"],
@@ -1023,14 +1064,23 @@ mod tests {
                     }}
                 ]
             }]
-        })).unwrap();
+        }))
+        .unwrap();
         let adapter = OpenAiChatAdapter;
-        let req = adapter.parse(&Bytes::from(body), &HeaderMap::new()).expect("parse");
-        let CanonicalRequest::Llm(llm) = req else { panic!("expected LLM") };
-        let video = llm.messages[0].content.iter().find_map(|b| match b {
-            ContentBlock::Video(v) => Some(v),
-            _ => None,
-        }).expect("the video part must survive the parse");
+        let req = adapter
+            .parse(&Bytes::from(body), &HeaderMap::new())
+            .expect("parse");
+        let CanonicalRequest::Llm(llm) = req else {
+            panic!("expected LLM")
+        };
+        let video = llm.messages[0]
+            .content
+            .iter()
+            .find_map(|b| match b {
+                ContentBlock::Video(v) => Some(v),
+                _ => None,
+            })
+            .expect("the video part must survive the parse");
         match &video.source {
             crate::canonical::VideoSource::Base64 { media_type, data } => {
                 assert_eq!(media_type, "video/mp4");
@@ -1130,7 +1180,8 @@ mod tests {
                     }}
                 ]
             }]
-        })).unwrap();
+        }))
+        .unwrap();
         let adapter = OpenAiChatAdapter;
         let err = match adapter.parse(&Bytes::from(body), &HeaderMap::new()) {
             Ok(_) => panic!("a file_id must be refused, not silently treated as empty"),
@@ -1155,7 +1206,8 @@ mod tests {
                     }}
                 ]
             }]
-        })).unwrap();
+        }))
+        .unwrap();
         let adapter = OpenAiChatAdapter;
         // ⚠️ 不用 `expect_err` —— `CanonicalRequest` 没实现 `Debug`
         // ⇒ ⇒ 那条路编译不过。
@@ -1214,7 +1266,8 @@ mod tests {
         let body = serde_json::to_vec(&serde_json::json!({
             "model": "gpt-4",
             "messages": [{"role": "user", "content": "hi"}]
-        })).unwrap();
+        }))
+        .unwrap();
         let adapter = OpenAiChatAdapter;
         let headers = HeaderMap::new();
         let req = adapter.parse(&Bytes::from(body), &headers).expect("parse");
@@ -1244,14 +1297,23 @@ mod tests {
                     }}
                 ]
             }]
-        })).unwrap();
+        }))
+        .unwrap();
         let adapter = OpenAiChatAdapter;
-        let req = adapter.parse(&Bytes::from(body), &HeaderMap::new()).expect("parse");
-        let CanonicalRequest::Llm(llm) = req else { panic!("expected LLM") };
-        let audio = llm.messages[0].content.iter().find_map(|b| match b {
-            ContentBlock::Audio(a) => Some(a),
-            _ => None,
-        }).expect("the audio part must survive the parse");
+        let req = adapter
+            .parse(&Bytes::from(body), &HeaderMap::new())
+            .expect("parse");
+        let CanonicalRequest::Llm(llm) = req else {
+            panic!("expected LLM")
+        };
+        let audio = llm.messages[0]
+            .content
+            .iter()
+            .find_map(|b| match b {
+                ContentBlock::Audio(a) => Some(a),
+                _ => None,
+            })
+            .expect("the audio part must survive the parse");
         match &audio.source {
             crate::canonical::AudioSource::Base64 { media_type, data } => {
                 assert_eq!(media_type, "audio/wav");
@@ -1276,14 +1338,23 @@ mod tests {
                     {"type": "input_audio", "input_audio": {"data": "aGVsbG8=", "format": "mp3"}}
                 ]
             }]
-        })).unwrap();
+        }))
+        .unwrap();
         let adapter = OpenAiChatAdapter;
-        let req = adapter.parse(&Bytes::from(body), &HeaderMap::new()).expect("parse");
-        let CanonicalRequest::Llm(llm) = req else { panic!("expected LLM") };
-        let audio = llm.messages[0].content.iter().find_map(|b| match b {
-            ContentBlock::Audio(a) => Some(a),
-            _ => None,
-        }).expect("the audio part must survive the parse");
+        let req = adapter
+            .parse(&Bytes::from(body), &HeaderMap::new())
+            .expect("parse");
+        let CanonicalRequest::Llm(llm) = req else {
+            panic!("expected LLM")
+        };
+        let audio = llm.messages[0]
+            .content
+            .iter()
+            .find_map(|b| match b {
+                ContentBlock::Audio(a) => Some(a),
+                _ => None,
+            })
+            .expect("the audio part must survive the parse");
         match &audio.source {
             crate::canonical::AudioSource::Base64 { media_type, data } => {
                 assert_eq!(media_type, "audio/mpeg");
@@ -1306,7 +1377,8 @@ mod tests {
                     {"type": "input_audio", "input_audio": {"data": "aGVsbG8=", "format": "amr"}}
                 ]
             }]
-        })).unwrap();
+        }))
+        .unwrap();
         let adapter = OpenAiChatAdapter;
         let err = match adapter.parse(&Bytes::from(body), &HeaderMap::new()) {
             Ok(_) => panic!("an unknown audio format must not be guessed"),
@@ -1324,7 +1396,9 @@ mod tests {
             id: "chat-1".into(),
             model: "gpt-4".into(),
             stop_reason: StopReason::EndTurn,
-            content: vec![ContentBlock::Text(TextBlock { text: "hello".into() })],
+            content: vec![ContentBlock::Text(TextBlock {
+                text: "hello".into(),
+            })],
             usage: Default::default(),
             extensions: Default::default(),
         });
@@ -1359,8 +1433,7 @@ mod tests {
         let bytes = adapter.serialize_response(&resp).expect("serialize");
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(
-            v["choices"][0]["message"]["reasoning_content"],
-            "6 is not prime; 7 is.",
+            v["choices"][0]["message"]["reasoning_content"], "6 is not prime; 7 is.",
             "the chain-of-thought must reach the OpenAI wire"
         );
         assert_eq!(v["choices"][0]["message"]["content"], "7");
@@ -1394,7 +1467,9 @@ mod tests {
         let chunk = canonical_chunk_to_openai_chunk(&event, "id", 0, "m").expect("chunk");
         let json = serde_json::to_value(&chunk).unwrap();
         assert!(
-            json["choices"][0]["delta"].get("reasoning_content").is_none(),
+            json["choices"][0]["delta"]
+                .get("reasoning_content")
+                .is_none(),
             "reasoning_content must be absent, not null: {json}"
         );
     }

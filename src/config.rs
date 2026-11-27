@@ -164,10 +164,10 @@ impl NeuronConfig {
         // 单根那两格：**不拆**（一个目录本来就不含第二个分隔符；拆了
         // Windows 的 `C:` 就断了）。
         for var in ["NEURON_MODEL_DIR", "NEURON_MODELS_DIR"] {
-            if let Some(v) = get(var) {
-                if !v.is_empty() {
-                    roots.push(PathBuf::from(v));
-                }
+            if let Some(v) = get(var)
+                && !v.is_empty()
+            {
+                roots.push(PathBuf::from(v));
             }
         }
         if !roots.iter().any(|r| r == &default_root) {
@@ -790,8 +790,7 @@ impl ResourceTracker {
         } else {
             TotalsSource::Fallback
         };
-        let source = if cpu_source == TotalsSource::Measured
-            && gpu_source == TotalsSource::Measured
+        let source = if cpu_source == TotalsSource::Measured && gpu_source == TotalsSource::Measured
         {
             TotalsSource::Measured
         } else {
@@ -861,9 +860,7 @@ impl ResourceTracker {
             DeviceSelection::Cpu => {
                 self.total_cpu_bytes.saturating_sub(self.used_cpu_bytes) >= required
             }
-            DeviceSelection::Nvidia
-            | DeviceSelection::Apple
-            | DeviceSelection::Vulkan => {
+            DeviceSelection::Nvidia | DeviceSelection::Apple | DeviceSelection::Vulkan => {
                 self.total_gpu_bytes.saturating_sub(self.used_gpu_bytes) >= required
             }
             DeviceSelection::Auto => false,
@@ -873,10 +870,14 @@ impl ResourceTracker {
     pub fn allocate(&mut self, required: u64, device: &DeviceSelection) -> Result<(), String> {
         if !self.can_load(required, device) {
             let (avail, total) = match self.effective_device(device) {
-                DeviceSelection::Cpu => {
-                    (self.total_cpu_bytes - self.used_cpu_bytes, self.total_cpu_bytes)
-                }
-                _ => (self.total_gpu_bytes - self.used_gpu_bytes, self.total_gpu_bytes),
+                DeviceSelection::Cpu => (
+                    self.total_cpu_bytes - self.used_cpu_bytes,
+                    self.total_cpu_bytes,
+                ),
+                _ => (
+                    self.total_gpu_bytes - self.used_gpu_bytes,
+                    self.total_gpu_bytes,
+                ),
             };
             return Err(format!(
                 "insufficient memory: required={required}, available={avail}, total={total}"
@@ -1009,8 +1010,14 @@ mod tests {
         env.insert("NEURON_SCHEDULER_ENABLED".to_string(), "false".to_string());
         env.insert("NEURON_SCHEDULER_BUDGET_MB".to_string(), "4096".to_string());
         env.insert("NEURON_SCHEDULER_IDLE_SECS".to_string(), "30".to_string());
-        env.insert("NEURON_SCHEDULER_MAX_CONCURRENCY".to_string(), "8".to_string());
-        env.insert("NEURON_SCHEDULER_MAX_QUEUE_WAIT_SECS".to_string(), "60".to_string());
+        env.insert(
+            "NEURON_SCHEDULER_MAX_CONCURRENCY".to_string(),
+            "8".to_string(),
+        );
+        env.insert(
+            "NEURON_SCHEDULER_MAX_QUEUE_WAIT_SECS".to_string(),
+            "60".to_string(),
+        );
         env.insert("NEURON_SCHEDULER_PLATFORM".to_string(), "CUDA".to_string());
         let c = NeuronConfig::from_env_map(&env);
         assert!(!c.scheduler.enabled);

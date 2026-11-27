@@ -3,9 +3,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 
-use super::{
-    OcrImpl, OcrRegistryKey, OcrRequest, OcrResponse, OcrRuntime, RegisteredOcr,
-};
+use super::{OcrImpl, OcrRegistryKey, OcrRequest, OcrResponse, OcrRuntime, RegisteredOcr};
 use crate::config::{DeviceSelection, NeuronConfig, ResourceTracker};
 use crate::llm::{ChatResult, ModelInfo, NeuronError};
 
@@ -64,6 +62,9 @@ impl OcrRuntimeRegistry {
     }
 
     pub async fn runtime_for(&self, model_id: &str) -> Result<Arc<dyn OcrRuntime>, NeuronError> {
+        // The registration lookup runs in every build: it is what turns an
+        // unknown id into `ModelNotRegistered` (the same answer the other
+        // capability registries give) instead of blaming a missing feature.
         let entry = {
             let registered = self.registered.lock().unwrap();
             registered
@@ -73,41 +74,50 @@ impl OcrRuntimeRegistry {
                 .ok_or_else(|| NeuronError::new(format!("ModelNotRegistered: {model_id}")))?
         };
 
-        let key = OcrRegistryKey {
-            model_id: entry.model_id.clone(),
-            impl_id: entry.impl_id,
-            device: entry.device,
-        };
-
-        let mut loaded = self.loaded.lock().await;
-        if let Some(rt) = loaded.get(&key) {
-            return Ok(rt.clone());
+        // Without an ONNX executor feature a *registered* model still cannot
+        // be loaded — say so, rather than letting the load path fail deep
+        // inside a backend that was never compiled in.
+        #[cfg(not(any(feature = "tract", feature = "ort")))]
+        {
+            let _ = entry;
+            Err(NeuronError::not_implemented(
+                "PaddleOcr pipeline requires the `tract` or `ort` feature (rebuild with \
+                 --features tract); the graphs must also be prepped with \
+                 scripts/prep-ppocr-onnx.py",
+            ))
         }
 
-        // Lazy load happens outside the cache map; the insert below fires
-        // only on success so a failed load is retried on the next request
-        // instead of poisoning the cache.
-        let rt: Arc<dyn OcrRuntime> = match entry.impl_id {
-            #[cfg(any(feature = "tract", feature = "ort"))]
-            OcrImpl::PaddleOcr => {
-                let loaded_box: Box<dyn OcrRuntime> =
-                    super::PaddleOcrRuntime::load(&entry.model_id, &entry.device)
-                        .await
-                        .map_err(|e| NeuronError::new(format!("PaddleOcrRuntime load failed: {e}")))?;
-                Arc::from(loaded_box)
-            }
-            #[cfg(not(any(feature = "tract", feature = "ort")))]
-            OcrImpl::PaddleOcr => {
-                return Err(NeuronError::not_implemented(
-                    "PaddleOcr pipeline requires the `tract` or `ort` feature (rebuild with \
-                     --features tract); the graphs must also be prepped with \
-                     scripts/prep-ppocr-onnx.py",
-                ));
-            }
-        };
+        #[cfg(any(feature = "tract", feature = "ort"))]
+        {
+            let key = OcrRegistryKey {
+                model_id: entry.model_id.clone(),
+                impl_id: entry.impl_id,
+                device: entry.device,
+            };
 
-        loaded.insert(key, rt.clone());
-        Ok(rt)
+            let mut loaded = self.loaded.lock().await;
+            if let Some(rt) = loaded.get(&key) {
+                return Ok(rt.clone());
+            }
+
+            // Lazy load happens outside the cache map; the insert below fires
+            // only on success so a failed load is retried on the next request
+            // instead of poisoning the cache.
+            let rt: Arc<dyn OcrRuntime> = match entry.impl_id {
+                OcrImpl::PaddleOcr => {
+                    let loaded_box: Box<dyn OcrRuntime> =
+                        super::PaddleOcrRuntime::load(&entry.model_id, &entry.device)
+                            .await
+                            .map_err(|e| {
+                                NeuronError::new(format!("PaddleOcrRuntime load failed: {e}"))
+                            })?;
+                    Arc::from(loaded_box)
+                }
+            };
+
+            loaded.insert(key, rt.clone());
+            Ok(rt)
+        }
     }
 
     pub fn list_registered(&self) -> Vec<String> {
@@ -281,7 +291,10 @@ mod tests {
         let req = OcrRequest {
             model: "ppocrv5-mobile".into(),
             image: VisionImageSource::ImageUrl {
-                image_url: crate::vision::VisionImageUrl { url: "x".into(), detail: None },
+                image_url: crate::vision::VisionImageUrl {
+                    url: "x".into(),
+                    detail: None,
+                },
             },
             languages: None,
             det_thresh: None,

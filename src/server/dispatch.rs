@@ -21,9 +21,7 @@ use std::sync::Arc;
 
 use crate::adapter::ApiAdapter;
 use crate::api_error::ApiError;
-use crate::canonical::{
-    CanonicalRequest, CanonicalResponse, CanonicalStreamEvent,
-};
+use crate::canonical::{CanonicalRequest, CanonicalResponse, CanonicalStreamEvent};
 use crate::capabilities::Capability;
 use crate::engine::AnyCapabilityEngine;
 use crate::scheduler::{HoldingStream, ModelLease};
@@ -47,11 +45,13 @@ pub async fn adapter_dispatch_at(
 
     // Read the body into bytes (limited to 64 MiB for safety).
     let body = axum::body::to_bytes(req.into_body(), 64 * 1024 * 1024)
-            .await
-            .map_err(|e| ApiError::Internal(format!("body read: {e}")))?;
+        .await
+        .map_err(|e| ApiError::Internal(format!("body read: {e}")))?;
 
     // 1. Find adapter
-    let adapter = state.adapters.lookup_by_path(path)
+    let adapter = state
+        .adapters
+        .lookup_by_path(path)
         .ok_or_else(|| ApiError::NoAdapterForPath(path.to_string()))?;
 
     // 2. Parse wire format → CanonicalRequest
@@ -66,8 +66,9 @@ pub async fn adapter_dispatch_at(
         CanonicalRequest::Embedding(_) => Capability::Embedding,
         CanonicalRequest::Vision(_) => Capability::Vision,
     };
-    let model_id = crate::engine::registry::CapabilityRegistries::model_id_from_canonical(&canonical_req)
-        .unwrap_or_default();
+    let model_id =
+        crate::engine::registry::CapabilityRegistries::model_id_from_canonical(&canonical_req)
+            .unwrap_or_default();
 
     // 4. Find engine (capability-aware), acquiring a scheduler lease
     //    for LLM requests when the scheduler is enabled.
@@ -89,23 +90,26 @@ pub async fn adapter_dispatch_at(
             // 直接派发 —— 不申请 lease、不成为 resident ⇒ 不会被逐出。
             (resolve_llm_engine_strict(&state, &target).await?, None)
         } else {
-        let lease = state
-            .llm_scheduler
-            .acquire(target.clone())
-            .await
-            .map_err(ApiError::from)?;
-        match resolve_llm_engine_strict(&state, &target).await {
-            Ok(e) => (e, Some(lease)),
-            Err(err) => {
-                // The lazy load never materialised weights — hand the
-                // reservation straight back to the scheduler.
-                state.llm_scheduler.mark_load_failed(&target);
-                return Err(err);
+            let lease = state
+                .llm_scheduler
+                .acquire(target.clone())
+                .await
+                .map_err(ApiError::from)?;
+            match resolve_llm_engine_strict(&state, &target).await {
+                Ok(e) => (e, Some(lease)),
+                Err(err) => {
+                    // The lazy load never materialised weights — hand the
+                    // reservation straight back to the scheduler.
+                    state.llm_scheduler.mark_load_failed(&target);
+                    return Err(err);
+                }
             }
         }
-        }
     } else {
-        (resolve_engine_legacy(&state, capability, &model_id).await?, None)
+        (
+            resolve_engine_legacy(&state, capability, &model_id).await?,
+            None,
+        )
     };
 
     // 5. Dispatch
@@ -142,7 +146,9 @@ pub async fn adapter_dispatch_at(
                 let wire_stream = stream.filter_map(move |event| {
                     let adapter = Arc::clone(&adapter_for_stream);
                     async move {
-                        adapter.serialize_stream_event(&CanonicalStreamEvent::Llm(event)).transpose()
+                        adapter
+                            .serialize_stream_event(&CanonicalStreamEvent::Llm(event))
+                            .transpose()
                     }
                 });
                 // The lease rides on the response body: it is held
@@ -166,9 +172,8 @@ pub async fn adapter_dispatch_at(
                         .await
                         .map_err(|e| ApiError::Execution(e.to_string()))?
                 };
-                let wire_body = adapter.serialize_response(
-                    &CanonicalResponse::Llm(canonical_resp)
-                )?;
+                let wire_body =
+                    adapter.serialize_response(&CanonicalResponse::Llm(canonical_resp))?;
                 drop(lease); // release the slot after execution, before the write
                 Ok(Response::builder()
                     .header("content-type", adapter.response_content_type())
@@ -193,7 +198,10 @@ pub async fn adapter_dispatch_at(
 /// **失败长得像成功**）。
 fn extract_media(
     llm_req: &crate::canonical::CanonicalLlmRequest,
-) -> (Option<Vec<crate::canonical::MediaAttachment>>, Option<ApiError>) {
+) -> (
+    Option<Vec<crate::canonical::MediaAttachment>>,
+    Option<ApiError>,
+) {
     use crate::canonical::{ContentBlock, ImageSource};
     use base64::Engine as _;
 
@@ -218,7 +226,7 @@ fn extract_media(
                                     Some(ApiError::Execution(format!(
                                         "base64 decode failed for audio block: {e}"
                                     ))),
-                                )
+                                );
                             }
                         }
                     }
@@ -229,7 +237,7 @@ fn extract_media(
                                 "AudioSource::Url not supported in v1 (pre-decode to a \
                                  data URI in the adapter): {u}"
                             ))),
-                        )
+                        );
                     }
                 }
             }
@@ -248,7 +256,7 @@ fn extract_media(
                                     Some(ApiError::Execution(format!(
                                         "base64 decode failed for image block: {e}"
                                     ))),
-                                )
+                                );
                             }
                         }
                     }
@@ -260,7 +268,7 @@ fn extract_media(
                                  NEURON_MEDIA_FETCH_HOST_ALLOWLIST for http(s) fetch, or \
                                  pre-decode to a data URI): {u}"
                             ))),
-                        )
+                        );
                     }
                     ImageSource::FileId(f) => {
                         return (
@@ -269,7 +277,7 @@ fn extract_media(
                                 "ImageSource::FileId is a placeholder — pre-resolve to \
                                  a Base64 ImageSource in the adapter: {f}"
                             ))),
-                        )
+                        );
                     }
                 }
             }
@@ -291,7 +299,7 @@ fn extract_media(
                                     Some(ApiError::Execution(format!(
                                         "base64 decode failed for video block: {e}"
                                     ))),
-                                )
+                                );
                             }
                         }
                     }
@@ -302,16 +310,17 @@ fn extract_media(
                                 "VideoSource::Url not supported in v1 (pre-decode to a \
                                  data URI in the adapter): {u}"
                             ))),
-                        )
+                        );
                     }
                     crate::canonical::VideoSource::Frames(_) => {
                         return (
                             None,
                             Some(ApiError::Execution(
                                 "VideoSource::Frames is a frame list (the visual lane \
-                                 owns frames) - it is not one video payload".to_string(),
+                                 owns frames) - it is not one video payload"
+                                    .to_string(),
                             )),
-                        )
+                        );
                     }
                 }
             }
@@ -337,14 +346,20 @@ async fn resolve_engine_legacy(
     }
     if capability == Capability::Llm {
         match state.llm_registry.runtime_for(model_id).await {
-            Ok(rt) => return Ok(Arc::new(crate::engine::bridge::LlmRuntimeBridge::new(rt, model_id))),
+            Ok(rt) => {
+                return Ok(Arc::new(crate::engine::bridge::LlmRuntimeBridge::new(
+                    rt, model_id,
+                )));
+            }
             Err(e) => {
                 eprintln!("[neuron] llm fallback runtime_for({model_id:?}) failed: {e}");
                 // ⚠️ `llm/<name>` vs `<name>` —— 同一个模型的两套命名（见 `llm_bare_id`）。
-                if let Some(bare) = llm_bare_id(model_id) {
-                    if let Ok(rt) = state.llm_registry.runtime_for(bare).await {
-                        return Ok(Arc::new(crate::engine::bridge::LlmRuntimeBridge::new(rt, bare)));
-                    }
+                if let Some(bare) = llm_bare_id(model_id)
+                    && let Ok(rt) = state.llm_registry.runtime_for(bare).await
+                {
+                    return Ok(Arc::new(crate::engine::bridge::LlmRuntimeBridge::new(
+                        rt, bare,
+                    )));
                 }
                 // ⚠️⚠️ 点名了不存在的模型 ⇒ 报错，不拿别的模型顶上（理由同
                 // `resolve_llm_target`）。
@@ -362,7 +377,13 @@ async fn resolve_engine_legacy(
                         None => ApiError::NoEngineForModel(model_id.to_string()),
                     });
                 }
-                let first = state.llm_registry.registered.lock().unwrap().first().cloned();
+                let first = state
+                    .llm_registry
+                    .registered
+                    .lock()
+                    .unwrap()
+                    .first()
+                    .cloned();
                 if let Some(entry) = first {
                     match state.llm_registry.runtime_for(&entry.model_id).await {
                         Ok(rt) => {
@@ -423,12 +444,11 @@ fn resolve_llm_target(
         return Ok(requested.to_string());
     }
     // ⚠️ `llm/<name>` vs `<name>` —— 同一个模型的两套命名（见 `llm_bare_id`）。
-    if let Some(bare) = llm_bare_id(requested) {
-        if state.engines.lookup(Capability::Llm, bare).is_some()
-            || state.llm_registry.is_registered(bare)
-        {
-            return Ok(bare.to_string());
-        }
+    if let Some(bare) = llm_bare_id(requested)
+        && (state.engines.lookup(Capability::Llm, bare).is_some()
+            || state.llm_registry.is_registered(bare))
+    {
+        return Ok(bare.to_string());
     }
     // ⚠️⚠️ **点名了一个不存在的模型 ⇒ 老实报错**（理由见上面的注释）。
     if !requested.trim().is_empty() {
@@ -446,7 +466,13 @@ fn resolve_llm_target(
         });
     }
     // 没点名 ⇒ 平台默认（第一个已注册的）。
-    let first_entry = state.llm_registry.registered.lock().unwrap().first().cloned();
+    let first_entry = state
+        .llm_registry
+        .registered
+        .lock()
+        .unwrap()
+        .first()
+        .cloned();
     if let Some(first) = first_entry {
         eprintln!(
             "[neuron] scheduler: no model named, serving first registered {:?}",
@@ -470,7 +496,9 @@ async fn resolve_llm_engine_strict(
         return Ok(e);
     }
     match state.llm_registry.runtime_for(target).await {
-        Ok(rt) => Ok(Arc::new(crate::engine::bridge::LlmRuntimeBridge::new(rt, target))),
+        Ok(rt) => Ok(Arc::new(crate::engine::bridge::LlmRuntimeBridge::new(
+            rt, target,
+        ))),
         Err(e) => Err(ApiError::Execution(format!(
             "llm load failed for '{target}': {e}"
         ))),
@@ -571,7 +599,12 @@ mod tests {
     impl MockEngine {
         fn gated() -> (Arc<Self>, oneshot::Sender<()>) {
             let (tx, rx) = oneshot::channel();
-            (Arc::new(Self { gate_rx: Mutex::new(Some(rx)) }), tx)
+            (
+                Arc::new(Self {
+                    gate_rx: Mutex::new(Some(rx)),
+                }),
+                tx,
+            )
         }
     }
 
@@ -580,7 +613,9 @@ mod tests {
             id: "mock-id".into(),
             model: req.model.clone(),
             stop_reason: StopReason::EndTurn,
-            content: vec![ContentBlock::Text(TextBlock { text: "mock says hi".into() })],
+            content: vec![ContentBlock::Text(TextBlock {
+                text: "mock says hi".into(),
+            })],
             usage: UsageInfo::default(),
             extensions: Default::default(),
         }
@@ -597,9 +632,8 @@ mod tests {
         async fn execute_stream(
             &self,
             req: CanonicalLlmRequest,
-        ) -> crate::llm::ChatResult<
-            futures_util::stream::BoxStream<'static, CanonicalLlmStreamEvent>,
-        > {
+        ) -> crate::llm::ChatResult<futures_util::stream::BoxStream<'static, CanonicalLlmStreamEvent>>
+        {
             let rx = self.gate_rx.lock().unwrap().take();
             let first = CanonicalLlmStreamEvent::ContentBlockDelta {
                 index: 0,
@@ -651,10 +685,12 @@ mod tests {
     #[tokio::test]
     async fn test_scheduled_non_stream_releases_lease_after_response() {
         let state = crate::server::state::ServerState::new(crate::config::NeuronConfig::default());
-        state
-            .engines
-            .llm
-            .register("mock-model".into(), Arc::new(MockEngine { gate_rx: Mutex::new(None) }));
+        state.engines.llm.register(
+            "mock-model".into(),
+            Arc::new(MockEngine {
+                gate_rx: Mutex::new(None),
+            }),
+        );
 
         let resp = adapter_dispatch_at(
             State(state.clone()),
@@ -688,15 +724,16 @@ mod tests {
             req: CanonicalLlmRequest,
         ) -> crate::llm::ChatResult<CanonicalLlmResponse> {
             let mut r = mock_response(&req);
-            r.content = vec![ContentBlock::Text(TextBlock { text: self.id.into() })];
+            r.content = vec![ContentBlock::Text(TextBlock {
+                text: self.id.into(),
+            })];
             Ok(r)
         }
         async fn execute_stream(
             &self,
             _req: CanonicalLlmRequest,
-        ) -> crate::llm::ChatResult<
-            futures_util::stream::BoxStream<'static, CanonicalLlmStreamEvent>,
-        > {
+        ) -> crate::llm::ChatResult<futures_util::stream::BoxStream<'static, CanonicalLlmStreamEvent>>
+        {
             Ok(Box::pin(futures_util::stream::empty()))
         }
         fn capabilities(&self) -> &crate::capabilities::ModelCapabilities {
@@ -720,10 +757,10 @@ mod tests {
     #[tokio::test]
     async fn a_named_model_that_does_not_exist_is_not_answered_by_another_model() {
         let state = crate::server::state::ServerState::new(crate::config::NeuronConfig::default());
-        state
-            .engines
-            .llm
-            .register("qwen2.5-0.5b".into(), Arc::new(NamedEngine { id: "qwen2.5-0.5b" }));
+        state.engines.llm.register(
+            "qwen2.5-0.5b".into(),
+            Arc::new(NamedEngine { id: "qwen2.5-0.5b" }),
+        );
 
         let err = adapter_dispatch_at(
             State(state.clone()),
@@ -747,14 +784,14 @@ mod tests {
     #[tokio::test]
     async fn the_catalog_style_prefixed_id_finds_the_bare_registered_engine() {
         let state = crate::server::state::ServerState::new(crate::config::NeuronConfig::default());
-        state
-            .engines
-            .llm
-            .register("zzz-other".into(), Arc::new(NamedEngine { id: "zzz-other" }));
-        state
-            .engines
-            .llm
-            .register("qwen2.5-0.5b".into(), Arc::new(NamedEngine { id: "qwen2.5-0.5b" }));
+        state.engines.llm.register(
+            "zzz-other".into(),
+            Arc::new(NamedEngine { id: "zzz-other" }),
+        );
+        state.engines.llm.register(
+            "qwen2.5-0.5b".into(),
+            Arc::new(NamedEngine { id: "qwen2.5-0.5b" }),
+        );
 
         let resp = adapter_dispatch_at(
             State(state.clone()),
@@ -787,9 +824,8 @@ mod tests {
         async fn execute_stream(
             &self,
             _req: CanonicalLlmRequest,
-        ) -> crate::llm::ChatResult<
-            futures_util::stream::BoxStream<'static, CanonicalLlmStreamEvent>,
-        > {
+        ) -> crate::llm::ChatResult<futures_util::stream::BoxStream<'static, CanonicalLlmStreamEvent>>
+        {
             Ok(Box::pin(futures_util::stream::empty()))
         }
         fn capabilities(&self) -> &crate::capabilities::ModelCapabilities {
@@ -873,8 +909,7 @@ mod tests {
         assert_eq!(resp.status(), 200);
         assert_eq!(
             resp.headers()["content-type"],
-            crate::adapter::openai_chat::OpenAiChatAdapter
-                .stream_content_type()
+            crate::adapter::openai_chat::OpenAiChatAdapter.stream_content_type()
         );
 
         use http_body_util::BodyExt;
@@ -900,6 +935,9 @@ mod tests {
         // server drops it once the connection write finishes.
         drop(body);
         let st = state.llm_scheduler.status();
-        assert_eq!(st.residents[0].active_leases, 0, "lease released at stream end");
+        assert_eq!(
+            st.residents[0].active_leases, 0,
+            "lease released at stream end"
+        );
     }
 }

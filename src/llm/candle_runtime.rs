@@ -2,23 +2,23 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use candle::{Device, DType, IndexOp};
+use candle::{DType, Device, IndexOp};
 use candle_transformers::models::{chatglm, mistral, phi3, qwen2, qwen3};
 
 // The vendored llama (explicit `head_dim`) is upstream-compatible when
 // the field is absent, so every llama dispatch goes through it — see
 // `vendor/llama_hd.rs` for why the fork exists (MiniCPM5-1B).
-use vendor::llama_hd as llama;
 use futures_util::stream::BoxStream;
 use tokenizers::Tokenizer;
+use vendor::llama_hd as llama;
 
 use super::{ChatMessage, ChatRequest, ChatResponse, Choice, DeltaMessage, LlmRuntime, ModelInfo};
-use crate::config::{ensure_dir, DeviceSelection};
+use crate::config::{DeviceSelection, ensure_dir};
 use crate::llm::NeuronError;
 
 #[path = "candle_arch.rs"]
 mod candle_arch;
-use candle_arch::{detect_arch, detect_model_type, CausalArch};
+use candle_arch::{CausalArch, detect_arch, detect_model_type};
 
 #[path = "vendor/mod.rs"]
 mod vendor;
@@ -90,8 +90,10 @@ pub(crate) enum FlashAttnArch {
 impl FlashAttnArch {
     /// Whether this architecture has a FlashAttention path at all.
     ///
-    /// Qwen2/Qwen3 go through the vendored FA-capable modules
-    /// (`src/llm/vendor/{qwen2,qwen3}.rs`); Llama and Mistral carry
+    /// Qwen2 goes through the vendored FA-capable module
+    /// (`src/llm/vendor/qwen2.rs`); Qwen3 goes through candle-transformers'
+    /// own upstream `use_flash_attn` path (the vendored copy was a leftover
+    /// from an older pin and has been deleted). Llama and Mistral carry
     /// candle-transformers' own `use_flash_attn` field. **Phi3 and
     /// ChatGlm have no such field** — the knob is not plumbed into
     /// them at all, so they must be reported as "not covered" instead
@@ -346,7 +348,9 @@ fn resolve_weight_dtype(override_dtype: Option<crate::accel::DTypeChoice>) -> DT
 
 impl CandleLlmRuntime {
     pub fn new() -> Self {
-        Self { inner: Arc::new(Mutex::new(None)) }
+        Self {
+            inner: Arc::new(Mutex::new(None)),
+        }
     }
 
     /// Thin re-export of [`detect_arch`] so callers can keep using
@@ -370,9 +374,7 @@ impl CandleLlmRuntime {
     /// every position `[batch, seq, vocab]`. Handle both — assuming
     /// 2-D everywhere made every Qwen request fail with
     /// "to scalar: unexpected rank" / empty streams.
-    fn last_position_logits(
-        logits: &candle::Tensor,
-    ) -> candle::Result<candle::Tensor> {
+    fn last_position_logits(logits: &candle::Tensor) -> candle::Result<candle::Tensor> {
         match logits.dims().len() {
             2 => logits.i(0),
             3 => {
@@ -659,12 +661,7 @@ impl CandleLlmRuntime {
     ///   * `top_k >= 1` keeps the K tokens with the largest probability.
     ///   * top-p and top-k compose: truncate by both, then sample within
     ///     the intersection.
-    fn sample_token_from_logits(
-        logits: &[f32],
-        temperature: f32,
-        top_p: f32,
-        top_k: u32,
-    ) -> u32 {
+    fn sample_token_from_logits(logits: &[f32], temperature: f32, top_p: f32, top_k: u32) -> u32 {
         if logits.is_empty() {
             return 0;
         }
@@ -672,17 +669,13 @@ impl CandleLlmRuntime {
             return logits
                 .iter()
                 .enumerate()
-                .max_by(|(_, a), (_, b)| {
-                    a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
-                })
+                .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
                 .map(|(i, _)| i as u32)
                 .unwrap_or(0);
         }
         // Subtract the max logit before exp to keep the softmax numerically
         // stable for large logit values.
-        let max_logit = logits
-            .iter()
-            .fold(f32::NEG_INFINITY, |a, &b| a.max(b));
+        let max_logit = logits.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b));
         let probs: Vec<f32> = logits
             .iter()
             .map(|&l| ((l - max_logit) / temperature).exp())
@@ -695,9 +688,7 @@ impl CandleLlmRuntime {
 
         let mut indexed: Vec<(usize, f32)> =
             probs.iter().enumerate().map(|(i, &p)| (i, p)).collect();
-        indexed.sort_by(|a, b| {
-            b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
-        });
+        indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
         let k_cutoff = if (top_k as usize) < indexed.len() && top_k > 0 {
             top_k as usize
@@ -761,7 +752,6 @@ impl CandleLlmRuntime {
         }
         None
     }
-
 }
 
 impl Default for CandleLlmRuntime {
@@ -774,10 +764,7 @@ impl Default for CandleLlmRuntime {
 impl super::LlmRuntime for CandleLlmRuntime {
     /// ⚠ 不带 dtype 的那一半 —— 走全局 env（`NEURON_LLM_DTYPE`）⇒ ⇒ 与
     /// 策略层的起始档一致（刀 12：条目带来的档位由 `load_with_dtype` 负责）。
-    async fn load(
-        model: &str,
-        device: &DeviceSelection,
-    ) -> Result<Box<dyn LlmRuntime>, NeuronError>
+    async fn load(model: &str, device: &DeviceSelection) -> Result<Box<dyn LlmRuntime>, NeuronError>
     where
         Self: Sized,
     {
@@ -809,8 +796,7 @@ impl super::LlmRuntime for CandleLlmRuntime {
             Self::resolve_model_path_in(model, roots).map_err(NeuronError::not_implemented)?;
         let dev = Self::map_device_selection(device).map_err(NeuronError::not_implemented)?;
 
-        let (arch, model_type) = detect_arch(&path)
-            .map_err(NeuronError::not_implemented)?;
+        let (arch, model_type) = detect_arch(&path).map_err(NeuronError::not_implemented)?;
         eprintln!(
             "[neuron] CandleLlmRuntime: detected model_type={model_type} in {}",
             path.display()
@@ -928,7 +914,11 @@ impl super::LlmRuntime for CandleLlmRuntime {
             safetensors_files.iter().map(|p| p.as_path()).collect();
 
         let vb = unsafe {
-            crate::candle_compat::from_mmaped_safetensors(safetensors_paths.as_slice(), weight_dtype, &dev)
+            crate::candle_compat::from_mmaped_safetensors(
+                safetensors_paths.as_slice(),
+                weight_dtype,
+                &dev,
+            )
         }
         .map_err(|e| NeuronError::not_implemented(format!("load weights: {e}")))?;
 
@@ -947,8 +937,9 @@ impl super::LlmRuntime for CandleLlmRuntime {
                 #[cfg(feature = "flash-attn")]
                 let model = if use_flash_attn {
                     let flash_cfg: vendor::qwen2::Config = cfg.clone().into();
-                    let m = vendor::qwen2::ModelForCausalLM::new(&flash_cfg, vb)
-                        .map_err(|e| NeuronError::not_implemented(format!("build Qwen2 (flash): {e}")))?;
+                    let m = vendor::qwen2::ModelForCausalLM::new(&flash_cfg, vb).map_err(|e| {
+                        NeuronError::not_implemented(format!("build Qwen2 (flash): {e}"))
+                    })?;
                     CausalModel::Qwen2Flash(m)
                 } else {
                     let m = qwen2::ModelForCausalLM::new(cfg, vb)
@@ -980,17 +971,11 @@ impl super::LlmRuntime for CandleLlmRuntime {
                 CausalModel::Qwen3(m)
             }
             CausalArch::Llama(cfg) => {
-                let inner = llama::LlamaConfig::clone(cfg)
-                    .into_config(use_flash_attn);
+                let inner = llama::LlamaConfig::clone(cfg).into_config(use_flash_attn);
                 let m = llama::Llama::load(vb, &inner)
                     .map_err(|e| NeuronError::not_implemented(format!("build Llama: {e}")))?;
-                let cache = llama::Cache::new(
-                    true,
-                    weight_dtype,
-                    &inner,
-                    &dev,
-                )
-                .map_err(|e| NeuronError::not_implemented(format!("build Llama cache: {e}")))?;
+                let cache = llama::Cache::new(true, weight_dtype, &inner, &dev)
+                    .map_err(|e| NeuronError::not_implemented(format!("build Llama cache: {e}")))?;
                 CausalModel::Llama { model: m, cache }
             }
             CausalArch::Phi3(cfg) => {
@@ -1031,10 +1016,19 @@ impl super::LlmRuntime for CandleLlmRuntime {
         };
 
         let llama_cfg = match &arch {
-            CausalArch::Llama(cfg) => Some(llama::LlamaConfig::clone(cfg).into_config(use_flash_attn)),
+            CausalArch::Llama(cfg) => {
+                Some(llama::LlamaConfig::clone(cfg).into_config(use_flash_attn))
+            }
             _ => None,
         };
-        let loaded = LoadedModel { model, tokenizer, eos_token_id, device: dev, llama_cfg, dtype: weight_dtype };
+        let loaded = LoadedModel {
+            model,
+            tokenizer,
+            eos_token_id,
+            device: dev,
+            llama_cfg,
+            dtype: weight_dtype,
+        };
         let runtime = CandleLlmRuntime::new();
         *runtime.inner.lock().unwrap() = Some(loaded);
 
@@ -1129,16 +1123,11 @@ impl super::LlmRuntime for CandleLlmRuntime {
             if next_token == eos_token_id {
                 break;
             }
-            let next_input = candle::Tensor::from_vec(
-                vec![next_token],
-                (1, 1),
-                &m.device,
-            )
-            .map_err(|e| NeuronError::not_implemented(format!("build next input: {e}")))?;
-            let logits = m
-                .model
-                .forward(&next_input, offset)
-                .map_err(|e| NeuronError::not_implemented(format!("forward pass {}: {}", offset, e)))?;
+            let next_input = candle::Tensor::from_vec(vec![next_token], (1, 1), &m.device)
+                .map_err(|e| NeuronError::not_implemented(format!("build next input: {e}")))?;
+            let logits = m.model.forward(&next_input, offset).map_err(|e| {
+                NeuronError::not_implemented(format!("forward pass {}: {}", offset, e))
+            })?;
             // Same single-batch reduction as the prompt forward.
             let last_logits = Self::last_position_logits(&logits)
                 .map_err(|e| NeuronError::not_implemented(format!("last-position logits: {e}")))?;
@@ -1170,7 +1159,11 @@ impl super::LlmRuntime for CandleLlmRuntime {
                     content: output_text,
                     reasoning_content: None,
                 },
-                finish_reason: Some(if next_token == eos_token_id { "stop".to_string() } else { "length".to_string() }),
+                finish_reason: Some(if next_token == eos_token_id {
+                    "stop".to_string()
+                } else {
+                    "length".to_string()
+                }),
             }],
             usage: Some(super::Usage {
                 prompt_tokens,
@@ -1249,7 +1242,11 @@ impl super::LlmRuntime for CandleLlmRuntime {
                         model: model_id.clone(),
                         choices: vec![super::ChunkChoice {
                             index: 0,
-                            delta: DeltaMessage { role: None, content: None, reasoning_content: None },
+                            delta: DeltaMessage {
+                                role: None,
+                                content: None,
+                                reasoning_content: None,
+                            },
                             finish_reason: Some("length".to_string()),
                         }],
                     });
@@ -1270,7 +1267,11 @@ impl super::LlmRuntime for CandleLlmRuntime {
                     model: model_id.clone(),
                     choices: vec![super::ChunkChoice {
                         index: 0,
-                        delta: DeltaMessage { role: None, content: None, reasoning_content: None },
+                        delta: DeltaMessage {
+                            role: None,
+                            content: None,
+                            reasoning_content: None,
+                        },
                         finish_reason: Some("length".to_string()),
                     }],
                 });
@@ -1293,22 +1294,19 @@ impl super::LlmRuntime for CandleLlmRuntime {
                 }],
             });
 
-            let input = match candle::Tensor::from_vec(
-                prompt_ids.clone(),
-                (1, prompt_len),
-                &m.device,
-            ) {
-                Ok(t) => t,
-                Err(e) => {
-                    // The stream's Item type is `ChatChunk`, not
-                    // `Result<_, _>`, so a failure here can only end the
-                    // stream. Log it: a silent empty SSE body is
-                    // indistinguishable from a server that generated
-                    // nothing, and cost hours to diagnose once already.
-                    eprintln!("[candle chat_stream] input tensor failed: {e}");
-                    return;
-                }
-            };
+            let input =
+                match candle::Tensor::from_vec(prompt_ids.clone(), (1, prompt_len), &m.device) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        // The stream's Item type is `ChatChunk`, not
+                        // `Result<_, _>`, so a failure here can only end the
+                        // stream. Log it: a silent empty SSE body is
+                        // indistinguishable from a server that generated
+                        // nothing, and cost hours to diagnose once already.
+                        eprintln!("[candle chat_stream] input tensor failed: {e}");
+                        return;
+                    }
+                };
             let logits = match m.model.forward(&input, 0) {
                 Ok(t) => t,
                 Err(e) => {
@@ -1334,9 +1332,7 @@ impl super::LlmRuntime for CandleLlmRuntime {
                 }
             };
             let mut next_token =
-                Self::sample_token_from_logits(
-                    &logits_vec, temperature, top_p, top_k,
-                );
+                Self::sample_token_from_logits(&logits_vec, temperature, top_p, top_k);
             let mut finished = next_token == eos_token_id;
             let mut count: usize = 0;
             let mut text_so_far = String::new();
@@ -1362,7 +1358,9 @@ impl super::LlmRuntime for CandleLlmRuntime {
                                 index: 0,
                                 delta: DeltaMessage {
                                     role: None,
-                                    content: Some(text_so_far[old_len..old_len + emit_len].to_string()),
+                                    content: Some(
+                                        text_so_far[old_len..old_len + emit_len].to_string(),
+                                    ),
                                     reasoning_content: None,
                                 },
                                 finish_reason: None,
@@ -1398,11 +1396,7 @@ impl super::LlmRuntime for CandleLlmRuntime {
                     break;
                 }
 
-                let input = match candle::Tensor::from_vec(
-                    vec![next_token],
-                    (1, 1),
-                    &m.device,
-                ) {
+                let input = match candle::Tensor::from_vec(vec![next_token], (1, 1), &m.device) {
                     Ok(t) => t,
                     Err(_) => return,
                 };
@@ -1425,10 +1419,7 @@ impl super::LlmRuntime for CandleLlmRuntime {
                         return;
                     }
                 };
-                next_token =
-                    Self::sample_token_from_logits(
-                        &logits_vec, temperature, top_p, top_k,
-                    );
+                next_token = Self::sample_token_from_logits(&logits_vec, temperature, top_p, top_k);
 
                 if next_token == eos_token_id {
                     finished = true;
@@ -1452,7 +1443,9 @@ impl super::LlmRuntime for CandleLlmRuntime {
                                     index: 0,
                                     delta: DeltaMessage {
                                         role: None,
-                                        content: Some(text_so_far[old_len..old_len + emit_len].to_string()),
+                                        content: Some(
+                                            text_so_far[old_len..old_len + emit_len].to_string(),
+                                        ),
                                         reasoning_content: None,
                                     },
                                     finish_reason: None,
@@ -1488,7 +1481,11 @@ impl super::LlmRuntime for CandleLlmRuntime {
                 model: model_id.clone(),
                 choices: vec![super::ChunkChoice {
                     index: 0,
-                    delta: DeltaMessage { role: None, content: None, reasoning_content: None },
+                    delta: DeltaMessage {
+                        role: None,
+                        content: None,
+                        reasoning_content: None,
+                    },
                     finish_reason: Some(if finished {
                         "stop".to_string()
                     } else {
@@ -1532,37 +1529,46 @@ impl super::LlmRuntime for CandleLlmRuntime {
         ]
     }
 
-fn name(&self) -> &str {
+    fn name(&self) -> &str {
         "candle"
     }
 }
 
 #[async_trait]
 impl crate::engine::LlmRuntime for CandleLlmRuntime {
-    async fn execute(&self, req: crate::canonical::CanonicalLlmRequest)
-        -> crate::llm::ChatResult<crate::canonical::CanonicalLlmResponse>
-    {
-        let chat_req = crate::llm::translators::canonical_to_chat_request(&req)
-            .map_err(NeuronError::new)?;
+    async fn execute(
+        &self,
+        req: crate::canonical::CanonicalLlmRequest,
+    ) -> crate::llm::ChatResult<crate::canonical::CanonicalLlmResponse> {
+        let chat_req =
+            crate::llm::translators::canonical_to_chat_request(&req).map_err(NeuronError::new)?;
         let chat_resp = self.chat(chat_req).await?;
-        Ok(crate::llm::translators::chat_response_to_canonical(&req.model, chat_resp))
+        Ok(crate::llm::translators::chat_response_to_canonical(
+            &req.model, chat_resp,
+        ))
     }
 
-    async fn execute_stream(&self, req: crate::canonical::CanonicalLlmRequest)
-        -> crate::llm::ChatResult<BoxStream<'static, crate::canonical::CanonicalLlmStreamEvent>>
-    {
-        let chat_req = crate::llm::translators::canonical_to_chat_request(&req)
-            .map_err(NeuronError::new)?;
+    async fn execute_stream(
+        &self,
+        req: crate::canonical::CanonicalLlmRequest,
+    ) -> crate::llm::ChatResult<BoxStream<'static, crate::canonical::CanonicalLlmStreamEvent>> {
+        let chat_req =
+            crate::llm::translators::canonical_to_chat_request(&req).map_err(NeuronError::new)?;
         let stream = self.chat_stream(chat_req).await?;
         use futures_util::StreamExt;
         Ok(Box::pin(stream.filter_map(|chunk| async move {
-            chunk.choices.into_iter().next()
+            chunk
+                .choices
+                .into_iter()
+                .next()
                 .and_then(|c| c.delta.content)
                 .filter(|s| !s.is_empty())
-                .map(|t| crate::canonical::CanonicalLlmStreamEvent::ContentBlockDelta {
-                    index: 0,
-                    delta: crate::canonical::ContentDelta::TextDelta(t),
-                })
+                .map(
+                    |t| crate::canonical::CanonicalLlmStreamEvent::ContentBlockDelta {
+                        index: 0,
+                        delta: crate::canonical::ContentDelta::TextDelta(t),
+                    },
+                )
         })))
     }
 
@@ -1571,9 +1577,15 @@ impl crate::engine::LlmRuntime for CandleLlmRuntime {
             std::sync::LazyLock::new(|| crate::capabilities::ModelCapabilities {
                 engine_impl: "candle".into(),
                 model_id: "candle-default".into(),
-                input_modalities: [crate::capabilities::Modality::TextInput].into_iter().collect(),
-                output_modalities: [crate::capabilities::Modality::TextOutput].into_iter().collect(),
-                api_styles: [crate::capabilities::ApiStyle::openai_chat()].into_iter().collect(),
+                input_modalities: [crate::capabilities::Modality::TextInput]
+                    .into_iter()
+                    .collect(),
+                output_modalities: [crate::capabilities::Modality::TextOutput]
+                    .into_iter()
+                    .collect(),
+                api_styles: [crate::capabilities::ApiStyle::openai_chat()]
+                    .into_iter()
+                    .collect(),
                 supports_streaming: true,
                 supports_tools: true,
                 ..Default::default()
@@ -1581,7 +1593,9 @@ impl crate::engine::LlmRuntime for CandleLlmRuntime {
         &CAPS
     }
 
-    fn name(&self) -> &str { "candle" }
+    fn name(&self) -> &str {
+        "candle"
+    }
 }
 
 #[cfg(test)]

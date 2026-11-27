@@ -196,11 +196,11 @@ pub fn builtin_model_dirs(exe_dir: Option<&Path>) -> Vec<PathBuf> {
     };
     let mut out = vec![dir.join(BUILTIN_MODEL_DIR)];
     out.push(dir.join("resources").join(BUILTIN_MODEL_DIR));
-    if let Some(parent) = dir.parent() {
-        if !parent.as_os_str().is_empty() {
-            out.push(parent.join("Resources").join(BUILTIN_MODEL_DIR));
-            out.push(parent.join(BUILTIN_MODEL_DIR));
-        }
+    if let Some(parent) = dir.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        out.push(parent.join("Resources").join(BUILTIN_MODEL_DIR));
+        out.push(parent.join(BUILTIN_MODEL_DIR));
     }
     out
 }

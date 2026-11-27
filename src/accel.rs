@@ -571,7 +571,7 @@ pub fn requested_dtype() -> Option<DTypeChoice> {
 /// 而调度器每个周期都要看这个键。
 pub fn detected_platform_key() -> &'static str {
     static KEY: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
-    *KEY.get_or_init(|| HostCapabilities::detect_cached().device.platform_key())
+    KEY.get_or_init(|| HostCapabilities::detect_cached().device.platform_key())
 }
 
 /// 把「盘上的事实」＋「这台机器」＋「用户的旋钮」变成一份**可执行的**计划。
@@ -975,15 +975,15 @@ pub fn resolve_strategy(
 
     // ⚠ **「装得下但跑不起来」要单独报** —— 不许混进「装不下」：
     // 装不下的出路是「换设备／降精度」，跑不起来的出路只有「换 dtype」。
-    if picked.is_none() {
-        if let Some((_dev, dt, need_here)) = blocked_by_prereq {
-            unavailable.push(format!(
+    if picked.is_none()
+        && let Some((_dev, dt, need_here)) = blocked_by_prereq
+    {
+        unavailable.push(format!(
                 "dtype：{dt} 这一档**装得下**（要 {need_here} 字节）但**跑不起来**（{why}）⇒ ⇒ 这一族要显式设 `NEURON_LLM_DTYPE=bf16`（或 f16）才跑得起来",
                 dt = dt.name(),
                 need_here = need_here,
                 why = dtype_prereq_why(&model.arch),
-            ));
-        }
+        ));
     }
 
     // 池按**最终**的设备算（降级之后就不是显存池了）。
@@ -999,31 +999,32 @@ pub fn resolve_strategy(
     } else {
         (caps.ram_available_bytes.or(caps.ram_bytes), "内存")
     };
-    if let Some(pool) = pool {
-        if need > pool {
-            unavailable.push(format!(
-                "dtype：权重按 {} 物化要 {need} 字节，而{pool_name}只有 {pool} 字节 ⇒ 装不下",
-                dtype.name()
-            ));
-            // 给一条**可操作**的出路（是建议，不是偷偷改）。
-            // ⚠ 只建议**更省**的那一档 —— 建议「升精度」是荒谬的。
-            //
-            // ⚠⚠️ **出路必须「真的装得下」** —— 真机撞出来的（刀 16）：
-            //   rk3566 上可用内存 1.04 GiB，而 bf16 物化 1.40 GiB ⇒ ⇒
-            //   ⇒ 「要装下得设 bf16」这句话是**假话**（设了也装不下）⇒ ⇒
-            //   ⇒ 不许给一条走不通的出路。
-            //
-            // ⚠⚠️ **「会不会丢精度」要按盘上事实说** —— 盘上**就是** 2 字节/参数
-            //   （`on_disk_bytes == Some(2)`）⇒ ⇒ bf16 是它本来的样子 ⇒ ⇒
-            //   ⇒ **不丢精度** ⇒ ⇒ 照实说「不丢精度」⇒ ⇒ 而「自动降级为什么
-            //   没做」要另找原因（**装完还是装不下**）⇒ ⇒ 不许拿「会丢精度」
-            //   当挡箭牌（那是**说假话**）。
-            if dtype == DTypeChoice::F32 {
-                let alt = DTypeChoice::BF16;
-                let alt_bytes = materialized_bytes(model, alt);
-                if alt_bytes <= pool {
-                    let lossless = model.on_disk_bytes == Some(2);
-                    reasons.push(format!(
+    if let Some(pool) = pool
+        && need > pool
+    {
+        unavailable.push(format!(
+            "dtype：权重按 {} 物化要 {need} 字节，而{pool_name}只有 {pool} 字节 ⇒ 装不下",
+            dtype.name()
+        ));
+        // 给一条**可操作**的出路（是建议，不是偷偷改）。
+        // ⚠ 只建议**更省**的那一档 —— 建议「升精度」是荒谬的。
+        //
+        // ⚠⚠️ **出路必须「真的装得下」** —— 真机撞出来的（刀 16）：
+        //   rk3566 上可用内存 1.04 GiB，而 bf16 物化 1.40 GiB ⇒ ⇒
+        //   ⇒ 「要装下得设 bf16」这句话是**假话**（设了也装不下）⇒ ⇒
+        //   ⇒ 不许给一条走不通的出路。
+        //
+        // ⚠⚠️ **「会不会丢精度」要按盘上事实说** —— 盘上**就是** 2 字节/参数
+        //   （`on_disk_bytes == Some(2)`）⇒ ⇒ bf16 是它本来的样子 ⇒ ⇒
+        //   ⇒ **不丢精度** ⇒ ⇒ 照实说「不丢精度」⇒ ⇒ 而「自动降级为什么
+        //   没做」要另找原因（**装完还是装不下**）⇒ ⇒ 不许拿「会丢精度」
+        //   当挡箭牌（那是**说假话**）。
+        if dtype == DTypeChoice::F32 {
+            let alt = DTypeChoice::BF16;
+            let alt_bytes = materialized_bytes(model, alt);
+            if alt_bytes <= pool {
+                let lossless = model.on_disk_bytes == Some(2);
+                reasons.push(format!(
                         "dtype：要装下得显式设 `NEURON_LLM_DTYPE={}`（要 {alt_bytes} 字节）—— {lossless_note} ⇒ ⇒ 所以只**建议**，不自动改",
                         alt.name(),
                         lossless_note = if lossless {
@@ -1032,7 +1033,6 @@ pub fn resolve_strategy(
                             "这一档**会丢精度**（盘上不是 2 字节/参数）"
                         },
                     ));
-                }
             }
         }
     }
@@ -1176,7 +1176,7 @@ fn detect_device_kind() -> DeviceKind {
         if candle::Device::new_metal(0).is_ok() {
             return DeviceKind::Metal;
         }
-        return DeviceKind::Cpu;
+        DeviceKind::Cpu
     }
     #[cfg(not(feature = "candle"))]
     DeviceKind::Unknown
@@ -1496,15 +1496,15 @@ fn vram_via_nvidia_smi() -> Option<(u64, usize)> {
 /// `%CUDA_PATH%\bin`）⇒ ⇒ 只试 PATH 会白问一次。
 fn nvidia_smi_candidates() -> Vec<std::path::PathBuf> {
     let mut v = vec![std::path::PathBuf::from("nvidia-smi")];
-    if let Ok(cuda_path) = std::env::var("CUDA_PATH") {
-        if !cuda_path.trim().is_empty() {
-            let exe = if cfg!(windows) {
-                "nvidia-smi.exe"
-            } else {
-                "nvidia-smi"
-            };
-            v.push(std::path::Path::new(&cuda_path).join("bin").join(exe));
-        }
+    if let Ok(cuda_path) = std::env::var("CUDA_PATH")
+        && !cuda_path.trim().is_empty()
+    {
+        let exe = if cfg!(windows) {
+            "nvidia-smi.exe"
+        } else {
+            "nvidia-smi"
+        };
+        v.push(std::path::Path::new(&cuda_path).join("bin").join(exe));
     }
     v
 }

@@ -62,7 +62,7 @@ use futures_util::Stream;
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 
-pub use profile::{default_overrides_path, MemoryProfileStore, ProfileSource};
+pub use profile::{MemoryProfileStore, ProfileSource, default_overrides_path};
 
 use crate::capabilities::Capability;
 
@@ -612,7 +612,10 @@ impl ModelScheduler {
             .and_then(|w| w.upgrade())
             .expect("scheduler outlives its leases");
         ModelLease {
-            inner: Arc::new(LeaseInner { scheduler, model_id }),
+            inner: Arc::new(LeaseInner {
+                scheduler,
+                model_id,
+            }),
         }
     }
 
@@ -956,7 +959,10 @@ mod tests {
         drop(lease2);
         let st = sched.status();
         assert_eq!(st.residents[0].active_leases, 0);
-        assert!(unload.ids().is_empty(), "idle window is long, nothing evicted");
+        assert!(
+            unload.ids().is_empty(),
+            "idle window is long, nothing evicted"
+        );
     }
 
     #[test]
@@ -1012,7 +1018,11 @@ mod tests {
         drop(lease_a2);
         let lease_b = await_ready(&mut fb).unwrap();
 
-        assert_eq!(unload.ids(), vec!["a".to_string()], "a evicted exactly once");
+        assert_eq!(
+            unload.ids(),
+            vec!["a".to_string()],
+            "a evicted exactly once"
+        );
         let st = sched.status();
         assert_eq!(st.residents.len(), 1);
         assert_eq!(st.residents[0].model_id, "b");
@@ -1148,7 +1158,10 @@ mod tests {
 
         let mut f = Box::pin(sched.acquire("a"));
         let lease = await_ready(&mut f).unwrap();
-        assert!(sched.force_evict("a").is_err(), "held lease blocks force evict");
+        assert!(
+            sched.force_evict("a").is_err(),
+            "held lease blocks force evict"
+        );
         drop(lease);
         assert_eq!(sched.force_evict("a").unwrap(), true);
         assert!(sched.status().residents.is_empty());
@@ -1186,7 +1199,10 @@ mod tests {
         let mut f2 = Box::pin(sched.acquire("a"));
         let l2 = await_ready(&mut f2).unwrap();
         let mut f3 = Box::pin(sched.acquire("a"));
-        assert!(poll_once(&mut f3).is_pending(), "third concurrent lease must queue");
+        assert!(
+            poll_once(&mut f3).is_pending(),
+            "third concurrent lease must queue"
+        );
         drop(l1);
         let l3 = await_ready(&mut f3).unwrap();
         drop(l2);

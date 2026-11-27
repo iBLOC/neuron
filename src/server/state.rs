@@ -97,8 +97,7 @@ impl ServerState {
         // mutable local first so the env match below can register
         // mage-vl into it before we wrap it in an Arc for
         // self.engines.
-        let engines =
-            crate::engine::registry::CapabilityRegistries::new();
+        let engines = crate::engine::registry::CapabilityRegistries::new();
 
         let llm_runtime_env = crate::config::env_var("LLM_RUNTIME");
         match llm_runtime_env.as_deref() {
@@ -111,13 +110,16 @@ impl ServerState {
                         model_id.clone(),
                         LlmImpl::Candle,
                         device,
-                        crate::accel::requested_dtype()
-                            .unwrap_or(crate::accel::DTypeChoice::F32),
+                        crate::accel::requested_dtype().unwrap_or(crate::accel::DTypeChoice::F32),
                         8_000_000_000,
                     ) {
-                        eprintln!("[neuron] Candle LLM register failed for model={model_id:?} device={device:?}: {e}");
+                        eprintln!(
+                            "[neuron] Candle LLM register failed for model={model_id:?} device={device:?}: {e}"
+                        );
                     } else {
-                        eprintln!("[neuron] Candle LLM registered model={model_id:?} device={device:?}");
+                        eprintln!(
+                            "[neuron] Candle LLM registered model={model_id:?} device={device:?}"
+                        );
                     }
                 }
                 #[cfg(not(feature = "candle"))]
@@ -132,8 +134,7 @@ impl ServerState {
                         "litert-model".into(),
                         LlmImpl::Litert,
                         device,
-                        crate::accel::requested_dtype()
-                            .unwrap_or(crate::accel::DTypeChoice::F32),
+                        crate::accel::requested_dtype().unwrap_or(crate::accel::DTypeChoice::F32),
                         1_000_000_000,
                     ) {
                         eprintln!("[neuron] Litert LLM register failed: {e}");
@@ -153,13 +154,10 @@ impl ServerState {
                         model_id.clone(),
                         LlmImpl::MistralRs,
                         device,
-                        crate::accel::requested_dtype()
-                            .unwrap_or(crate::accel::DTypeChoice::F32),
+                        crate::accel::requested_dtype().unwrap_or(crate::accel::DTypeChoice::F32),
                         8_000_000_000,
                     ) {
-                        eprintln!(
-                            "[neuron] MistralRs LLM register failed: {e}"
-                        );
+                        eprintln!("[neuron] MistralRs LLM register failed: {e}");
                     }
                 }
                 #[cfg(not(feature = "mistralrs"))]
@@ -186,13 +184,10 @@ impl ServerState {
                         model_id.clone(),
                         LlmImpl::LlamaCpp,
                         device,
-                        crate::accel::requested_dtype()
-                            .unwrap_or(crate::accel::DTypeChoice::F32),
+                        crate::accel::requested_dtype().unwrap_or(crate::accel::DTypeChoice::F32),
                         8_000_000_000,
                     ) {
-                        eprintln!(
-                            "[neuron] LlamaCpp LLM register failed: {e}"
-                        );
+                        eprintln!("[neuron] LlamaCpp LLM register failed: {e}");
                     } else {
                         eprintln!(
                             "[neuron] LlamaCpp LLM registered model={model_id:?} \
@@ -215,9 +210,10 @@ impl ServerState {
             Some("mage_vl") => {
                 let model_id = crate::config::env_var_result("MAGE_VL_MODEL_ID")
                     .unwrap_or_else(|_| "microsoft/Mage-VL".to_string());
-                let shard_dir = crate::config::env_var_result("MAGE_VL_SHARD_DIR")
-                    .unwrap_or_else(|_| {
-                        "/home/ibloc/Projects/OpenSourceProjects/mage/mage-vl-checkpoint".to_string()
+                let shard_dir =
+                    crate::config::env_var_result("MAGE_VL_SHARD_DIR").unwrap_or_else(|_| {
+                        "/home/ibloc/Projects/OpenSourceProjects/mage/mage-vl-checkpoint"
+                            .to_string()
                     });
                 if !std::path::Path::new(&shard_dir)
                     .join("model-00001-of-00002.safetensors")
@@ -310,8 +306,7 @@ impl ServerState {
                         reg.model_id.clone(),
                         impl_id,
                         reg.device,
-                        crate::accel::requested_dtype()
-                            .unwrap_or(crate::accel::DTypeChoice::F32),
+                        crate::accel::requested_dtype().unwrap_or(crate::accel::DTypeChoice::F32),
                         reg.required_memory_bytes,
                     );
                 } else {
@@ -356,7 +351,7 @@ impl ServerState {
                     // 策略面：这条腿能不能读它、跑在哪个设备、要占多少字节
                     // —— 全部从**盘上的事实**算出来，不写死（旧的 8 GB 是
                     // 编出来的数字：0.92 GiB 的模型也按 8 GB 记）。
-                    match crate::accel::plan_with(&caps, &entry.path(), &req) {
+                    match crate::accel::plan_with(caps, &entry.path(), &req) {
                         Ok(plan) => {
                             match llm_registry.register(
                                 plan.model_id.clone(),
@@ -380,9 +375,7 @@ impl ServerState {
                                     // 而盘上**明明有**那份权重。
                                     llm_registry.record_registration_refusal(
                                         &id,
-                                        crate::llm::TryRegisterDownloaded::Refused(
-                                            e.to_string(),
-                                        ),
+                                        crate::llm::TryRegisterDownloaded::Refused(e.to_string()),
                                     );
                                     eprintln!(
                                         "[neuron] auto-register failed for {id:?}: {e} | 策略：{}",
@@ -432,7 +425,10 @@ impl ServerState {
                 #[cfg(feature = "voxcpm")]
                 {
                     let _ = tts_registry.register(
-                        "voxcpm-model".into(), crate::tts::TtsImpl::Burn, device, 2_000_000_000,
+                        "voxcpm-model".into(),
+                        crate::tts::TtsImpl::Burn,
+                        device,
+                        2_000_000_000,
                     );
                 }
                 #[cfg(not(feature = "voxcpm"))]
@@ -445,7 +441,10 @@ impl ServerState {
                 {
                     // 2B params materialized as f32 ≈ 9.2 GB + activations.
                     let _ = tts_registry.register(
-                        "voxcpm2".into(), crate::tts::TtsImpl::Burn, device, 10_000_000_000,
+                        "voxcpm2".into(),
+                        crate::tts::TtsImpl::Burn,
+                        device,
+                        10_000_000_000,
                     );
                 }
                 #[cfg(not(feature = "voxcpm"))]
@@ -460,7 +459,10 @@ impl ServerState {
                     // AudioVAE + aggregator) materialized as f32 ≈ 6 GB +
                     // activations.
                     let _ = tts_registry.register(
-                        "ming3".into(), crate::tts::TtsImpl::Burn, device, 7_000_000_000,
+                        "ming3".into(),
+                        crate::tts::TtsImpl::Burn,
+                        device,
+                        7_000_000_000,
                     );
                 }
                 #[cfg(not(feature = "ming3"))]
@@ -504,7 +506,10 @@ impl ServerState {
                 #[cfg(feature = "candle")]
                 {
                     let _ = asr_registry.register(
-                        "whisper-model".into(), crate::asr::AsrImpl::Candle, device, 1_500_000_000,
+                        "whisper-model".into(),
+                        crate::asr::AsrImpl::Candle,
+                        device,
+                        1_500_000_000,
                     );
                 }
                 #[cfg(not(feature = "candle"))]
@@ -517,7 +522,10 @@ impl ServerState {
                 #[cfg(feature = "tract")]
                 {
                     let _ = asr_registry.register(
-                        "sensevoice-small".into(), crate::asr::AsrImpl::Tract, device, 1_500_000_000,
+                        "sensevoice-small".into(),
+                        crate::asr::AsrImpl::Tract,
+                        device,
+                        1_500_000_000,
                     );
                 }
                 #[cfg(not(feature = "tract"))]
@@ -530,7 +538,10 @@ impl ServerState {
                 #[cfg(feature = "sherpa")]
                 {
                     let _ = asr_registry.register(
-                        "sensevoice-small".into(), crate::asr::AsrImpl::Sherpa, device, 800_000_000,
+                        "sensevoice-small".into(),
+                        crate::asr::AsrImpl::Sherpa,
+                        device,
+                        800_000_000,
                     );
                 }
                 #[cfg(not(feature = "sherpa"))]
@@ -575,7 +586,10 @@ impl ServerState {
                 #[cfg(feature = "candle")]
                 {
                     let _ = rerank_registry.register(
-                        "bge-reranker-base".into(), crate::rerank::RerankImpl::Bge, device, 500_000_000,
+                        "bge-reranker-base".into(),
+                        crate::rerank::RerankImpl::Bge,
+                        device,
+                        500_000_000,
                     );
                 }
                 #[cfg(not(feature = "candle"))]
@@ -587,7 +601,10 @@ impl ServerState {
                 #[cfg(feature = "candle")]
                 {
                     let _ = rerank_registry.register(
-                        "mxbai-rerank-base-v2".into(), crate::rerank::RerankImpl::Mxbai, device, 1_500_000_000,
+                        "mxbai-rerank-base-v2".into(),
+                        crate::rerank::RerankImpl::Mxbai,
+                        device,
+                        1_500_000_000,
                     );
                 }
             }
@@ -595,7 +612,10 @@ impl ServerState {
                 #[cfg(feature = "candle")]
                 {
                     let _ = rerank_registry.register(
-                        "jina-reranker-base-v2".into(), crate::rerank::RerankImpl::Jina, device, 1_500_000_000,
+                        "jina-reranker-base-v2".into(),
+                        crate::rerank::RerankImpl::Jina,
+                        device,
+                        1_500_000_000,
                     );
                 }
             }
@@ -709,18 +729,24 @@ impl ServerState {
         let decision_shortcut = decision_registry.default_runtime();
 
         // ---- Embedding registry -------------------------------------------
-        let embedding_registry = crate::embedding::EmbeddingRuntimeRegistry::new(config_arc.clone());
+        let embedding_registry =
+            crate::embedding::EmbeddingRuntimeRegistry::new(config_arc.clone());
         let embedding_runtime_env = crate::config::env_var("EMBEDDING_RUNTIME");
         if let Some("candle") = embedding_runtime_env.as_deref() {
             #[cfg(feature = "candle")]
             {
                 let _ = embedding_registry.register(
-                    "all-minilm-l6-v2".into(), crate::embedding::EmbeddingImpl::Candle, device, 200_000_000,
+                    "all-minilm-l6-v2".into(),
+                    crate::embedding::EmbeddingImpl::Candle,
+                    device,
+                    200_000_000,
                 );
             }
             #[cfg(not(feature = "candle"))]
             {
-                eprintln!("[neuron] NEURON_EMBEDDING_RUNTIME=candle but candle feature not enabled");
+                eprintln!(
+                    "[neuron] NEURON_EMBEDDING_RUNTIME=candle but candle feature not enabled"
+                );
             }
         }
         // EmbeddingGemma 2 (google/embeddinggemma-2, Apache-2.0): 24-layer
@@ -732,12 +758,17 @@ impl ServerState {
             #[cfg(feature = "candle")]
             {
                 let _ = embedding_registry.register(
-                    "embeddinggemma-2".into(), crate::embedding::EmbeddingImpl::Gemma2, device, 1_700_000_000,
+                    "embeddinggemma-2".into(),
+                    crate::embedding::EmbeddingImpl::Gemma2,
+                    device,
+                    1_700_000_000,
                 );
             }
             #[cfg(not(feature = "candle"))]
             {
-                eprintln!("[neuron] NEURON_EMBEDDING_RUNTIME=gemma2 but candle feature not enabled");
+                eprintln!(
+                    "[neuron] NEURON_EMBEDDING_RUNTIME=gemma2 but candle feature not enabled"
+                );
             }
         }
 
@@ -795,12 +826,7 @@ impl ServerState {
                 Ok(impl_id) => {
                     let model_id = crate::config::env_var("VISION_MODEL_ID")
                         .unwrap_or_else(|| "vision".to_string());
-                    match vision_registry.register(
-                        model_id.clone(),
-                        impl_id,
-                        device,
-                        500_000_000,
-                    ) {
+                    match vision_registry.register(model_id.clone(), impl_id, device, 500_000_000) {
                         Ok(()) => eprintln!(
                             "[neuron] Vision runtime registered: model={model_id:?} engine={engine:?} \
                              (set NEURON_VISION_MODEL_PATH to the model directory, \
@@ -914,15 +940,20 @@ impl ServerState {
                         device,
                         estimate,
                     ) {
-                        eprintln!(concat!(
-                            "[neuron] imagegen: registering moss-image failed ",
-                            "(estimate {} bytes, device {:?}): {}"
-                        ), estimate, device, e);
+                        eprintln!(
+                            concat!(
+                                "[neuron] imagegen: registering moss-image failed ",
+                                "(estimate {} bytes, device {:?}): {}"
+                            ),
+                            estimate, device, e
+                        );
                     }
                 }
                 #[cfg(not(feature = "candle"))]
                 {
-                    eprintln!("[neuron] NEURON_IMAGEGEN_RUNTIME=moss-image but candle feature not enabled");
+                    eprintln!(
+                        "[neuron] NEURON_IMAGEGEN_RUNTIME=moss-image but candle feature not enabled"
+                    );
                 }
             }
             _ => {}
@@ -954,9 +985,10 @@ impl ServerState {
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|_| std::path::PathBuf::from("huggingface-cli"));
         let hf_endpoint = config.source_endpoints.get("huggingface").cloned();
-        source_registry.register(Arc::new(
-            crate::models::HuggingFaceSource::with_endpoint(hf_cli, hf_endpoint),
-        ));
+        source_registry.register(Arc::new(crate::models::HuggingFaceSource::with_endpoint(
+            hf_cli,
+            hf_endpoint,
+        )));
 
         // HF Mirror — China-friendly CDN fronting the same HF
         // protocol. Registered with a distinct source id so the
@@ -969,23 +1001,22 @@ impl ServerState {
             .get("hf-mirror")
             .cloned()
             .or_else(|| Some("https://hf-mirror.com".to_string()));
-        source_registry.register(Arc::new(
-            crate::models::HuggingFaceSource::with_identity(
-                mirror_cli,
-                mirror_endpoint,
-                "hf-mirror",
-                "HF Mirror",
-            ),
-        ));
+        source_registry.register(Arc::new(crate::models::HuggingFaceSource::with_identity(
+            mirror_cli,
+            mirror_endpoint,
+            "hf-mirror",
+            "HF Mirror",
+        )));
 
         // Register ModelScope source
         let ms_cli = crate::config::env_var_result("MODELSCOPE_CLI")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|_| std::path::PathBuf::from("modelscope-cli"));
         let ms_endpoint = config.source_endpoints.get("modelscope").cloned();
-        source_registry.register(Arc::new(
-            crate::models::ModelScopeSource::with_endpoint(ms_cli, ms_endpoint),
-        ));
+        source_registry.register(Arc::new(crate::models::ModelScopeSource::with_endpoint(
+            ms_cli,
+            ms_endpoint,
+        )));
 
         let puller = Arc::new(crate::models::Puller::new(source_registry));
 
@@ -1000,10 +1031,9 @@ impl ServerState {
                     .unwrap_or_else(NeuronConfig::default_model_dir),
             )
         };
-        let catalog_sources =
-            Arc::new(crate::models::SourceRegistry::with_endpoints(
-                &config.source_endpoints,
-            ));
+        let catalog_sources = Arc::new(crate::models::SourceRegistry::with_endpoints(
+            &config.source_endpoints,
+        ));
         let catalog_config = crate::models::CatalogConfig::from_neuron_config(&config);
         let catalog = Arc::new(crate::models::Catalog::new(
             catalog_registry,
@@ -1040,8 +1070,9 @@ impl ServerState {
         };
         let memory_profiles = Arc::new(
             crate::scheduler::MemoryProfileStore::embedded().with_overrides_path(
-                crate::scheduler::default_overrides_path(&config.model_dirs)
-                    .unwrap_or_else(|| std::path::PathBuf::from("scheduler_observed_profiles.json")),
+                crate::scheduler::default_overrides_path(&config.model_dirs).unwrap_or_else(|| {
+                    std::path::PathBuf::from("scheduler_observed_profiles.json")
+                }),
             ),
         );
         let llm_unloader: Arc<dyn crate::scheduler::ModelUnload> = Arc::new(LlmUnloadHandle {
@@ -1091,9 +1122,13 @@ impl ServerState {
             engines: Arc::new(engines),
             adapters: {
                 let adapters = Arc::new(crate::adapter::registry::AdapterRegistry::new());
-                adapters.register(Arc::new(crate::adapter::openai_chat::OpenAiChatAdapter))
+                adapters
+                    .register(Arc::new(crate::adapter::openai_chat::OpenAiChatAdapter))
                     .expect("openai-chat adapter path conflict");
-                adapters.register(Arc::new(crate::adapter::anthropic_messages::AnthropicMessagesAdapter))
+                adapters
+                    .register(Arc::new(
+                        crate::adapter::anthropic_messages::AnthropicMessagesAdapter,
+                    ))
                     .expect("anthropic-messages adapter path conflict");
                 adapters
             },
@@ -1259,8 +1294,9 @@ impl ServerState {
         match capability {
             "llm" => {
                 let reg = self.llm_registry_lock.lock().await;
-                let impl_id = LlmImpl::parse(&engine)
-                    .map_err(|e| crate::llm::NeuronError::new(format!("Invalid LLM engine: {e}")))?;
+                let impl_id = LlmImpl::parse(&engine).map_err(|e| {
+                    crate::llm::NeuronError::new(format!("Invalid LLM engine: {e}"))
+                })?;
                 reg.register(
                     model_id,
                     impl_id,
@@ -1271,38 +1307,44 @@ impl ServerState {
             }
             "tts" => {
                 let reg = self.tts_registry_lock.lock().await;
-                let impl_id = crate::tts::TtsImpl::parse(&engine)
-                    .map_err(|e| crate::llm::NeuronError::new(format!("Invalid TTS engine: {e}")))?;
+                let impl_id = crate::tts::TtsImpl::parse(&engine).map_err(|e| {
+                    crate::llm::NeuronError::new(format!("Invalid TTS engine: {e}"))
+                })?;
                 reg.register(model_id, impl_id, device, required_memory_bytes)?;
             }
             "asr" => {
                 let reg = self.asr_registry_lock.lock().await;
-                let impl_id = crate::asr::AsrImpl::parse(&engine)
-                    .map_err(|e| crate::llm::NeuronError::new(format!("Invalid ASR engine: {e}")))?;
+                let impl_id = crate::asr::AsrImpl::parse(&engine).map_err(|e| {
+                    crate::llm::NeuronError::new(format!("Invalid ASR engine: {e}"))
+                })?;
                 reg.register(model_id, impl_id, device, required_memory_bytes)?;
             }
             "rerank" => {
                 let reg = self.rerank_registry_lock.lock().await;
-                let impl_id = crate::rerank::RerankImpl::parse(&engine)
-                    .map_err(|e| crate::llm::NeuronError::new(format!("Invalid rerank engine: {e}")))?;
+                let impl_id = crate::rerank::RerankImpl::parse(&engine).map_err(|e| {
+                    crate::llm::NeuronError::new(format!("Invalid rerank engine: {e}"))
+                })?;
                 reg.register(model_id, impl_id, device, required_memory_bytes)?;
             }
             "embedding" => {
                 let reg = self.embedding_registry_lock.lock().await;
-                let impl_id = crate::embedding::EmbeddingImpl::parse(&engine)
-                    .map_err(|e| crate::llm::NeuronError::new(format!("Invalid embedding engine: {e}")))?;
+                let impl_id = crate::embedding::EmbeddingImpl::parse(&engine).map_err(|e| {
+                    crate::llm::NeuronError::new(format!("Invalid embedding engine: {e}"))
+                })?;
                 reg.register(model_id, impl_id, device, required_memory_bytes)?;
             }
             "vision" => {
                 let reg = self.vision_registry_lock.lock().await;
-                let impl_id = crate::vision::VisionImpl::parse(&engine)
-                    .map_err(|e| crate::llm::NeuronError::new(format!("Invalid vision engine: {e}")))?;
+                let impl_id = crate::vision::VisionImpl::parse(&engine).map_err(|e| {
+                    crate::llm::NeuronError::new(format!("Invalid vision engine: {e}"))
+                })?;
                 reg.register(model_id, impl_id, device, required_memory_bytes)?;
             }
             "ocr" => {
                 let reg = self.ocr_registry_lock.lock().await;
-                let impl_id = crate::ocr::OcrImpl::parse(&engine)
-                    .map_err(|e| crate::llm::NeuronError::new(format!("Invalid OCR engine: {e}")))?;
+                let impl_id = crate::ocr::OcrImpl::parse(&engine).map_err(|e| {
+                    crate::llm::NeuronError::new(format!("Invalid OCR engine: {e}"))
+                })?;
                 reg.register(model_id, impl_id, device, required_memory_bytes)?;
             }
             "chronos2" => {
@@ -1313,10 +1355,9 @@ impl ServerState {
                 #[cfg(feature = "tract")]
                 {
                     let reg = self.decision_registry_lock.lock().await;
-                    let impl_id = crate::decision::DecisionImpl::parse(&engine)
-                        .map_err(|e| {
-                            crate::llm::NeuronError::new(format!("Invalid Decision engine: {e}"))
-                        })?;
+                    let impl_id = crate::decision::DecisionImpl::parse(&engine).map_err(|e| {
+                        crate::llm::NeuronError::new(format!("Invalid Decision engine: {e}"))
+                    })?;
                     let model_path = crate::decision::tract_session::resolve_model_dir(&model_id)
                         .map(|p| p.display().to_string())
                         .unwrap_or_default();
@@ -1332,8 +1373,9 @@ impl ServerState {
             }
             "imagegen" => {
                 let reg = self.imagegen_registry_lock.lock().await;
-                let impl_id = crate::imagegen::ImageGenImpl::parse(&engine)
-                    .map_err(|e| crate::llm::NeuronError::new(format!("Invalid imagegen engine: {e}")))?;
+                let impl_id = crate::imagegen::ImageGenImpl::parse(&engine).map_err(|e| {
+                    crate::llm::NeuronError::new(format!("Invalid imagegen engine: {e}"))
+                })?;
                 reg.register(model_id, impl_id, device, required_memory_bytes)?;
             }
             _ => {

@@ -4,9 +4,9 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use futures_util::stream::BoxStream;
 
-use super::{LlmRuntime, LlmImpl, ModelInfo, NeuronError, RegisteredLlm, RegistryKey};
+use super::{LlmImpl, LlmRuntime, ModelInfo, NeuronError, RegisteredLlm, RegistryKey};
 use crate::config::{DeviceSelection, NeuronConfig, ResourceTracker};
-use crate::llm::{ChatRequest, ChatResponse, ChatChunk};
+use crate::llm::{ChatChunk, ChatRequest, ChatResponse};
 
 /// **懒注册失败的两种形状**（2026-11-26 刀 16 续）—— 「盘上没这份模型」
 /// 与「**策略层拒了**」是**两件事** ⇒ ⇒ 混成一句 `Err` ⇒ ⇒ 调用方只能说
@@ -141,9 +141,8 @@ impl LlmRuntimeRegistry {
                 dtype: crate::accel::requested_dtype(),
                 flash_attn: crate::accel::requested_flash_attn(),
             };
-            let plan = crate::accel::plan_with(&caps, &candidate, &req).map_err(|e| {
-                TryRegisterDownloaded::Refused(format!("{model_id}: {e}"))
-            })?;
+            let plan = crate::accel::plan_with(caps, &candidate, &req)
+                .map_err(|e| TryRegisterDownloaded::Refused(format!("{model_id}: {e}")))?;
             return self
                 .register(
                     plan.model_id,
@@ -200,9 +199,7 @@ impl LlmRuntimeRegistry {
                 .iter()
                 .find(|r| r.model_id == model_id)
                 .cloned()
-                .ok_or_else(|| {
-                NeuronError::new(format!("ModelNotRegistered: {model_id}"))
-            })?
+                .ok_or_else(|| NeuronError::new(format!("ModelNotRegistered: {model_id}")))?
         };
 
         let key = RegistryKey {
@@ -244,9 +241,7 @@ impl LlmRuntimeRegistry {
             LlmImpl::Litert => {
                 let loaded = super::LitertLlmRuntime::load(&entry.model_id, &entry.device)
                     .await
-                    .map_err(|e| {
-                        NeuronError::new(format!("LitertLlmRuntime load failed: {e}"))
-                    })?;
+                    .map_err(|e| NeuronError::new(format!("LitertLlmRuntime load failed: {e}")))?;
                 Arc::from(loaded)
             }
             #[cfg(feature = "mistralrs")]
@@ -396,7 +391,10 @@ impl LlmRuntime for UnavailableLlmRuntime {
     async fn chat(&self, _: ChatRequest) -> crate::llm::ChatResult<ChatResponse> {
         Err(NeuronError::new(UNV_MSG))
     }
-    async fn chat_stream(&self, _: ChatRequest) -> crate::llm::ChatResult<BoxStream<'static, ChatChunk>> {
+    async fn chat_stream(
+        &self,
+        _: ChatRequest,
+    ) -> crate::llm::ChatResult<BoxStream<'static, ChatChunk>> {
         Err(NeuronError::new(UNV_MSG))
     }
     fn list_models(&self) -> Vec<ModelInfo> {
@@ -640,7 +638,9 @@ mod tests {
         let reg = LlmRuntimeRegistry::new(config);
 
         let err = match reg.runtime_for("dl-model").await {
-            Ok(_) => panic!("fake weights cannot load — but the error must not be ModelNotRegistered"),
+            Ok(_) => {
+                panic!("fake weights cannot load — but the error must not be ModelNotRegistered")
+            }
             Err(e) => e,
         };
         let msg = format!("{err}");
